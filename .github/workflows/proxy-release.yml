@@ -1,0 +1,217 @@
+name: Release Certified Gian Proxy Plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      certification_run_id:
+        description: Successful Proxy Release Certification workflow run ID
+        required: true
+        type: string
+      provider:
+        description: Proxy package releaseId from its package.json gianProxy metadata
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: proxy-release-${{ inputs.provider }}
+  cancel-in-progress: false
+
+jobs:
+  publish-certified-artifact:
+    if: github.repository == 'RichToyo/Gian'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Resolve and authenticate certification run
+        id: certification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.certification_run_id }}
+        shell: bash
+        run: |
+          RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          test "$(jq -r '.status' <<<"${RUN_JSON}")" = completed
+          test "$(jq -r '.conclusion' <<<"${RUN_JSON}")" = success
+          test "$(jq -r '.event' <<<"${RUN_JSON}")" = workflow_dispatch
+          test "$(jq -r '.path' <<<"${RUN_JSON}")" = .github/workflows/proxy-certification.yml
+          test "$(jq -r '.head_repository.full_name' <<<"${RUN_JSON}")" = "${GITHUB_REPOSITORY}"
+          RUN_SHA="$(jq -r '.head_sha' <<<"${RUN_JSON}")"
+          RUN_ATTEMPT="$(jq -r '.run_attempt' <<<"${RUN_JSON}")"
+          test -n "${RUN_SHA}"
+          test "${RUN_ATTEMPT}" -ge 1
+          echo "sha=${RUN_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "attempt=${RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+          echo "artifact=proxy-release-certification-${RUN_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out the certified revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.certification.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Require certified revision on main
+        run: git merge-base --is-ancestor "${{ steps.certification.outputs.sha }}" origin/main
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Scan publication source for public English
+        run: node scripts/check-public-english.mjs --ref "${{ steps.certification.outputs.sha }}"
+
+      - name: Install source dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download certification artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.certification_run_id }}
+          ARTIFACT_NAME: ${{ steps.certification.outputs.artifact }}
+        run: gh run download "${RUN_ID}" --name "${ARTIFACT_NAME}" --dir certification
+
+      - name: Resolve plugin metadata
+        id: plugin
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        shell: bash
+        run: |
+          METADATA="$(node scripts/proxy-release-metadata.mjs --provider "${PROVIDER}")"
+          echo "id=$(jq -r '.id' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.version' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+          echo "tag=$(jq -r '.tag' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+          echo "asset=$(jq -r '.asset' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify certificate and exact qualified artifacts
+        run: >-
+          node scripts/verify-proxy-release-certificate.mjs
+          --certificate certification/output/proxy-certification/release/certificate.json
+          --artifact-dir certification/artifacts/proxies
+          --revision "${{ steps.certification.outputs.sha }}"
+          --provider "${{ steps.plugin.outputs.id }}"
+          --version "${{ steps.plugin.outputs.version }}"
+          --run-id "${{ inputs.certification_run_id }}"
+          --run-attempt "${{ steps.certification.outputs.attempt }}"
+          --repository "${{ github.repository }}"
+
+      - name: Verify the certified managed Runtime artifact
+        env:
+          PROVIDER: ${{ steps.plugin.outputs.id }}
+        shell: bash
+        run: |
+          MANIFEST=certification/artifacts/runtimes/runtime-candidates.json
+          test -f "${MANIFEST}"
+          RUNTIME="$(jq -ce --arg provider "${PROVIDER}" '.candidates[] | select(.provider == $provider)' "${MANIFEST}")"
+          CERTIFIED_RUNTIME="$(jq -cSe --arg provider "${PROVIDER}" '.runtimeArtifacts[] | select(.provider == $provider)' certification/output/proxy-certification/release/certificate.json)"
+          test "$(jq -cS . <<<"${RUNTIME}")" = "${CERTIFIED_RUNTIME}"
+          ASSET="$(jq -r '.asset.name' <<<"${RUNTIME}")"
+          EXPECTED_SHA="$(jq -r '.asset.sha256' <<<"${RUNTIME}")"
+          EXPECTED_SIZE="$(jq -r '.asset.size' <<<"${RUNTIME}")"
+          test -f "certification/artifacts/runtimes/${ASSET}"
+          test "$(shasum -a 256 "certification/artifacts/runtimes/${ASSET}" | awk '{print $1}')" = "${EXPECTED_SHA}"
+          test "$(stat -f '%z' "certification/artifacts/runtimes/${ASSET}")" = "${EXPECTED_SIZE}"
+
+      - name: Require the authorized immutable release tag
+        env:
+          TAG: ${{ steps.plugin.outputs.tag }}
+          CERTIFIED_SHA: ${{ steps.certification.outputs.sha }}
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            test "$(git rev-list -n 1 "${TAG}")" = "${CERTIFIED_SHA}"
+          else
+            echo "::error::An authorized maintainer must create ${TAG} at ${CERTIFIED_SHA}."
+            exit 1
+          fi
+
+      - name: Publish only the certified Proxy artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plugin.outputs.tag }}
+          PROVIDER: ${{ steps.plugin.outputs.id }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+          ASSET: ${{ steps.plugin.outputs.asset }}
+        shell: bash
+        run: |
+          ASSET_DIR=certification/artifacts/proxies
+          RUNTIME_MANIFEST=certification/artifacts/runtimes/runtime-candidates.json
+          RUNTIME="$(jq -c --arg provider "${PROVIDER}" '[.candidates[] | select(.provider == $provider)][0] // null' "${RUNTIME_MANIFEST}")"
+          RUNTIME_NAME="$(jq -r 'if . then .asset.name else "" end' <<<"${RUNTIME}")"
+          RUNTIME_PUBLISH="$(jq -r 'if . then .asset.publish else false end' <<<"${RUNTIME}")"
+          RELEASE_ASSETS=(
+            "${ASSET_DIR}/${ASSET}"
+            "${ASSET_DIR}/${ASSET}.sha256"
+            "${ASSET_DIR}/${ASSET}.manifest.json"
+          )
+          if [ "${RUNTIME_PUBLISH}" = true ]; then
+            RELEASE_ASSETS+=("certification/artifacts/runtimes/${RUNTIME_NAME}")
+          fi
+
+          validate_existing_release() {
+            local release_json path name expected_size expected_digest
+            release_json="$(gh release view "${TAG}" --json tagName,isDraft,isPrerelease,assets 2>/dev/null)" || return 1
+            test "$(jq -r '.tagName' <<<"${release_json}")" = "${TAG}" || return 1
+            test "$(jq -r '.isDraft' <<<"${release_json}")" = false || return 1
+            test "$(jq -r '.isPrerelease' <<<"${release_json}")" = false || return 1
+            test "$(jq '.assets | length' <<<"${release_json}")" -eq "${#RELEASE_ASSETS[@]}" || return 1
+            for path in "${RELEASE_ASSETS[@]}"; do
+              name="${path##*/}"
+              expected_size="$(stat -f '%z' "${path}")"
+              expected_digest="sha256:$(shasum -a 256 "${path}" | awk '{print $1}')"
+              jq -e \
+                --arg name "${name}" \
+                --argjson size "${expected_size}" \
+                --arg digest "${expected_digest}" \
+                '[.assets[] | select(.name == $name and .size == $size and .digest == $digest)] | length == 1' \
+                <<<"${release_json}" >/dev/null || return 1
+            done
+          }
+
+          if validate_existing_release; then
+            echo "${TAG} already contains the exact certified assets."
+            exit 0
+          fi
+          for ATTEMPT in 1 2 3; do
+            if gh release create "${TAG}" \
+              "${RELEASE_ASSETS[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --latest=false \
+              --title "Gian ${PROVIDER} Proxy ${VERSION}"; then
+              validate_existing_release
+              exit $?
+            fi
+            if validate_existing_release; then exit 0; fi
+            if [ "${ATTEMPT}" -eq 3 ]; then exit 1; fi
+            sleep $((ATTEMPT * 5))
+          done
+
+      # Proxy bundles share the App's releases feed. --latest=false only skips
+      # the explicit marker; with no published full App release holding it,
+      # GitHub's fallback makes the newest Proxy release /releases/latest and
+      # electron-updater 404s on its missing latest-mac.yml. Re-pin the newest
+      # published full App release after every Proxy publish (idempotent).
+      - name: Restore the App latest-release marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          APP_TAG="$(gh api 'repos/${{ github.repository }}/releases?per_page=100' \
+            --jq '[.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))] | .[0].tag_name // empty')"
+          if [ -z "${APP_TAG}" ]; then
+            echo "No published full App release yet; the update feed stays empty until the first App promotion."
+            exit 0
+          fi
+          gh release edit "${APP_TAG}" --latest
+          test "$(gh api 'repos/${{ github.repository }}/releases/latest' --jq '.tag_name')" = "${APP_TAG}"

@@ -1,0 +1,3117 @@
+import { loadConfig } from '../storage/config.js';
+import { compactHistoryEnvelopes } from './history-store.js';
+import { DEFAULT_TRANSLATION_PREFERENCES } from '@gian/shared';
+import type {
+  ApprovalMode,
+  AttentionInboxRef,
+  AgentProxyDefaults,
+  SessionRuntimeProfile,
+  ConfigOption,
+  ConfigValue,
+  Executor,
+  ExecutorConfigState,
+  EventEnvelope,
+  NativeConfigOption,
+  NativeConfigValue,
+  MessageContextItem,
+  ResolvedProxyCatalog,
+  Session,
+  ChatEvent,
+  ComposerDocument,
+  TraceSnapshot,
+  UserAgent,
+} from '@gian/shared';
+import { isApprovalMode, sessionRuntimeCliPath, resolvePluginIdInput } from '@gian/shared';
+import type { SessionBindingPlanner } from './binding-planner.js';
+import { agentMatchesSessionKind, pluginIdForSessionIdentity } from './compatibility-executor.js';
+import { existsSync } from 'node:fs';
+import { ensureSessionAttachmentDir, purgeSessionAttachments } from '../storage/attachments.js';
+import type { Db } from '../storage/db.js';
+import type { ProxyManager } from '../proxy/manager.js';
+import { normalizeProtocolCatalog } from '../proxy/protocol-v2-session-client.js';
+import type { WsBroadcaster } from '../web/ws-broadcast.js';
+import type { ApprovalManager } from '../approval/index.js';
+import type { SessionInboxAdapter } from '../inbox/session-adapter.js';
+import type { QueueManager } from '../queue/index.js';
+import type { NativeJsonlWatcher } from '../native/watcher.js';
+import { locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
+import { createHash, randomUUID } from 'node:crypto';
+import type { GianSessionHostServiceIssuer } from '../tool/session-host-services.js';
+import { advertisedTurnValue } from './advertised-turn-value.js';
+import { resolveSendCatalog } from './resolve-send-catalog.js';
+import { SessionRepository } from './repository.js';
+import type { RemoteControllerHub } from '../remote/controller-hub.js';
+import { localRemoteTurnId } from '../remote/execution-journal.js';
+import { SessionHistoryStore, type EventHistoryPage } from './history-store.js';
+import { TraceEvidenceStore } from '../trace/evidence-store.js';
+import { projectTraceSnapshot } from '../trace/projector.js';
+import { TurnRuntime } from './turn-runtime.js';
+import {
+  SessionLifecycleService,
+  type CreateSessionInput,
+} from './lifecycle-service.js';
+import {
+  ProxySessionCoordinator,
+  catalogChoiceDowngradeWarning,
+  droppedCatalogChoice,
+} from './proxy-session-coordinator.js';
+import { SessionEventCoordinator } from './event-coordinator.js';
+import type { AttentionDispatcher } from './attention.js';
+import { AutoTitleService } from './auto-title.js';
+import {
+  SidechatCoordinator,
+  newForkSessionId,
+} from './sidechat-coordinator.js';
+import { SidechatTransientStore } from './sidechat-store.js';
+import { assertInheritedSessionConfig, nextForkSessionName, resolveForkAnchor } from './fork.js';
+import { requestViolation } from '@gian/proxy-protocol';
+import type { ProtocolV2SessionClient } from '../proxy/protocol-v2-session-client.js';
+import type {
+  SessionForkFromInput,
+  SessionForkFromResult,
+  SessionOrigin,
+  SideChatPublicSnapshot,
+  SidechatCloseResult,
+} from '@gian/shared';
+import { SubtaskLifecycle } from './subtask-lifecycle.js';
+import type {
+  DeliveryLifecycleSink,
+  SendQueuedNowReceipt,
+  SteerReceipt,
+} from './delivery-lifecycle.js';
+export type { SendQueuedNowReceipt, SteerReceipt } from './delivery-lifecycle.js';
+import { NativeSessionService } from './native-session-service.js';
+import {
+  assertLocalFilesBelongToSession,
+  buildAttachmentsFromItems,
+  translateItemsForExecutor,
+} from './input-items.js';
+import {
+  compileContextIntoInput,
+  normalizeMessageComposerDocument,
+  normalizeMessageContextItems,
+  type SessionTranscriptSlice,
+} from './context-items.js';
+export type { CreateSessionInput } from './lifecycle-service.js';
+
+const PROXY_CLOSE_TIMEOUT_MS = 5_000;
+
+/** Resolves which (kind, CLI path) runtime a session or kind maps to. The
+ *  Host wires this from AgentManager; tests may omit it (provider default). */
+/** Stable origin metadata attached to a scheduled prompt's user_message
+ *  event (contract F): lets Web render "sent by a schedule" and lets the
+ *  schedule dispatcher/recovery locate the Turn from canonical evidence. */
+export interface ScheduledTaskOrigin {
+  scheduleId: string;
+  runId: string;
+  scheduleName: string;
+}
+
+export interface SessionAgentResolver {
+  /** Resolved CLI path of the kind's default (first saved) Agent. */
+  cliPathForKind(executor: Executor): string | null;
+  /** Resolved CLI path of the session's owning Agent. Tolerant: null when
+   *  the Agent was deleted (read paths keep working from snapshots). */
+  cliPathForSession(session: Session): string | null;
+  /** Strict: throws AGENT_DELETED when the session's Agent was deleted —
+   *  turn/runtime paths fail closed for deleted Agents. */
+  requireCliPathForSession(session: Session): string | null;
+  /** The saved Agent and its runtime CLI path; throws when the id is
+   *  unknown (deleted Agents cannot start new sessions). */
+  agentRuntime(agentId: string): { agent: UserAgent; cliPath: string | null };
+  agentRuntimeProfile(agentId: string): Promise<SessionRuntimeProfile | null>;
+  /** Saved Agents of one Proxy kind (native adopt binds one explicitly). */
+  agentsForKind(executor: Executor): UserAgent[];
+}
+
+function assertSessionAcceptsInput(session: Session): void {
+  if (session.completed_at) {
+    throw new Error('session is completed; reopen it before sending more messages');
+  }
+}
+
+function configConditionsMatch(
+  conditions: ConfigOption['visibleWhen'] | ConfigOption['enabledWhen'],
+  values: Record<string, ConfigValue>,
+): boolean {
+  return (conditions ?? []).every((condition) => (
+    condition.oneOf.some((candidate) => Object.is(candidate, values[condition.optionId]))
+  ));
+}
+
+/**
+ * Bridges WebSocket commands and the proxy layer. Persists sessions, turns,
+ * events; subscribes to proxy notifications and broadcasts them to the web
+ * client.
+ *
+ * Every proxy notification keeps its provider-native method and payload.
+ * Provider adapters attach only an optional UI display projection; events
+ * without a current UI mapping remain available in DB/WS for diagnostics.
+ */
+export class SessionManager {
+  private translations?: import('../translation/service.js').TranslationService;
+  setTranslationService(service: import('../translation/service.js').TranslationService): void {
+    this.translations = service;
+    this.remoteController?.setTranslationService(service, (id, turn) => { void this.translateCompletedTurn(id, turn); });
+  }
+  private remoteController: RemoteControllerHub | null = null;
+  private sessionInbox: SessionInboxAdapter | null = null;
+
+  setSessionInbox(inbox: SessionInboxAdapter | null): void {
+    const previous = this.sessionInbox;
+    this.sessionInbox = inbox;
+    this.approvals.setSessionInbox(inbox);
+    if (previous && previous !== inbox) previous.dispose();
+  }
+
+  private attachmentPurge: (sessionId: string) => Promise<void> | void = purgeSessionAttachments;
+
+  /** Test seam. Production keeps the attachment purge that follows a committed delete. */
+  setSessionAttachmentPurge(purge: (sessionId: string) => Promise<void> | void): void {
+    this.attachmentPurge = purge;
+  }
+
+  setRemoteController(controller: RemoteControllerHub): void {
+    this.remoteController = controller;
+    if (this.translations) controller.setTranslationService(this.translations, (id, turn) => { void this.translateCompletedTurn(id, turn); });
+  }
+
+  remoteSnapshot(sessionId: string) { return this.remoteController?.owns(sessionId) ? this.remoteController.replicas.snapshot(sessionId) : null; }
+
+  async remoteCommand(sessionId: string, method: import('@gian/remote-protocol').RemoteMethod, params: Record<string, unknown>) {
+    if (!this.remoteController?.owns(sessionId)) throw new Error('remote Session required');
+    return this.remoteController.command(sessionId, method, params);
+  }
+
+  async sendRemoteForTool(sessionId: string, input: Parameters<RemoteControllerHub['sendForTool']>[1], requestId: string,
+    busy?: 'queue' | 'steer' | 'fail') {
+    if (!this.remoteController?.owns(sessionId)) throw new Error('remote Session required');
+    return this.remoteController.sendForTool(sessionId, input, requestId, busy);
+  }
+  private sessions: SessionRepository;
+  private history: SessionHistoryStore;
+  private turns: TurnRuntime;
+  private lifecycle: SessionLifecycleService;
+  private proxySessions: ProxySessionCoordinator;
+  private autoTitle: AutoTitleService;
+  private events: SessionEventCoordinator;
+  private subtasks: SubtaskLifecycle;
+  private nativeSessions: NativeSessionService;
+  private traceEvidence: TraceEvidenceStore;
+  /** Response idempotency ids keyed by host session + the original interaction id. */
+  private readonly interactionResponseIds = new Map<string, string>();
+  private readonly sidechats: SidechatCoordinator;
+  private deliveryLifecycle: DeliveryLifecycleSink | null = null;
+
+  constructor(
+    private db: Db,
+    private proxy: ProxyManager,
+    private broadcaster: WsBroadcaster,
+    private approvals: ApprovalManager,
+    private queue: QueueManager,
+    private dataDir: string,
+    /** Live Sync v2 — when present, host mirrors external CLI appends into
+     *  events + WS for each active session. Optional so tests can omit. */
+    private watcher: NativeJsonlWatcher | null = null,
+    private proxyDefaults?: (executor: Executor) => AgentProxyDefaults | undefined,
+    attention?: AttentionDispatcher,
+    private agentResolver?: SessionAgentResolver,
+    hostServices?: GianSessionHostServiceIssuer,
+    private bindingPlanner?: SessionBindingPlanner,
+  ) {
+    this.sessions = new SessionRepository(db);
+    this.history = new SessionHistoryStore(db);
+    this.traceEvidence = new TraceEvidenceStore(db);
+    this.turns = new TurnRuntime(db, this.history);
+    this.sidechats = new SidechatCoordinator(
+      new SidechatTransientStore(db),
+      proxy,
+      broadcaster,
+    );
+    this.proxySessions = new ProxySessionCoordinator(
+      db,
+      proxy,
+      this.sessions,
+      this.history,
+      watcher,
+      {
+        onNotification: (sessionId, notification) => this.events.handleNotification(sessionId, notification),
+        onExit: (sessionId, code) => this.events.handleProxyExit(sessionId, code),
+        onSessionFault: (sessionId, error) => this.events.handleSessionFault(sessionId, error),
+        onSessionUpdated: (sessionId, partial) => this.broadcastSessionUpdated(sessionId, partial),
+        onAttached: (sessionId) => {
+          void this.sidechats.recoverForParent(sessionId).catch((error) => {
+            console.error(`[sidechat] recover failed for ${sessionId}: ${String(error)}`);
+          });
+        },
+      },
+      this.dataDir,
+      (executor, session) => (
+        session
+          ? this.agentResolver?.requireCliPathForSession(session)
+          : this.agentResolver?.cliPathForKind(executor)
+      ) ?? null,
+      hostServices,
+      bindingPlanner,
+    );
+    this.autoTitle = new AutoTitleService({
+      db,
+      sessions: this.sessions,
+      history: this.history,
+      proxy,
+      rename: (sessionId, name) => this.renameSession(sessionId, name),
+      ...(agentResolver
+        ? { cliPathForSession: session => agentResolver.cliPathForSession(session) }
+        : {}),
+    });
+    this.events = new SessionEventCoordinator(
+      db,
+      this.sessions,
+      this.history,
+      this.turns,
+      broadcaster,
+      approvals,
+      queue,
+      watcher,
+      this.proxySessions,
+      this.autoTitle,
+      {
+        sendMessage: (sessionId, text, items, toolRequestId, contextItems, composerDocument) => (
+          this.sendMessage(
+            sessionId,
+            text,
+            items,
+            undefined,
+            toolRequestId,
+            contextItems,
+            composerDocument,
+          )
+        ),
+        onTurnCompleted: (sessionId, turn) => { void this.translateCompletedTurn(sessionId, turn); },
+        onInteractionResolved: (sessionId, interactionId, turnId) => {
+          this.interactionResponseIds.delete(this.interactionResponseKey(sessionId, interactionId, turnId));
+        },
+        onSessionApprovalsCleared: (sessionId) => {
+          this.forgetSessionInteractionResponses(sessionId);
+        },
+      },
+      attention,
+    );
+    this.subtasks = new SubtaskLifecycle(db, this.sessions, {
+      broadcastUpdated: (sessionId, partial) => this.broadcastSessionUpdated(sessionId, partial),
+    });
+    this.nativeSessions = new NativeSessionService(
+      db,
+      proxy,
+      this.proxySessions,
+      this.sessions,
+      broadcaster,
+      {
+        persistKimiReplay: (sessionId, updates, timestamp, replayStreamId) =>
+          this.persistKimiReplay(sessionId, updates, timestamp, replayStreamId),
+      },
+      agentResolver ? executor => agentResolver.cliPathForKind(executor) : undefined,
+      bindingPlanner,
+    );
+    this.lifecycle = new SessionLifecycleService(
+      db,
+      this.sessions,
+      approvals,
+      broadcaster,
+      {
+        bringUpProxySession: input => this.proxySessions.bringUp({
+          ...input,
+          cliPath: input.cliPath ?? this.agentResolver?.cliPathForKind(input.executor) ?? null,
+        }),
+        discardProxy: async sessionId => {
+          await this.proxySessions.dispose(sessionId);
+          this.sessions.forget(sessionId);
+        },
+        teardownProxy: sessionId => this.teardownProxy(sessionId),
+        forgetConversationUsage: sessionId => {
+          this.events.forgetConversationUsage(sessionId);
+        },
+        activateHostServices: sessionId => this.proxySessions.activateHostServices(sessionId),
+        purgeAttachments: sessionId => this.attachmentPurge(sessionId),
+      },
+      executor => this.proxyDefaults?.(executor),
+      agentResolver
+        ? async agentId => ({
+            ...agentResolver.agentRuntime(agentId),
+            runtimeProfile: await agentResolver.agentRuntimeProfile(agentId),
+          })
+        : undefined,
+      bindingPlanner,
+    );
+  }
+
+  async createSession(input: CreateSessionInput): Promise<Session> {
+    return this.lifecycle.create(input);
+  }
+
+  listSidechats(): SideChatPublicSnapshot[] {
+    return this.sidechats.listPublic();
+  }
+
+  async createSidechat(parentSessionId: string, sidechatId?: string): Promise<SideChatPublicSnapshot> {
+    if (this.remoteController?.owns(parentSessionId)) throw new Error('Side Chat is unavailable for remote execution');
+    const parent = this.sessions.get(parentSessionId);
+    await this.proxySessions.ensure(parent);
+    await this.sidechats.recoverForParent(parentSessionId);
+    const catalog = this.proxySessions.getCapabilities(
+      parent.executor,
+      this.agentResolver?.cliPathForSession(parent),
+      parent.runtime_profile?.configHome,
+    );
+    const turnOptions = (parent.turn_config_options ?? catalog?.configOptions ?? [])
+      .filter((option) => option.binding === 'turn');
+    const turnRevision = parent.turn_config_options !== undefined
+      ? parent.turn_config_revision ?? catalog?.catalogRevision ?? null
+      : catalog?.catalogRevision ?? null;
+    return this.sidechats.create(parent, turnOptions, turnRevision, sidechatId);
+  }
+
+  async resumeSidechat(sidechatId: string, parentSessionId: string): Promise<SideChatPublicSnapshot> {
+    if (this.remoteController?.owns(parentSessionId)) throw new Error('Side Chat is unavailable for remote execution');
+    const parent = this.sessions.get(parentSessionId);
+    await this.proxySessions.ensure(parent);
+    await this.sidechats.recoverForParent(parentSessionId);
+    return this.sidechats.resume(sidechatId, parentSessionId);
+  }
+
+  async closeSidechat(sidechatId: string): Promise<SidechatCloseResult> {
+    return this.sidechats.close(sidechatId);
+  }
+
+  setSidechatTurnConfigValue(
+    sidechatId: string,
+    optionId: string,
+    value: ConfigValue,
+  ): SideChatPublicSnapshot {
+    return this.sidechats.setTurnConfigValue(sidechatId, optionId, value);
+  }
+
+  async forkSession(input: SessionForkFromInput): Promise<SessionForkFromResult> {
+    if (this.sidechats.has(input.sourceSessionId)) {
+      throw requestViolation('SESSION_NOT_FOUND', 'Side Chat cannot be a Fork source');
+    }
+    const source = this.sessions.get(input.sourceSessionId);
+    await this.proxySessions.ensure(source);
+    const client = this.proxy.get(source.id);
+    if (!client || !isV2Client(client) || !client.forkSession) {
+      throw requestViolation('CAPABILITY_NOT_SUPPORTED', 'Parent Session has no session.fork Proxy');
+    }
+    const initialized = await client.initialize();
+    if (initialized.capabilities['session.fork'] === undefined) {
+      throw requestViolation('CAPABILITY_NOT_SUPPORTED', 'session.fork is not advertised');
+    }
+    if (input.anchor.type === 'turn' && initialized.capabilities['session.fork.atTurn'] === undefined) {
+      throw requestViolation('CAPABILITY_NOT_SUPPORTED', 'session.fork.atTurn is not advertised');
+    }
+    const sourceStreamId = client.streamId();
+    if (!sourceStreamId) {
+      throw requestViolation('SESSION_STALE', 'Source Session has no active attach generation');
+    }
+    const sessionId = input.sessionId ?? newForkSessionId();
+    const published = this.sessions.find(sessionId);
+    if (published) {
+      const identity = this.readForkRequestIdentity(sessionId);
+      if (!isPublishedForkIdentity(published, identity, source.id, sourceStreamId, input.anchor)) {
+        throw requestViolation('CONFLICT', 'sessionId already belongs to a different Session');
+      }
+      return { sessionId, origin: published.origin! };
+    }
+
+    const catalog = await client.catalog();
+    const inherited = assertInheritedSessionConfig(catalog.configOptions, source.executor_config.values);
+    const resolved = resolveForkAnchor(this.db, source.id, input.anchor.type === 'head'
+      ? { type: 'head' }
+      : { type: 'turn', turnId: input.anchor.turnId, sourceTurnId: input.anchor.sourceTurnId });
+    const protocolAnchor = input.anchor.type === 'head'
+      ? { type: 'head' as const }
+      : { type: 'turn' as const, turnId: resolved.turnId, sourceTurnId: resolved.sourceTurnId };
+
+    const hostServiceLease = source.executor === 'codex'
+      && initialized.capabilities['integration.mcp.streamableHttp'] !== undefined
+      && this.proxySessions.canProvideHostServices()
+      ? this.proxySessions.prepareHostServices({
+          sessionId,
+          agentId: source.agent_id ?? null,
+          workspaceId: source.workspace_id,
+          taskId: source.task_id ?? null,
+          role: 'admin',
+        }, true)
+      : null;
+    let forked;
+    try {
+      forked = await client.forkSession({
+        sessionId,
+        anchor: protocolAnchor,
+        ...(hostServiceLease ? { hostServices: [hostServiceLease.descriptor] } : {}),
+      });
+    } catch (error) {
+      this.proxySessions.revokeHostServices(sessionId);
+      throw error;
+    }
+    const nativeSessionId = providerNativeSessionId(forked.session);
+    const origin: SessionOrigin = {
+      kind: 'fork',
+      session_id: forked.origin.sessionId,
+      turn_id: forked.origin.turnId,
+      source_turn_id: forked.origin.sourceTurnId,
+    };
+    if (
+      origin.session_id !== source.id
+      || origin.turn_id !== resolved.turnId
+      || origin.source_turn_id !== resolved.sourceTurnId
+    ) {
+      const mismatch = requestViolation('INTERNAL', 'session.fork origin did not match the Host anchor');
+      this.proxySessions.revokeHostServices(sessionId);
+      throwIfForkLeftovers(await this.abandonForkChild(client, sessionId, nativeSessionId), mismatch);
+      throw mismatch;
+    }
+    if (!nativeSessionId) {
+      this.proxySessions.revokeHostServices(sessionId);
+      throwIfForkLeftovers(await this.abandonForkChild(client, sessionId, null));
+      throw requestViolation('INTERNAL', 'session.fork Result omitted durable nativeSession');
+    }
+
+    const now = new Date().toISOString();
+    try {
+      this.adoptForkChild(client, sessionId);
+      const publish = this.db.transaction(() => {
+        this.db.prepare(
+          `INSERT INTO sessions
+            (id, name, type, task_id, workspace_id, executor,
+             proxy_plugin_id, proxy_binding_json,
+             agent_id, agent_name,
+             runtime_profile_json,
+             model, approval_mode,
+             executor_config_json, thinking_effort, service_tier, active_channel, status,
+             archived, hidden, worktree_path, branch, base_branch, worktree_outcome,
+             native_session_id, fork_from_session_id, conversation_usage_complete,
+             turn_config_json, turn_config_options_json, turn_config_revision,
+             origin_kind, origin_session_id, origin_turn_id, origin_source_turn_id,
+             origin_source_stream_id, origin_anchor_type,
+             available_actions_json, created_at, updated_at)
+           VALUES
+            (@id, @name, @type, @task_id, @workspace_id, @executor,
+             @proxy_plugin_id, @proxy_binding_json,
+             @agent_id, @agent_name,
+             @runtime_profile_json,
+             @model,
+             @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
+             0, @hidden, @worktree_path, @branch, @base_branch, NULL, @native_session_id,
+             NULL, 1,
+             @turn_config_json, @turn_config_options_json, @turn_config_revision,
+             'fork', @origin_session_id, @origin_turn_id, @origin_source_turn_id,
+             @origin_source_stream_id, @origin_anchor_type,
+             @available_actions_json, @now, @now)`,
+        ).run({
+          id: sessionId,
+          name: input.hidden
+            ? (input.name ?? nextForkSessionName(this.db, source))
+            : nextForkSessionName(this.db, source),
+          type: source.type,
+          // Hidden schedule Forks never enter Task/Subtask listings.
+          task_id: input.hidden ? null : source.task_id,
+          hidden: input.hidden ? 1 : 0,
+          workspace_id: source.workspace_id,
+          executor: source.executor,
+          proxy_plugin_id: pluginIdForSessionIdentity({
+            pluginId: source.proxy_plugin_id,
+            executor: source.executor,
+          }),
+          proxy_binding_json: source.proxy_binding
+            ? JSON.stringify(source.proxy_binding)
+            : null,
+          agent_id: source.agent_id ?? null,
+          agent_name: source.agent_name ?? null,
+          runtime_profile_json: source.runtime_profile
+            ? JSON.stringify(source.runtime_profile)
+            : null,
+          model: source.model,
+          approval_mode: source.approval_mode,
+          executor_config_json: JSON.stringify({ schemaVersion: 1, values: inherited }),
+          thinking_effort: source.thinking_effort,
+          service_tier: source.service_tier,
+          worktree_path: source.worktree_path,
+          branch: source.branch,
+          base_branch: source.base_branch,
+          native_session_id: nativeSessionId,
+          turn_config_json: JSON.stringify(input.turnConfig ?? source.turn_config ?? {}),
+          turn_config_options_json: source.turn_config_options
+            ? JSON.stringify(source.turn_config_options)
+            : null,
+          turn_config_revision: source.turn_config_revision ?? null,
+          origin_session_id: origin.session_id,
+          origin_turn_id: origin.turn_id,
+          origin_source_turn_id: origin.source_turn_id,
+          origin_source_stream_id: sourceStreamId,
+          origin_anchor_type: input.anchor.type,
+          available_actions_json: forked.session.availableActions
+            ? JSON.stringify(forked.session.availableActions)
+            : null,
+          now,
+        });
+        this.proxySessions.activateHostServices(sessionId);
+        if (forked.replayEvents?.length) {
+          this.persistKimiReplay(
+            sessionId,
+            forked.replayEvents,
+            now,
+            'replayStreamId' in forked ? forked.replayStreamId : undefined,
+          );
+        }
+      });
+      publish();
+    } catch (error) {
+      const raced = this.sessions.find(sessionId);
+      const racedIdentity = raced ? this.readForkRequestIdentity(sessionId) : null;
+      if (raced && isPublishedForkIdentity(
+        raced,
+        racedIdentity,
+        source.id,
+        sourceStreamId,
+        input.anchor,
+      )) {
+        return { sessionId, origin: raced.origin! };
+      }
+      this.proxySessions.revokeHostServices(sessionId);
+      throwIfForkLeftovers(await this.abandonForkChild(client, sessionId, nativeSessionId), error);
+      if (raced) {
+        throw requestViolation('CONFLICT', 'sessionId already belongs to a different Session');
+      }
+      throw error;
+    }
+
+    this.sessions.setNativeOptions(sessionId, source.native_config_options ?? []);
+    const session = this.sessions.get(sessionId);
+    // Hidden schedule Forks never appear in the rail: no session:created
+    // broadcast and no native session-list rename (contract G/H).
+    if (!input.hidden) {
+      this.broadcaster.broadcast({
+        type: 'session:created',
+        session,
+        origin: 'session-fork',
+      });
+      if (session.name) {
+        void this.applyNativeSessionName(sessionId, session.name).catch(err => {
+          console.warn(`[session] fork native name sync failed for ${sessionId}: ${String(err)}`);
+        });
+      }
+    }
+    return { sessionId, origin };
+  }
+
+  async listKimiNativeSessions(cwd: string): Promise<import('@gian/shared').NativeSession[]> {
+    return this.nativeSessions.listKimi(cwd);
+  }
+
+  async listPluginNativeSessions(
+    executor: Executor,
+    cwd: string,
+  ): Promise<import('@gian/shared').NativeSession[] | null> {
+    return this.nativeSessions.listPlugin(executor, cwd);
+  }
+
+  async adoptKimiNativeSession(input: {
+    workspaceId: string;
+    cwd: string;
+    nativeSessionId: string;
+    name?: string;
+    agentId?: string;
+  }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
+    const binding = await this.resolveAdoptAgent('kimi', input.agentId);
+    return this.nativeSessions.adoptKimi({ ...input, ...binding });
+  }
+
+  async deletePluginNativeSession(
+    executor: Executor,
+    nativeSessionId: string,
+    cwd: string,
+  ): Promise<void> {
+    return this.nativeSessions.deletePluginNativeSession(executor, nativeSessionId, cwd);
+  }
+
+  async adoptPluginNativeSession(input: {
+    workspaceId: string;
+    cwd: string;
+    executor: Executor;
+    nativeSessionId: string;
+    name?: string;
+    approvalMode?: ApprovalMode;
+    agentId?: string;
+  }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
+    const binding = await this.resolveAdoptAgent(input.executor, input.agentId);
+    return this.nativeSessions.adopt({ ...input, ...binding });
+  }
+
+  /** Bind an adopted native session to its Agent. `AGENT_REQUIRED` when the
+   *  kind has several saved Agents and the caller did not choose one —
+   *  never silently bind the first. */
+  async resolveAdoptAgent(
+    executor: Executor,
+    agentId?: string,
+  ): Promise<{
+    agentId: string | null;
+    agentName: string | null;
+    cliPath: string | null;
+    runtimeProfile: SessionRuntimeProfile | null;
+    agent?: UserAgent;
+  }> {
+    const none = { agentId: null, agentName: null, cliPath: null, runtimeProfile: null };
+    if (!this.agentResolver) {
+      if (this.bindingPlanner) {
+        throw Object.assign(
+          new Error(`choose an Agent for this ${executor} session`),
+          { code: 'AGENT_REQUIRED', agents: [] },
+        );
+      }
+      return none;
+    }
+    if (agentId !== undefined) {
+      const { agent, cliPath } = this.agentResolver.agentRuntime(agentId);
+      if (agent.enabled === false) {
+        throw new Error(`agent is disabled: ${agentId}`);
+      }
+      const matches = agentMatchesSessionKind(agent, executor);
+      if (!matches) {
+        throw new Error(`agent ${agentId} is a ${agent.proxy ?? agent.pluginId} Agent, not ${executor}`);
+      }
+      const runtimeProfile = await this.agentResolver.agentRuntimeProfile(agent.id);
+      return {
+        agentId: agent.id,
+        agentName: agent.name,
+        cliPath: sessionRuntimeCliPath(runtimeProfile) ?? cliPath,
+        runtimeProfile,
+        agent,
+      };
+    }
+    const candidates = this.agentResolver.agentsForKind(executor)
+      .filter(agent => agent.enabled !== false);
+    if (candidates.length > 1 || (candidates.length === 0 && this.bindingPlanner)) {
+      throw Object.assign(
+        new Error(`choose an Agent for this ${executor} session`),
+        {
+          code: 'AGENT_REQUIRED',
+          agents: candidates.map(agent => ({ id: agent.id, name: agent.name })),
+        },
+      );
+    }
+    const only = candidates[0];
+    if (!only) return none;
+    const runtimeProfile = await this.agentResolver.agentRuntimeProfile(only.id);
+    return {
+      agentId: only.id,
+      agentName: only.name,
+      cliPath: sessionRuntimeCliPath(runtimeProfile) ?? this.agentResolver.agentRuntime(only.id).cliPath,
+      runtimeProfile,
+      agent: only,
+    };
+  }
+
+  /** Saved Agents of one Proxy kind (native adopt chooser). */
+  agentsForExecutor(executor: Executor): UserAgent[] {
+    return this.agentResolver?.agentsForKind(executor) ?? [];
+  }
+
+  /** Replace the missing Agent identity on a historical Session without
+   * changing its native Session id, exact Runtime binding, or HOME snapshot. */
+  rebindDeletedAgent(sessionId: string, agentId: string): Session {
+    this.assertOrdinarySession(sessionId);
+    const session = this.getSession(sessionId);
+    if (!session.agent_id || !this.agentResolver) {
+      throw Object.assign(
+        new Error('This session is not bound to a deleted Agent.'),
+        { code: 'SESSION_AGENT_NOT_DELETED' },
+      );
+    }
+
+    let currentAgent: ReturnType<SessionAgentResolver['agentRuntime']> | null = null;
+    try {
+      currentAgent = this.agentResolver.agentRuntime(session.agent_id);
+    } catch {
+      // The only repairable state is an Agent id no longer present in agents.json.
+    }
+    // A retry after an uncertain HTTP outcome is a safe no-op.
+    if (currentAgent?.agent.id === agentId) return session;
+    if (currentAgent) {
+      throw Object.assign(
+        new Error('This session\'s Agent still exists.'),
+        { code: 'SESSION_AGENT_NOT_DELETED' },
+      );
+    }
+    if (this.hasRunningTurn(sessionId) || this.db.prepare(
+      'SELECT 1 FROM proxy_interactions WHERE session_id = ? AND outcome IS NULL LIMIT 1',
+    ).get(sessionId)) {
+      throw Object.assign(
+        new Error('Wait for the active Turn or Interaction before changing the Agent.'),
+        { code: 'SESSION_AGENT_REBIND_BUSY' },
+      );
+    }
+
+    let replacement: ReturnType<SessionAgentResolver['agentRuntime']>;
+    try {
+      replacement = this.agentResolver.agentRuntime(agentId);
+    } catch {
+      throw Object.assign(
+        new Error(`agent not found: ${agentId}`),
+        { code: 'AGENT_NOT_FOUND' },
+      );
+    }
+    const pluginId = pluginIdForSessionIdentity({
+      pluginId: session.proxy_plugin_id,
+      executor: session.executor,
+    });
+    if (replacement.agent.pluginId !== pluginId) {
+      throw Object.assign(
+        new Error(`Choose an Agent that uses the same Proxy (${pluginId}).`),
+        { code: 'AGENT_PROXY_MISMATCH' },
+      );
+    }
+
+    const now = new Date().toISOString();
+    const changed = this.db.prepare(
+      `UPDATE sessions
+          SET agent_id = ?, agent_name = ?, updated_at = ?
+        WHERE id = ? AND agent_id = ?`,
+    ).run(replacement.agent.id, replacement.agent.name, now, sessionId, session.agent_id);
+    if (changed.changes !== 1) {
+      throw Object.assign(
+        new Error('The session Agent changed while it was being repaired.'),
+        { code: 'SESSION_AGENT_REBIND_CONFLICT' },
+      );
+    }
+    const updated = this.getSession(sessionId);
+    this.broadcastSessionUpdated(sessionId, {
+      agent_id: updated.agent_id,
+      agent_name: updated.agent_name,
+      updated_at: updated.updated_at,
+    });
+    return updated;
+  }
+
+  async stopTurn(sessionId: string): Promise<void> {
+    const cancelledTranslation = this.translations?.cancelSession(sessionId);
+    if (cancelledTranslation && !this.hasRunningTurn(sessionId)) return;
+    if (this.remoteController?.owns(sessionId)) {
+      await this.remoteController.handleMessage({ type: 'session:stop', session_id: sessionId });
+      return;
+    }
+    if (this.sidechats.has(sessionId)) {
+      await this.sidechats.interruptTurn(sessionId);
+      return;
+    }
+    const proxySessionId = this.proxySessions.get(sessionId);
+    if (!proxySessionId) throw new Error(`session not initialized: ${sessionId}`);
+    const client = this.proxy.get(sessionId);
+    if (!client) throw new Error(`no proxy for session: ${sessionId}`);
+
+    // Mark the generation before awaiting the RPC so a synchronous provider
+    // terminal is interpreted as the requested stop. Do not settle eagerly:
+    // if interrupt rejects, the agent may still be running and Host must keep
+    // accepting its events so the user can retry or force-recover.
+    const stopping = this.turns.requestStop(sessionId);
+    try {
+      await client.interruptTurn(proxySessionId);
+    } catch (error) {
+      if (stopping && this.turns.get(sessionId)?.id !== stopping.id) {
+        // A synchronous provider terminal already proved this generation is
+        // settled; the interrupt transport's late rejection cannot undo it.
+        return;
+      }
+      if (stopping) this.turns.cancelStop(sessionId, stopping.id);
+      throw error;
+    }
+    // The Result only proves delivery. Keep the generation active until the
+    // Proxy emits turn.completed/turn.failed, which is the protocol's
+    // authoritative terminal fact.
+  }
+
+  /**
+   * Last-resort recovery for sessions wedged in ways `stopTurn` can't fix
+   * (proxy hung mid-RPC, claude child idle but unresponsive, etc.). Runs
+   * fully in-process — no host restart required:
+   *
+   *   1. SIGKILL the cc-proxy spawn (or fire-and-forget close for codex).
+   *      Its `exit` triggers the existing `handleProxyExit` path which
+   *      tears down activeTurns / pending approvals.
+   *   2. Eagerly mark any active turn `'stopped'` and the session `'done'`
+   *      so the UI doesn't have to wait on the exit handler.
+   *   3. Drop our cached `proxySessionIds` entry — next `sendMessage` will
+   *      lazily spawn a fresh proxy and adopt the on-disk native session
+   *      via the existing `claudeSessionId` / `threadId` resume path.
+   *
+   * Idempotent. Safe to call when nothing is wedged (no-op if no client).
+   */
+  async forceRecover(sessionId: string): Promise<void> {
+    if (this.turns.has(sessionId)) {
+      this.completeTurn(sessionId, 'stopped');
+    }
+    this.approvals.clearSession(sessionId);
+    this.forgetSessionInteractionResponses(sessionId);
+    this.watcher?.resume(sessionId);
+    this.proxySessions.forget(sessionId);
+
+    const now = new Date().toISOString();
+
+    // Sweep ANY DB-level `running` turn for this session, regardless of the
+    // in-memory `activeTurns` entry. If the host restarted while a turn was
+    // running, activeTurns is empty but the row still says 'running' — it's
+    // an orphan; mark it 'stopped' so it doesn't haunt later queries.
+    const orphaned = this.turns.stopOrphaned(sessionId, now);
+    this.events.settleOrphanedTurns(sessionId, orphaned, 'stopped', now);
+
+    // Force the session row to a clean status. completeTurn already did this
+    // if a turn was active in memory; otherwise the row might still say
+    // `running` from a prior wedge or `error` from the auto-cleanup.
+    this.db
+      .prepare(`UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ? AND status != 'done'`)
+      .run(now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
+
+    await this.proxy.forceDispose(sessionId);
+  }
+
+  /**
+   * Settle a durable running Turn after this Host process lost its in-memory
+   * runtime. A real active Turn always has a matching TurnRuntime entry; a DB
+   * row without one can only be left by a Host/process restart.
+   */
+  settleLostRuntimeTurn(sessionId: string, turnId: string): boolean {
+    if (this.remoteController?.owns(sessionId)) return false;
+    if (this.turns.has(sessionId)) return false;
+    const persisted = this.db.prepare(
+      `SELECT 1 FROM turns WHERE id = ? AND session_id = ? AND status = 'running'`,
+    ).get(turnId, sessionId);
+    if (!persisted) return false;
+
+    const now = new Date().toISOString();
+    this.approvals.clearSession(sessionId);
+    this.forgetSessionInteractionResponses(sessionId);
+    this.watcher?.resume(sessionId);
+    this.proxySessions.forget(sessionId);
+    const orphaned = this.turns.stopOrphaned(sessionId, now);
+    this.events.settleOrphanedTurns(sessionId, orphaned, 'stopped', now);
+    this.db.prepare(
+      `UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ? AND status = 'running'`,
+    ).run(now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
+    return true;
+  }
+
+  /**
+   * Fail closed unless `expected` is the live pending Inbox occurrence for
+   * this session, interaction, and Host turn. A remote-owned session cannot
+   * carry the seen occurrence, so it is rejected before any forward.
+   */
+  assertExpectedInbox(sessionId: string, approvalId: string, expected: unknown): void {
+    const ref = expectedInboxRef(expected);
+    if (!ref) throw preconditionFailed('expected inbox ref must be an id and a generation');
+    if (this.remoteController?.owns(sessionId)) {
+      throw preconditionFailed('remote approval cannot prove the seen inbox occurrence');
+    }
+    const row = this.db.prepare(
+      `SELECT source_kind, status, generation, tombstone, target_json
+         FROM inbox_items
+        WHERE id = ?`,
+    ).get(ref.id) as {
+      source_kind: string;
+      status: string;
+      generation: number;
+      tombstone: number;
+      target_json: string;
+    } | undefined;
+    if (
+      !row
+      || row.status !== 'pending'
+      || row.generation !== ref.generation
+      || row.tombstone !== 0
+      || (row.source_kind !== 'session.question' && row.source_kind !== 'session.approval')
+    ) {
+      throw preconditionFailed('inbox occurrence is not the pending generation');
+    }
+    let target: { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+    try {
+      target = JSON.parse(row.target_json) as { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+    } catch {
+      throw preconditionFailed('inbox occurrence target is not readable');
+    }
+    if (
+      target.type !== 'session'
+      || target.session_id !== sessionId
+      || target.interaction_id !== approvalId
+    ) {
+      throw preconditionFailed('inbox occurrence does not match this approval');
+    }
+    const facts = this.db.prepare(
+      `SELECT turn_id AS turnId
+         FROM inbox_projection_facts
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND generation = ?
+          AND direction = 'open'
+          AND bound = 1
+          AND user_pending = 1
+          AND provider_event_id = occurrence_event_id`,
+    ).all(sessionId, approvalId, ref.generation) as Array<{ turnId: string }>;
+    if (facts.length !== 1) {
+      throw preconditionFailed('inbox occurrence host turn is missing or ambiguous');
+    }
+    const turnId = facts[0]?.turnId;
+    const pending = this.approvals.getPending(approvalId, sessionId);
+    if (!pending || pending.sessionId !== sessionId || pending.turnId !== turnId) {
+      throw preconditionFailed('pending approval is not this inbox occurrence');
+    }
+  }
+
+  /**
+   * Re-check after the provider response. The same occurrence may already be
+   * terminal because this response's resolved event ran first. A newer
+   * generation, a later Host turn, or a changed approval mode still blocks
+   * the plan-mode exit. The current turn is the latest persisted `turns` row,
+   * so a later turn that has already finished still blocks. The in-memory
+   * active turn is checked as well and is not the only signal.
+   */
+  private assertPlanExitStillCurrent(
+    sessionId: string,
+    approvalId: string,
+    expected: AttentionInboxRef,
+    seen: PlanExitSeen,
+  ): void {
+    const ref = expectedInboxRef(expected);
+    if (!ref) throw preconditionFailed('expected inbox ref must be an id and a generation');
+    if (this.remoteController?.owns(sessionId)) {
+      throw preconditionFailed('remote approval cannot prove the seen inbox occurrence');
+    }
+    const row = this.loadExpectedInboxRow(ref.id);
+    if (
+      !row
+      || row.generation !== ref.generation
+      || row.tombstone !== 0
+      || (row.source_kind !== 'session.question' && row.source_kind !== 'session.approval')
+      || !inboxTargetMatches(row.target_json, sessionId, approvalId)
+    ) {
+      throw preconditionFailed('inbox occurrence changed before plan-mode exit');
+    }
+    const facts = this.db.prepare(
+      `SELECT turn_id AS turnId
+         FROM inbox_projection_facts
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND generation = ?
+          AND direction = 'open'
+          AND bound = 1
+          AND user_pending = 1
+          AND provider_event_id = occurrence_event_id`,
+    ).all(sessionId, approvalId, ref.generation) as Array<{ turnId: string }>;
+    if (facts.length !== 1 || facts[0]?.turnId !== seen.turnId) {
+      throw preconditionFailed('inbox occurrence host turn changed before plan-mode exit');
+    }
+    const newer = this.db.prepare(
+      `SELECT 1 AS ok
+         FROM inbox_projection_facts
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND direction = 'open'
+          AND bound = 1
+          AND generation > ?
+          AND provider_event_id = occurrence_event_id
+        LIMIT 1`,
+    ).get(sessionId, approvalId, ref.generation);
+    if (newer) throw preconditionFailed('a newer inbox occurrence is open');
+    // A later turn can start without reusing this interaction id and without
+    // opening an approval. Its row remains after it finishes, when no active
+    // turn is left to compare.
+    const latest = this.db.prepare(
+      `SELECT id
+         FROM turns
+        WHERE session_id = ?
+        ORDER BY turn_number DESC
+        LIMIT 1`,
+    ).get(sessionId) as { id: string } | undefined;
+    if (!latest || latest.id !== seen.turnId) {
+      throw preconditionFailed('a later host turn started before plan-mode exit');
+    }
+    const active = this.turns.get(sessionId);
+    if (active && active.id !== seen.turnId) {
+      throw preconditionFailed('the active host turn changed before plan-mode exit');
+    }
+    const pending = this.approvals.getPending(approvalId, sessionId);
+    if (pending && (pending.sessionId !== sessionId || pending.turnId !== seen.turnId)) {
+      throw preconditionFailed('pending approval moved to another host turn');
+    }
+    if (row.status === 'pending' && !pending) {
+      throw preconditionFailed('pending approval disappeared before the occurrence closed');
+    }
+    const session = this.getSession(sessionId);
+    const configured = session.turn_config?.[seen.optionId];
+    if (
+      session.approval_mode !== seen.approvalMode
+      || seen.optionId !== this.optionIdForRole(session.executor, 'approval_mode', session)
+      || JSON.stringify(configured ?? null) !== seen.turnConfigMode
+    ) {
+      throw preconditionFailed('approval mode changed before plan-mode exit');
+    }
+  }
+
+  private capturePlanExit(sessionId: string, turnId: string): PlanExitSeen {
+    const session = this.getSession(sessionId);
+    const optionId = this.optionIdForRole(session.executor, 'approval_mode', session);
+    return {
+      turnId,
+      approvalMode: session.approval_mode,
+      optionId,
+      turnConfigMode: JSON.stringify(session.turn_config?.[optionId] ?? null),
+    };
+  }
+
+  private loadExpectedInboxRow(id: string): {
+    source_kind: string;
+    status: string;
+    generation: number;
+    tombstone: number;
+    target_json: string;
+  } | undefined {
+    return this.db.prepare(
+      `SELECT source_kind, status, generation, tombstone, target_json
+         FROM inbox_items
+        WHERE id = ?`,
+    ).get(id) as {
+      source_kind: string;
+      status: string;
+      generation: number;
+      tombstone: number;
+      target_json: string;
+    } | undefined;
+  }
+
+  async respondApproval(
+    sessionId: string,
+    approvalId: string,
+    decision: import('@gian/shared').ApprovalDecision,
+    answers?: Record<string, string | boolean | string[]>,
+    nativeOptionId?: string,
+    resolvedBy: import('@gian/shared').ApprovalResolvedBy = 'web',
+    expectedInbox?: AttentionInboxRef,
+  ): Promise<void> {
+    // Synchronous until the first await below. The check reads the Inbox row,
+    // the canonical open fact, and the live pending record before any
+    // resolve, resolution source, or provider respond.
+    if (expectedInbox !== undefined) {
+      this.assertExpectedInbox(sessionId, approvalId, expectedInbox);
+    }
+    if (this.remoteController?.owns(sessionId)) {
+      await this.remoteController.handleMessage({ type: 'approval:resolve', session_id: sessionId,
+        approval_id: approvalId, decision, answers, native_option_id: nativeOptionId });
+      return;
+    }
+    if (this.sidechats.has(sessionId)) {
+      // Side Chats are transient (SIDECHAT-001): never look them up in the
+      // sessions table or persist proxy_interactions rows — route the answer
+      // through the coordinator's bound child client instead.
+      await this.sidechats.respondInteraction(sessionId, approvalId, decision, answers, nativeOptionId);
+      return;
+    }
+    this.getSession(sessionId);
+    const localApproval = this.approvals.getPending(approvalId, sessionId);
+    if (localApproval?.sessionId === sessionId && localApproval.payload?.['localOnly'] === true) {
+      if (resolvedBy !== 'web') {
+        throw Object.assign(
+          new Error('This local approval must be resolved in Gian Desktop'),
+          { code: 'PERMISSION_DENIED' },
+        );
+      }
+      this.approvals.resolve(approvalId, decision, resolvedBy, sessionId);
+      return;
+    }
+    const proxySessionId = this.proxySessions.get(sessionId);
+    if (!proxySessionId) throw new Error(`session not initialized: ${sessionId}`);
+    const client = this.proxy.get(sessionId);
+    if (!client) throw new Error(`no proxy for session: ${sessionId}`);
+
+    // Snapshot the pending record before resolving so we can inspect category
+    // for plan-mode-exit ceremony below.
+    const pending = this.approvals.getPending(approvalId, sessionId);
+    this.approvals.markResolutionSource(approvalId, resolvedBy, sessionId);
+    let savedResponseId: string | null = null;
+    let responseSent = false;
+    try {
+      const persisted = this.loadInteraction(sessionId, approvalId);
+      // The response identity is scoped to the Host turn occurrence. A new
+      // turn that reuses the provider interaction id must mint a new response
+      // id; only a retry of the same occurrence reuses the stored one.
+      const sameOccurrence = pending
+        ? persisted !== null && persisted.turn_id === pending.turnId
+        : persisted !== null;
+      const responseKey = this.interactionResponseKey(sessionId, approvalId, pending?.turnId ?? persisted?.turn_id ?? null);
+      const responseId = (sameOccurrence ? persisted?.response_id : undefined)
+        ?? this.interactionResponseIds.get(responseKey)
+        ?? randomUUID();
+      this.interactionResponseIds.set(responseKey, responseId);
+
+      if (!pending && persisted) {
+        await client.respondInteraction({
+          sessionId: proxySessionId,
+          interactionId: approvalId,
+          responseId: persisted.response_id,
+          actionId: persisted.action_id ?? 'allow_once',
+          values: persisted.values,
+        });
+        this.approvals.clearResolutionSource(approvalId, sessionId);
+        return;
+      }
+
+      if ((pending?.nativeOptions?.length ?? 0) > 0 || nativeOptionId !== undefined) {
+        const option = pending?.nativeOptions?.find(item => item.optionId === nativeOptionId);
+        if (!option) {
+          throw Object.assign(
+            new Error('Select one of the approval options supplied by the Agent.'),
+            { code: 'INVALID_APPROVAL_OPTION' },
+          );
+        }
+        this.saveInteraction(sessionId, approvalId, {
+          responseId,
+          turnId: pending?.turnId,
+          actionId: option.optionId,
+          values: answers ?? {},
+        });
+        savedResponseId = responseId;
+        await client.respondInteraction({
+          sessionId: proxySessionId,
+          interactionId: approvalId,
+          responseId,
+          actionId: option.optionId,
+          values: answers ?? {},
+        });
+        responseSent = true;
+        return;
+      }
+
+      // Persist the response identity before crossing the Proxy boundary. A
+      // lost reply can then be retried with the same response id and payload.
+      const isDeny = decision === 'decline' || decision === 'keep_planning';
+      // exit_plan_mode cards record the proxy-advertised wire actionIds at
+      // request time (cc-proxy v2 whitelists allow_once/reject_once, kimi
+      // relays ACP optionIds); a hardcoded 'decline' would be rejected with
+      // INTERACTION_ACTION_NOT_FOUND by those proxies.
+      const wireActions = exitPlanWireActions(pending);
+      const actionId = isDeny
+        ? wireActions?.deny ?? 'decline'
+        : decision === 'allow_session'
+          ? 'allow_session'
+          : wireActions?.allow ?? 'allow_once';
+      const values = isDeny ? {} : answers ?? {};
+      this.saveInteraction(sessionId, approvalId, {
+        responseId,
+        turnId: pending?.turnId,
+        actionId,
+        values,
+      });
+      savedResponseId = responseId;
+      // Snapshot before the provider can close this occurrence. The first
+      // check already required a live pending row; this snapshot is only the
+      // turn and mode that a later replacement is not allowed to overwrite.
+      const planExitSeen = pending
+        && pending.category === 'exit_plan_mode'
+        && expectedInbox !== undefined
+        ? this.capturePlanExit(sessionId, pending.turnId)
+        : null;
+      await client.respondInteraction({
+        sessionId: proxySessionId,
+        interactionId: approvalId,
+        responseId,
+        actionId,
+        values,
+      });
+      responseSent = true;
+
+      // Plan-mode-exit decisions get mapped to plain allow/deny on the proxy
+      // wire; the auto/ask flip happens only after the response succeeds.
+      // The provider response already left this turn, so a later Host turn
+      // skips the mode flip and leaves the successful response in place.
+      // This response's own resolved event may already have made the seen
+      // occurrence terminal. That is not a later turn, so it still flips.
+      if (pending?.category === 'exit_plan_mode') {
+        if (expectedInbox !== undefined && planExitSeen) {
+          try {
+            this.assertPlanExitStillCurrent(sessionId, approvalId, expectedInbox, planExitSeen);
+          } catch (error) {
+            console.warn('[approval] skipped plan-mode exit because the seen inbox occurrence changed', error);
+            return;
+          }
+        }
+        const session = this.db
+          .prepare('SELECT approval_mode FROM sessions WHERE id = ?')
+          .get(sessionId) as { approval_mode: ApprovalMode } | undefined;
+        if (session?.approval_mode === 'plan') {
+          if (decision === 'accept_with_auto') {
+            this.setApprovalMode(sessionId, 'auto');
+          } else if (decision === 'accept_with_ask' || decision === 'allow_once' || decision === 'allow_session') {
+            // Legacy allow decisions retain their historical ask-mode exit.
+            this.setApprovalMode(sessionId, 'ask');
+          }
+          // decline / keep_planning leaves the session in plan mode.
+        }
+      }
+    } catch (error) {
+      if (savedResponseId && !responseSent) {
+        this.db.prepare(
+          'DELETE FROM proxy_interactions WHERE session_id = ? AND interaction_id = ? AND response_id = ?',
+        ).run(sessionId, approvalId, savedResponseId);
+      }
+      this.approvals.clearResolutionSource(approvalId, sessionId);
+      throw error;
+    }
+  }
+
+  private interactionResponseKey(sessionId: string, interactionId: string, turnId: string | null): string {
+    const turn = turnId ?? '';
+    return `${sessionId.length}:${sessionId}${interactionId.length}:${interactionId}${turn.length}:${turn}`;
+  }
+
+  private forgetSessionInteractionResponses(sessionId: string): void {
+    for (const key of this.interactionResponseIds.keys()) {
+      if (this.sessionIdFromInteractionResponseKey(key) === sessionId) {
+        this.interactionResponseIds.delete(key);
+      }
+    }
+  }
+
+  private sessionIdFromInteractionResponseKey(key: string): string | null {
+    const mark = key.indexOf(':');
+    if (mark <= 0) return null;
+    const sessionLength = Number(key.slice(0, mark));
+    if (!Number.isInteger(sessionLength) || sessionLength < 1) return null;
+    const sessionId = key.slice(mark + 1, mark + 1 + sessionLength);
+    return sessionId.length === sessionLength ? sessionId : null;
+  }
+
+  private loadInteraction(
+    sessionId: string,
+    interactionId: string,
+  ): { response_id: string; turn_id: string | null; action_id: string | null; values: Record<string, string | boolean | string[]> } | null {
+    const row = this.db.prepare(
+      `SELECT response_id, turn_id, action_id, values_json
+         FROM proxy_interactions
+        WHERE session_id = ? AND interaction_id = ?`,
+    ).get(sessionId, interactionId) as {
+      response_id: string;
+      turn_id: string | null;
+      action_id: string | null;
+      values_json: string | null;
+    } | undefined;
+    if (!row) return null;
+    let values: Record<string, string | boolean | string[]> = {};
+    if (row.values_json) {
+      try {
+        const parsed = JSON.parse(row.values_json) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          values = parsed as Record<string, string | boolean | string[]>;
+        }
+      } catch {
+        values = {};
+      }
+    }
+    return { response_id: row.response_id, turn_id: row.turn_id, action_id: row.action_id, values };
+  }
+
+  private persistTurnConfig(
+    sessionId: string,
+    config: Record<string, ConfigValue>,
+    extra: Partial<Session> = {},
+  ): void {
+    const now = new Date().toISOString();
+    this.db.prepare('UPDATE sessions SET turn_config_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(config), now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { turn_config: config, updated_at: now, ...extra });
+  }
+
+  private mergeTurnConfig(
+    sessionId: string,
+    patch: Record<string, ConfigValue>,
+    extra: Partial<Session> = {},
+  ): Record<string, ConfigValue> {
+    const session = this.getSession(sessionId);
+    const config = { ...(session.turn_config ?? {}), ...patch };
+    this.persistTurnConfig(sessionId, config, extra);
+    return config;
+  }
+
+  private optionIdForRole(executor: Executor, role: string, session?: Session): string {
+    const cliPath = session ? this.agentResolver?.cliPathForSession(session) : undefined;
+    return this.proxySessions.getCapabilities(
+      executor,
+      cliPath,
+      session?.runtime_profile?.configHome,
+    )
+      ?.configOptions.find((option) => option.role === role)?.id
+      ?? role;
+  }
+
+  private saveInteraction(
+    sessionId: string,
+    interactionId: string,
+    record: {
+      responseId: string;
+      turnId?: string;
+      actionId: string;
+      values: Record<string, string | boolean | string[]>;
+    },
+  ): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO proxy_interactions
+         (session_id, interaction_id, response_id, turn_id, action_id, outcome, values_json, created_at, resolved_at)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+       ON CONFLICT(session_id, interaction_id) DO UPDATE SET
+         response_id = excluded.response_id,
+         turn_id = excluded.turn_id,
+         action_id = excluded.action_id,
+         values_json = excluded.values_json,
+         outcome = NULL,
+         resolved_at = NULL`,
+    ).run(
+      sessionId,
+      interactionId,
+      record.responseId,
+      record.turnId ?? null,
+      record.actionId,
+      JSON.stringify(record.values),
+      now,
+    );
+  }
+
+  async sendMessage(
+    sessionId: string,
+    text: string,
+    items?: import('@gian/shared').InputItem[],
+    oneShotBypass?: boolean,
+    toolRequestId?: string,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
+    turnConfig?: Record<string, ConfigValue>,
+    scheduledTask?: ScheduledTaskOrigin,
+    translationId?: string,
+  ): Promise<{
+    turnId: string;
+    turnNumber: number;
+    configSnapshot: Record<string, unknown>;
+  } | null> {
+    if (this.remoteController?.owns(sessionId)) {
+      assertLocalFilesBelongToSession(sessionId, items);
+      if (oneShotBypass || turnConfig || scheduledTask) throw new Error('remote send option is not supported');
+      await this.remoteController.handleMessage({ type: 'message:send', session_id: sessionId, text,
+        items, context_items: contextItems, composer_document: composerDocument, request_id: toolRequestId,
+        ...(translationId ? { translation_id: translationId } : {}) });
+      const snapshot = this.remoteController.replicas.snapshot(sessionId);
+      const latest = this.db.prepare('SELECT MAX(turn_number) AS number FROM turns WHERE session_id = ?')
+        .get(sessionId) as { number: number | null } | undefined;
+      const turnNumber = snapshot?.session.active_turn?.turn_number
+        ?? latest?.number;
+      if (typeof turnNumber !== 'number') throw new Error('remote send confirmed; turn metadata is not available yet');
+      const turnId = localRemoteTurnId(sessionId, turnNumber);
+      if (toolRequestId) this.db.prepare('UPDATE turns SET tool_request_id = ? WHERE id = ? AND tool_request_id IS NULL')
+        .run(toolRequestId, turnId);
+      return { turnId, turnNumber, configSnapshot: {} };
+    }
+    if (this.sidechats.has(sessionId)) {
+      if (translationId && translationId !== 'original') throw new Error('Translated sending is not yet supported for Side Chat.');
+      const normalizedContextItems = normalizeMessageContextItems(
+        contextItems,
+        { workingTreeRoot: this.sidechatTreeRoot(sessionId) },
+      );
+      const normalizedDocument = normalizeMessageComposerDocument(
+        composerDocument,
+        items,
+        normalizedContextItems,
+      );
+      const sidechatItems = compileContextIntoInput(
+        text,
+        items,
+        normalizedContextItems,
+        normalizedDocument,
+        this.resolveSessionTranscript,
+      );
+      const storedInput = items && items.length > 0
+        ? items
+        : [{ type: 'text' as const, text }];
+      await this.sidechats.startTurn(
+        sessionId,
+        sidechatItems,
+        undefined,
+        normalizedContextItems,
+        storedInput,
+        normalizedDocument,
+        turnConfig,
+      );
+      return null;
+    }
+    if (turnConfig !== undefined) {
+      throw requestViolation('CONFIG_VALUE_INVALID', 'turn_config is only valid for Side Chat sends');
+    }
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
+    const translation = translationId && translationId !== 'original' ? this.translations?.get(translationId)
+      : !translationId && text.trim() && !items?.some(item => item.type === 'skill') && this.translations?.enabled(sessionId)
+        ? await this.translations.translate({ sessionId, requestId: randomUUID(), text, purpose: 'send', document: composerDocument },
+          loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES }) : undefined;
+    if (translationId && translationId !== 'original' && (!translation || translation.sessionId !== sessionId || translation.purpose !== 'send'
+      || translation.sourceText !== text
+      || JSON.stringify(translation.sourceDocument ?? null) !== JSON.stringify(composerDocument ?? null))) {
+      throw new Error('Translation does not match the original message. Translate again before sending.');
+    }
+    if (translation && (items?.filter(item => item.type === 'text').length ?? 0) > 1) {
+      throw new Error('Translation requires one user text input.');
+    }
+    assertLocalFilesBelongToSession(sessionId, items);
+    const normalizedContextItems = normalizeMessageContextItems(
+      contextItems,
+      { workingTreeRoot: this.cwdForSession(session) },
+    );
+    const normalizedDocument = normalizeMessageComposerDocument(
+      composerDocument,
+      items,
+      normalizedContextItems,
+    );
+    if (oneShotBypass && session.executor !== 'claude') {
+      throw new Error(`One-shot bypass is only supported for Claude sessions; got ${session.executor}.`);
+    }
+    // Reject before any optimistic writes if a turn is already in flight.
+    // The downstream `startTurn` would return SESSION_BUSY, and the catch
+    // path used to overwrite session.status to 'error' even though the
+    // prior turn is still legitimately running on the proxy side.
+    // Callers (WS handler) should route to enqueueMessage when this throws.
+    if (this.hasRunningTurn(sessionId)) {
+      throw new Error(`turn already in flight for session ${sessionId}; enqueue instead`);
+    }
+    const proxySessionId = await this.proxySessions.ensure(session);
+    const client = this.proxy.get(sessionId);
+    if (!client) throw new Error(`no proxy for session: ${sessionId}`);
+    // client.catalog() can still be the process catalog cached before
+    // session.create, while the attached session has a newer native fence.
+    // Resolve on that fence. One pre-dispatch Catalog-changed CONFLICT
+    // reloads the canonical catalog and resolves once more. turn.start is
+    // later and is not used to recover a rejected resolve.
+    if (client.resolveCatalog && this.proxySessions.getProtocolCapabilities(
+      session.executor, this.agentResolver?.cliPathForSession(session),
+    )?.['catalog.resolve'] !== undefined) {
+      const catalog = await client.catalog();
+      const turnDraft: Record<string, ConfigValue> = {};
+      const sessionConfig: Record<string, ConfigValue> = {};
+      for (const option of catalog.configOptions) {
+        if (option.binding === 'session') {
+          const value = session.executor_config.values[option.id];
+          if (value !== undefined) sessionConfig[option.id] = value;
+          continue;
+        }
+        const roleValue = option.role === 'model' ? session.model
+          : option.role === 'effort' ? session.thinking_effort
+            : option.role === 'approval_mode' ? session.approval_mode
+              : option.role === 'fast' ? session.service_tier === 'fast' : undefined;
+        const value = session.turn_config?.[option.id]
+          ?? session.executor_config.values[option.id]
+          ?? roleValue;
+        if (value !== undefined && value !== null && value !== '') turnDraft[option.id] = value;
+      }
+      const resolved = await resolveSendCatalog(client, { sessionConfig, turnConfig: turnDraft }, catalog.catalogRevision);
+      const options = resolved.configOptions.filter((option) => option.binding === 'turn');
+      const revision = `turn-config-${createHash('sha256').update(JSON.stringify(options)).digest('hex').slice(0, 24)}`;
+      this.persistTurnConfigOptions(sessionId, options, revision);
+      session.turn_config_options = options;
+      session.turn_config_revision = revision;
+    }
+    if (session.executor === 'codex') {
+      await ensureSessionAttachmentDir(sessionId, this.dataDir);
+    }
+
+    // `ensure()` (and Codex attachment preparation) can yield long enough for
+    // an external watcher turn or another send to claim the session. Recheck
+    // immediately before the synchronous DB/runtime reservation so neither
+    // path can overwrite the active generation.
+    if (this.hasRunningTurn(sessionId)) {
+      throw new Error(`turn already in flight for session ${sessionId}; enqueue instead`);
+    }
+
+    const turnId = randomUUID();
+    const now = new Date().toISOString();
+    const turn = this.turns.start(sessionId, turnId, now, { toolRequestId });
+    try {
+      this.db.prepare(
+        `INSERT INTO proxy_replay_turns
+          (session_id, provider_turn_id, turn_id, replay_owned)
+         VALUES (?, ?, ?, 0)`,
+      ).run(sessionId, turnId, turnId);
+    } catch (error) {
+      this.turns.rollbackStart(sessionId, turnId);
+      throw error;
+    }
+    const turnNumber = turn.number;
+
+    // Live Sync v2: pause the watcher while a proxy turn is in flight so we
+    // don't double-insert events the proxy is also streaming via stdio.
+    this.watcher?.pause(sessionId);
+
+    this.db
+      .prepare(`UPDATE sessions SET status = 'running', updated_at = ? WHERE id = ?`)
+      .run(now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { status: 'running', updated_at: now });
+
+    const attachments = buildAttachmentsFromItems(sessionId, items);
+    const userMessagePayload: Record<string, unknown> = { text };
+    if (toolRequestId) userMessagePayload.tool_request_id = toolRequestId;
+    if (translation) userMessagePayload.translation = translation;
+    if (attachments.length > 0) userMessagePayload.attachments = attachments;
+    if (normalizedContextItems.length > 0) userMessagePayload.context_items = normalizedContextItems;
+    if (normalizedDocument) userMessagePayload.composer_document = normalizedDocument;
+    // Scheduled-task origin rides on the canonical user_message event so Web
+    // can render "sent by a schedule" and recovery can find the Turn later.
+    if (scheduledTask) {
+      userMessagePayload.scheduled_task = {
+        schedule_id: scheduledTask.scheduleId,
+        run_id: scheduledTask.runId,
+        schedule_name: scheduledTask.scheduleName,
+      };
+    }
+    this.persistAndBroadcastUserMessage(
+      sessionId,
+      turnId,
+      turnNumber,
+      userMessagePayload,
+      Date.parse(now),
+    );
+
+    // One-shot bypass: override the per-turn policy without touching
+    // session.approval_mode in DB. Applied only for this startTurn — the next
+    // user-initiated send falls back to the session's stored mode.
+    //
+    // The per-Task Manager now honors its `approval_mode` like any other
+    // session (decision 2026-06-29, supersedes the earlier forced
+    // sandbox:'workspace-write' + approvalPolicy:'never'): its composer is the
+    // full session composer, so the mode picker is live and `ask` turns surface
+    // real approval cards in the Manager panel. Default mode is 'plan'
+    // (read-only + on-request), so a fresh Manager plans/reads until the user
+    // escalates it to 'auto' for writes. It still binds the root workspace
+    // (`~/Coding`, spanning all projects), so 'auto' there is broad — the mode
+    // picker is the gate.
+    const catalog = this.proxySessions.getCapabilities(
+      session.executor,
+      this.agentResolver?.cliPathForSession(session),
+      session.runtime_profile?.configHome,
+    );
+    const catalogTurnOptions = catalog?.configOptions.filter((option) => option.binding === 'turn') ?? [];
+    // Older model-switch snapshots may contain the full Catalog. Never
+    // dispatch its immutable Session options as next-Turn configuration.
+    const turnOptions = (session.turn_config_options ?? catalogTurnOptions)
+      .filter((option) => option.binding === 'turn');
+    const liveTurnOptions = new Map(catalogTurnOptions.map(option => [option.id, option]));
+    const config: Record<string, string | boolean | number | null> = {};
+    const draft: Record<string, string | boolean | number | null> = {};
+    // Conditions on a Turn-bound option may reference a Session-bound option
+    // from the same Proxy Catalog. Seed the evaluation context with the
+    // immutable Session snapshot before layering the next-Turn draft.
+    const candidateValues: Record<string, string | boolean | number | null> = {
+      ...session.executor_config.values,
+    };
+    const dispatchValues = new Map<string, ConfigValue>();
+    for (const option of turnOptions) {
+      const live = liveTurnOptions.get(option.id) ?? option;
+      const rawPersisted = option.role === 'fast'
+        ? undefined
+        : session.turn_config?.[option.id]
+          ?? session.executor_config.values[option.id];
+      const roleValue = option.role === 'model'
+        ? session.model
+        : option.role === 'effort'
+          ? session.thinking_effort
+          : option.role === 'approval_mode'
+            ? session.approval_mode
+            : option.role === 'fast'
+              ? session.service_tier === 'fast'
+              : undefined;
+      // Membership honors the session's own snapshot alongside the
+      // process-wide live Catalog. The snapshot may be a model-scoped
+      // resolution from the owning connection whose choices legitimately
+      // differ from the default-model Catalog; the connection's validator
+      // applies the matching snapshot to turn.start. A saved value neither
+      // side advertises — a model id the runtime retired — still falls back
+      // to the live default before the conformance check, so the Proxy can
+      // substitute it.
+      const liveChoices = live.choices;
+      const sessionChoices = option.choices ?? [];
+      const authority = liveChoices === undefined || sessionChoices.length === 0
+        ? live
+        : {
+            ...live,
+            choices: [
+              ...liveChoices,
+              ...sessionChoices.filter(choice => (
+                liveChoices.every(entry => !Object.is(entry.value, choice.value))
+              )),
+            ],
+          };
+      const draftValue = advertisedTurnValue(authority, rawPersisted, roleValue);
+      const dropped = droppedCatalogChoice(authority.choices, [rawPersisted, roleValue], draftValue);
+      if (dropped !== undefined) {
+        console.warn(catalogChoiceDowngradeWarning(sessionId, option.id, dropped, draftValue));
+      }
+      let value = draftValue;
+      if (oneShotBypass && option.role === 'approval_mode' && option.choices) {
+        const bypass = option.choices.find((choice) => (
+          String(choice.value).toLowerCase().includes('bypass')
+        ));
+        if (bypass) value = bypass.value;
+      }
+      if (draftValue !== undefined && draftValue !== '') draft[option.id] = draftValue;
+      if (value !== undefined && value !== '') {
+        candidateValues[option.id] = value;
+        dispatchValues.set(option.id, value);
+      }
+    }
+    for (const option of turnOptions) {
+      if (!configConditionsMatch(option.visibleWhen, candidateValues)
+        || !configConditionsMatch(option.enabledWhen, candidateValues)) {
+        continue;
+      }
+      const value = dispatchValues.get(option.id);
+      if (value !== undefined && value !== '') config[option.id] = value;
+    }
+    const configSnapshot = {
+      agent_id: session.agent_id ?? null,
+      agent_name: session.agent_name ?? null,
+      proxy: session.executor,
+      model: session.model,
+      thinking_effort: session.thinking_effort,
+      approval_mode: session.approval_mode,
+      service_tier: session.service_tier,
+      session: { ...session.executor_config.values },
+      turn: { ...config },
+    };
+    this.turns.setConfig(sessionId, turnId, configSnapshot);
+    const dispatchItems = translateItemsForExecutor(
+      session.executor,
+      compileContextIntoInput(
+        translation?.text ?? text,
+        translation ? items?.map(item => item.type === 'text' ? { ...item, text: translation.text } : item) : items,
+        normalizedContextItems,
+        translation?.translatedDocument ?? normalizedDocument,
+        this.resolveSessionTranscript,
+      ),
+    );
+    try {
+      const started = await client.startTurn({
+        sessionId: proxySessionId,
+        turnId,
+        input: dispatchItems,
+        config,
+      });
+      try {
+        // gian.proxy/2 returns the Host-assigned turnId here. Its distinct
+        // Provider identity arrives on live notifications as sourceTurnId.
+        if (client.protocolV2 !== true) {
+          this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
+        }
+        this.persistTurnConfig(sessionId, draft);
+        // Non-Claude native titles can appear while the first turn is running,
+        // so start discovery as soon as the Provider accepts it. Claude writes
+        // ai-title after completion; starting its fallback clock here would beat
+        // the real summary on long turns, so Claude keeps the completion trigger.
+        // AutoTitle's in-flight/name guards keep accepted + completed idempotent.
+        if (session.executor !== 'claude') void this.autoTitle.maybeAutoTitle(sessionId);
+        if (toolRequestId) {
+          this.deliveryLifecycle?.queueStarted({
+            id: '',
+            sessionId,
+            text,
+            toolRequestId,
+            createdAt: Date.now(),
+          }, { turnId, turnNumber });
+        }
+        return { turnId, turnNumber, configSnapshot };
+      } catch {
+        const unknown = new Error('Provider accepted the turn but the receipt was not persisted');
+        (unknown as Error & { code: string }).code = 'UNKNOWN_OUTCOME';
+        throw unknown;
+      }
+    } catch (err) {
+      if (err instanceof Error && (err as Error & { code?: string }).code === 'UNKNOWN_OUTCOME') {
+        throw err;
+      }
+      // startTurn rejected. The host already optimistically wrote
+      // turn=running / session=running and paused the watcher above; roll
+      // it back so the UI doesn't sit on a phantom spinner. The error
+      // then bubbles to ws-handler, which forwards it as an `error` WS
+      // message.
+      //
+      // SESSION_BUSY is special: cc-proxy is telling us a prior turn is
+      // still alive even though host's activeTurns was empty when this
+      // send began (desync — e.g. host restart with orphan proxy). The
+      // session and the prior turn aren't broken; only this attempt is.
+      // Drop the phantom turn row + user_message event without calling
+      // completeTurn, so session.status stays 'running' (the real turn).
+      if (err instanceof Error && err.message.includes('[SESSION_BUSY]')) {
+        this.turns.rollbackStart(sessionId, turnId);
+      } else {
+        this.completeTurn(sessionId, 'error');
+      }
+      this.watcher?.resume(sessionId);
+      throw err;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Session lifecycle mutations (M1-D Composer + later session menu)
+  // -------------------------------------------------------------------------
+
+  setApprovalMode(sessionId: string, mode: ApprovalMode): void {
+    const session = this.getSession(sessionId);
+    const now = new Date().toISOString();
+    const optionId = this.optionIdForRole(session.executor, 'approval_mode', session);
+    const turn_config = { ...(session.turn_config ?? {}), [optionId]: mode };
+    this.db
+      .prepare(`UPDATE sessions SET approval_mode = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
+      .run(mode, JSON.stringify(turn_config), now, sessionId);
+    this.broadcastSessionUpdated(sessionId, {
+      approval_mode: mode,
+      turn_config,
+      updated_at: now,
+    });
+  }
+
+  /**
+   * Canonical model change. When the session's Proxy advertises
+   * `catalog.resolve` and the Catalog carries both model and effort roles,
+   * the stale effort is dropped, the proxy resolves the target model's
+   * catalog, and the resolved default effort is validated against the new
+   * choices before one transaction writes model, thinking_effort, turn
+   * config, options, and revision — followed by exactly one canonical
+   * session:updated broadcast. Proxies without catalog.resolve keep the
+   * legacy synchronous write (capability-driven; no executor branching).
+   */
+  async setModel(sessionId: string, model: string): Promise<void> {
+    const session = this.getSession(sessionId);
+    const trimmed = model.trim();
+    const stored = trimmed.length > 0 ? trimmed : null;
+    if (stored === null) {
+      this.setModelWithoutCatalogResolution(session, stored);
+      return;
+    }
+    const cliPath = this.agentResolver?.cliPathForSession(session);
+    const configHome = session.runtime_profile?.configHome;
+    // Cold-start safe: bring the session's proxy up before reading its
+    // advertised capabilities, otherwise the first model change on a fresh
+    // Host process would silently miss the resolving path.
+    await this.proxySessions.ensure(session);
+    const protocolCapabilities = this.proxySessions.getProtocolCapabilities(
+      session.executor,
+      cliPath,
+      configHome,
+    );
+    const catalog = this.proxySessions.getCapabilities(session.executor, cliPath, configHome);
+    const options = session.turn_config_options ?? catalog?.configOptions;
+    const modelOption = options?.find((option) => option.role === 'model');
+    const effortOption = options?.find((option) => option.role === 'effort');
+    if (
+      !catalog
+      || !options
+      || protocolCapabilities?.['catalog.resolve'] === undefined
+      || !modelOption
+      || !effortOption
+    ) {
+      this.setModelWithoutCatalogResolution(session, stored);
+      return;
+    }
+
+    // 1. Drop the stale effort and select the target model.
+    const turnOptionIds = new Set(options.filter((option) => option.binding === 'turn').map((option) => option.id));
+    const turnConfig: Record<string, ConfigValue> = Object.fromEntries(
+      Object.entries(session.turn_config ?? {}).filter(([id]) => turnOptionIds.has(id)),
+    );
+    delete turnConfig[effortOption.id];
+    turnConfig[modelOption.id] = stored;
+
+    // 2. Resolve the target model's config options and defaults from the
+    //    proxy. An invalid combination fails here, before anything persists.
+    const resolved = await this.resolveCatalog(session.executor, {
+      catalogRevision: catalog.catalogRevision,
+      sessionConfig: Object.fromEntries(catalog.configOptions
+        .filter((option) => option.binding === 'session')
+        .flatMap((option) => {
+          const value = session.executor_config.values[option.id];
+          return value === undefined ? [] : [[option.id, value]];
+        })),
+      turnConfig,
+    }, sessionId, cliPath, configHome);
+    const resolvedTurnOptions = resolved.configOptions.filter((option) => option.binding === 'turn');
+    const resolvedEffort = resolvedTurnOptions.find((option) => option.role === 'effort');
+    let effort: string | null = null;
+    if (resolvedEffort) {
+      const candidate = turnConfig[resolvedEffort.id]
+        ?? resolved.resolvedDefaults.turnConfig[resolvedEffort.id]
+        ?? resolvedEffort.defaultValue
+        ?? null;
+      const choiceValues = (resolvedEffort.choices ?? []).map((choice) => choice.value);
+      if (candidate !== null && candidate !== undefined
+        && choiceValues.some((value) => Object.is(value, candidate))) {
+        effort = String(candidate);
+      } else {
+        throw new Error(
+          `Resolved thinking default for model "${stored}" is not one of its advertised choices.`,
+        );
+      }
+    }
+
+    // 3. One transaction for the whole canonical update.
+    const resolvedTurnIds = new Set(resolvedTurnOptions.map((option) => option.id));
+    const nextTurnConfig: Record<string, ConfigValue> = Object.fromEntries(
+      Object.entries(turnConfig).filter(([id]) => resolvedTurnIds.has(id)),
+    );
+    if (effort !== null && resolvedEffort) nextTurnConfig[resolvedEffort.id] = effort;
+    const now = new Date().toISOString();
+    const revision = `turn-config-${createHash('sha256')
+      .update(JSON.stringify(resolvedTurnOptions))
+      .digest('hex')
+      .slice(0, 24)}`;
+    this.db.transaction(() => {
+      this.db.prepare(
+        `UPDATE sessions
+            SET model = ?,
+                thinking_effort = ?,
+                turn_config_json = ?,
+                turn_config_options_json = ?,
+                turn_config_revision = ?,
+                updated_at = ?
+          WHERE id = ?`,
+      ).run(
+        stored,
+        effort,
+        JSON.stringify(nextTurnConfig),
+        JSON.stringify(resolvedTurnOptions),
+        revision,
+        now,
+        sessionId,
+      );
+    })();
+
+    // 4. Exactly one canonical broadcast with every updated field.
+    this.broadcastSessionUpdated(sessionId, {
+      model: stored,
+      thinking_effort: effort,
+      turn_config: nextTurnConfig,
+      turn_config_options: resolvedTurnOptions,
+      turn_config_revision: revision,
+      updated_at: now,
+    });
+  }
+
+  /** Legacy non-resolving write used by proxies without catalog.resolve or
+   *  when the Catalog has no model/effort role pair. */
+  private setModelWithoutCatalogResolution(session: Session, stored: string | null): void {
+    const sessionId = session.id;
+    const now = new Date().toISOString();
+    const optionId = this.optionIdForRole(session.executor, 'model', session);
+    const turn_config = { ...(session.turn_config ?? {}), [optionId]: stored };
+    this.db
+      .prepare(`UPDATE sessions SET model = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
+      .run(stored, JSON.stringify(turn_config), now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { model: stored, turn_config, updated_at: now });
+  }
+
+  async setTurnConfigValue(sessionId: string, optionId: string, value: ConfigValue): Promise<void> {
+    const session = this.getSession(sessionId);
+    const option = (session.turn_config_options
+      ?? this.proxySessions.getCapabilities(
+        session.executor,
+        this.agentResolver?.cliPathForSession(session),
+        session.runtime_profile?.configHome,
+      )?.configOptions)
+      ?.find((entry) => entry.id === optionId);
+    if (option?.role === 'model') {
+      await this.setModel(sessionId, value == null ? '' : String(value));
+      return;
+    }
+    if (option?.role === 'effort') {
+      this.setEffort(sessionId, value == null ? null : String(value));
+      return;
+    }
+    if (option?.role === 'approval_mode') {
+      if (isApprovalMode(value)) this.setApprovalMode(sessionId, value);
+      else this.mergeTurnConfig(sessionId, { [optionId]: value });
+      return;
+    }
+    if (option?.role === 'fast') {
+      this.setServiceTier(sessionId, value === true ? 'fast' : null);
+      return;
+    }
+    this.mergeTurnConfig(sessionId, { [optionId]: value });
+  }
+
+  persistTurnConfigOptions(
+    sessionId: string,
+    options: ConfigOption[],
+    revision: string,
+  ): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `UPDATE sessions
+          SET turn_config_options_json = ?, turn_config_revision = ?, updated_at = ?
+        WHERE id = ?`,
+    ).run(JSON.stringify(options), revision, now, sessionId);
+    this.broadcastSessionUpdated(sessionId, {
+      turn_config_options: options,
+      turn_config_revision: revision,
+      updated_at: now,
+    });
+  }
+
+  async resolveCatalog(
+    executor: Executor,
+    params: {
+      catalogRevision: string;
+      sessionConfig: Record<string, ConfigValue>;
+      turnConfig: Record<string, ConfigValue>;
+    },
+    sessionId?: string,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): Promise<ResolvedProxyCatalog> {
+    if (sessionId) await this.proxySessions.ensure(this.getSession(sessionId));
+    return this.proxySessions.resolveCatalog(executor, params, sessionId, cliPath, configHome);
+  }
+
+  /**
+   * Reattach the selected Session before the Web client relies on dynamic
+   * Proxy capabilities such as Fork. Opening a completed transcript is still
+   * an activation: without this boundary, a Host restart leaves the persisted
+   * available_actions snapshot stale until the next mutating command.
+   */
+  async activateSession(sessionId: string): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) { await this.remoteController.sync(sessionId); return; }
+    await this.proxySessions.ensure(this.getSession(sessionId));
+  }
+
+  /** Returns cached capabilities or null if no session has booted that
+   *  executor yet (in which case the caller should warm by spawning). */
+  getCapabilities(
+    executor: string,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): import('@gian/shared').ProxyCatalog | null {
+    return this.proxySessions.getCapabilities(executor, cliPath, configHome);
+  }
+
+  getProtocolCapabilities(
+    executor: string,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): Record<string, unknown> | null {
+    return this.proxySessions.getProtocolCapabilities(executor, cliPath, configHome);
+  }
+
+  async getNativeConfig(sessionId: string): Promise<{
+    state: ExecutorConfigState;
+    options: NativeConfigOption[];
+  }> {
+    const session = this.getSession(sessionId);
+    await this.proxySessions.ensure(session);
+    return {
+      state: this.getSession(sessionId).executor_config,
+      options: this.getSession(sessionId).native_config_options,
+    };
+  }
+
+  async setNativeConfig(
+    sessionId: string,
+    configId: string,
+    value: NativeConfigValue,
+  ): Promise<{
+    state: ExecutorConfigState;
+    options: NativeConfigOption[];
+  }> {
+    const session = this.getSession(sessionId);
+    await this.proxySessions.ensure(session);
+    const current = this.getSession(sessionId);
+    const state: ExecutorConfigState = {
+      schemaVersion: 1,
+      values: { ...current.executor_config.values, [configId]: value },
+    };
+    this.persistNativeConfigSnapshot(sessionId, state, current.native_config_options);
+    return { state, options: current.native_config_options };
+  }
+
+  async listSessionSlashCommands(
+    sessionId: string,
+  ): Promise<import('@gian/shared').SlashListResult> {
+    const session = this.getSession(sessionId);
+    await this.proxySessions.ensure(session);
+    const client = this.proxy.get(sessionId);
+    if (!client) throw new Error(`no proxy for session: ${sessionId}`);
+    const catalog = await client.catalog();
+    return { commands: catalog.slashCommands };
+  }
+
+  /** Force-fetch capabilities by spawning a proxy if not cached.
+   *  Used by GET /api/proxy/:executor/models when no session exists yet. */
+  async warmCapabilities(
+    executor: Executor,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): Promise<import('@gian/shared').ProxyCatalog> {
+    const path = cliPath !== undefined
+      ? cliPath
+      : this.agentResolver?.cliPathForKind(executor) ?? null;
+    return this.proxySessions.warmCapabilities(executor, path, configHome);
+  }
+
+  /** Agent inspection uses the same exact generation and HOME as its next
+   * Session, never the kind/CLI-only legacy capability cache. */
+  async agentCapabilities(pluginId: string, agentId: string): Promise<{
+    catalog: import('@gian/shared').ProxyCatalog;
+    capabilities: Record<string, unknown>;
+  }> {
+    const borrowed = await this.proxy.acquireInspectionHost(resolvePluginIdInput(pluginId) ?? pluginId, { agentId });
+    try {
+      const initialized = await borrowed.host.initialize();
+      return { catalog: await borrowed.host.catalog(), capabilities: initialized.capabilities };
+    } finally {
+      await borrowed.release();
+    }
+  }
+
+  async resolveAgentCatalog(
+    pluginId: string,
+    agentId: string,
+    params: { catalogRevision: string; sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
+  ): Promise<ResolvedProxyCatalog> {
+    const borrowed = await this.proxy.acquireInspectionHost(resolvePluginIdInput(pluginId) ?? pluginId, { agentId });
+    try {
+      return normalizeProtocolCatalog(await borrowed.host.request<ResolvedProxyCatalog>('catalog.resolve', params));
+    } finally {
+      await borrowed.release();
+    }
+  }
+
+  /** Slash commands for an executor. With cwd, includes project-level. */
+  async listSlashCommands(
+    executor: Executor,
+    cwd?: string,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): Promise<import('@gian/shared').SlashListResult> {
+    const path = cliPath !== undefined
+      ? cliPath
+      : this.agentResolver?.cliPathForKind(executor) ?? null;
+    return this.proxySessions.listSlashCommands(executor, cwd, path, configHome);
+  }
+
+  setEffort(sessionId: string, effort: import('@gian/shared').ThinkingEffort | null): void {
+    const session = this.getSession(sessionId);
+    const now = new Date().toISOString();
+    const optionId = this.optionIdForRole(session.executor, 'effort', session);
+    const turn_config = { ...(session.turn_config ?? {}), [optionId]: effort };
+    this.db
+      .prepare(`UPDATE sessions SET thinking_effort = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
+      .run(effort, JSON.stringify(turn_config), now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { thinking_effort: effort, turn_config, updated_at: now });
+  }
+
+  /** codex Fast service tier. 'fast' arms the next codex turn with the Fast
+   *  tier; null clears it. Persisted so it survives reloads and rides every
+   *  subsequent turn (applies next turn, like /fast). */
+  setServiceTier(sessionId: string, tier: 'fast' | null): void {
+    const session = this.getSession(sessionId);
+    const now = new Date().toISOString();
+    const optionId = this.optionIdForRole(session.executor, 'fast', session);
+    const turn_config = { ...(session.turn_config ?? {}), [optionId]: tier === 'fast' };
+    this.db
+      .prepare(`UPDATE sessions SET service_tier = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
+      .run(tier, JSON.stringify(turn_config), now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { service_tier: tier, turn_config, updated_at: now });
+  }
+
+  renameSession(sessionId: string, name: string): void {
+    this.assertOrdinarySession(sessionId);
+    const trimmed = name.trim();
+    const stored = trimmed.length > 0 ? trimmed : null;
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?`)
+      .run(stored, now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { name: stored, updated_at: now });
+
+    // SESSION-NAME-001: propagate the new name down to the underlying native
+    // session so it's distinguishable in the executor's own listings (remote
+    // control, resume commands, or ACP session/list). Best-effort +
+    // fire-and-forget — the rename itself already succeeded above. We never
+    // clear a native name when the Gian name is emptied (cleared name → no-op).
+    if (stored) {
+      void this.applyNativeSessionName(sessionId, stored).catch(err => {
+        console.warn(`[session] native name sync failed for ${sessionId}: ${String(err)}`);
+      });
+    }
+  }
+
+  /**
+   * SESSION-NAME-001: push the Gian session name onto the native session.
+   *   - claude gian.proxy/1: delegate to the plugin's `session.rename`.
+   *   - claude legacy: append a `custom-title` line to the on-disk JSONL.
+   *   - codex: `thread/name/set` via the live proxy facade, when one is up.
+   *     Otherwise the next bring-up re-applies it (see bringUpProxySession).
+   */
+  private async applyNativeSessionName(sessionId: string, name: string): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) return;
+    const session = this.getSession(sessionId);
+    const client = this.proxy.get(sessionId);
+    if (client?.setName) {
+      await client.setName(name);
+      return;
+    }
+    if (session.executor === 'claude') this.writeClaudeCustomTitle(session, name);
+  }
+
+  /** Legacy-only: append a `custom-title` record to a Claude session's JSONL so the name
+   *  shows in `claude --resume` / Remote Control listings. No-op when the
+   *  session id or file isn't there yet (the first-turn `--name` covers that). */
+  private writeClaudeCustomTitle(session: Session, name: string): void {
+    const claudeSessionId = session.native_session_id;
+    if (!claudeSessionId) return;
+    const cwd = this.cwdForSession(session);
+    if (!cwd) return;
+    const filePath = locateCcJsonl(claudeSessionId, cwd);
+    if (!filePath || !existsSync(filePath)) return;
+    appendCcCustomTitle(filePath, claudeSessionId, name);
+  }
+
+  /** Resolve the working dir for a session (worktree path, else workspace path). */
+  private cwdForSession(session: Session): string | null {
+    if (session.worktree_path) return session.worktree_path;
+    const workspace = this.db
+      .prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(session.workspace_id) as { path: string } | undefined;
+    return workspace?.path ?? null;
+  }
+
+  /** Working-tree root confining `file` context items on a Side Chat send:
+   *  the parent session's tree. Null when the parent is unknown — file items
+   *  are then rejected at the Host boundary. */
+  private sidechatTreeRoot(sidechatId: string): string | null {
+    const parentId = this.sidechats.parentSessionIdOf(sidechatId);
+    if (!parentId) return null;
+    const parent = this.sessions.get(parentId);
+    return parent ? this.cwdForSession(parent) : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Queue facade (M1-E QueueManager + WS)
+  // Track E may refactor; these wrappers exist so ws-handler has a stable
+  // call site and the broadcast/popNext machinery lives next to SessionManager.
+  // -------------------------------------------------------------------------
+
+  setDeliveryLifecycle(sink: DeliveryLifecycleSink | null): void {
+    this.deliveryLifecycle = sink;
+  }
+
+  getQueueRevision(sessionId: string): string {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.replicas.snapshot(sessionId)?.session.queue.revision ?? '0';
+    return this.queue.getRevision(sessionId);
+  }
+
+  getResourceRevision(sessionId: string): string {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.replicas.snapshot(sessionId)?.session.revision ?? '0';
+    const row = this.db.prepare('SELECT resource_revision FROM sessions WHERE id = ?')
+      .get(sessionId) as { resource_revision: number } | undefined;
+    return String(row?.resource_revision ?? 0);
+  }
+
+  bumpResourceRevision(sessionId: string, expected?: string): string {
+    if (this.remoteController?.owns(sessionId)) return this.getResourceRevision(sessionId);
+    return this.db.transaction(() => {
+      const current = this.getResourceRevision(sessionId);
+      if (expected !== undefined && expected !== current) {
+        const error = new Error('session revision mismatch');
+        (error as Error & { code: string }).code = 'PRECONDITION_FAILED';
+        throw error;
+      }
+      this.db.prepare(
+        'UPDATE sessions SET resource_revision = resource_revision + 1 WHERE id = ?',
+      ).run(sessionId);
+      return this.getResourceRevision(sessionId);
+    })();
+  }
+
+  enqueueMessage(
+    sessionId: string,
+    text: string,
+    items?: import('@gian/shared').InputItem[],
+    toolRequestId?: string,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
+    expectedQueueRevision?: string,
+  ): import('../queue/manager.js').QueueEntry {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
+    assertLocalFilesBelongToSession(sessionId, items);
+    const normalizedContextItems = normalizeMessageContextItems(
+      contextItems,
+      { workingTreeRoot: this.cwdForSession(session) },
+    );
+    const normalizedDocument = normalizeMessageComposerDocument(
+      composerDocument,
+      items,
+      normalizedContextItems,
+    );
+    const entry = this.queue.add(sessionId, text, items, {
+      toolRequestId,
+      expectedRevision: expectedQueueRevision,
+      ...(normalizedContextItems.length > 0 ? { contextItems: normalizedContextItems } : {}),
+      ...(normalizedDocument ? { composerDocument: normalizedDocument } : {}),
+    });
+    this.broadcastQueueUpdated(sessionId);
+    return entry;
+  }
+
+  removeFromQueue(sessionId: string, queueId: string, expectedQueueRevision?: string): import('../queue/manager.js').QueueEntry {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
+    const removed = this.queue.remove(sessionId, queueId, expectedQueueRevision);
+    if (!removed) throw new Error(`queue entry not found: ${queueId}`);
+    this.deliveryLifecycle?.queueRemoved(removed, 'queue_removed');
+    this.broadcastQueueUpdated(sessionId);
+    return removed;
+  }
+
+  updateQueueMessage(
+    sessionId: string,
+    queueId: string,
+    text: string,
+    expectedQueueRevision?: string,
+  ): import('../queue/manager.js').QueueEntry {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
+    const updated = this.queue.update(sessionId, queueId, text, expectedQueueRevision);
+    if (!updated) throw new Error(`queue entry not found: ${queueId}`);
+    this.broadcastQueueUpdated(sessionId);
+    return updated;
+  }
+
+  clearQueue(sessionId: string, expectedQueueRevision?: string): import('../queue/manager.js').QueueEntry[] {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
+    const removed = this.queue.clear(sessionId, expectedQueueRevision);
+    for (const entry of removed) this.deliveryLifecycle?.queueRemoved(entry, 'queue_cleared');
+    this.broadcastQueueUpdated(sessionId);
+    return removed;
+  }
+
+  async sendQueuedNow(sessionId: string, expectedQueueRevision?: string): Promise<SendQueuedNowReceipt> {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
+    const empty = (): SendQueuedNowReceipt => ({
+      mode: 'noop',
+      affected: [],
+      queue: this.queue.list(sessionId),
+      queueRevision: this.queue.getRevision(sessionId),
+    });
+    if (this.turns.has(sessionId)) {
+      const canSteer = (await this.turnSteerAdvertised(sessionId)) === true;
+      if (!canSteer) {
+        // A running turn accepts queued text only when the Proxy advertises
+        // turn.steer. Refuse without popping: popping first dropped the
+        // message from both the queue and the transcript.
+        throw new Error(`a turn is already running; the queue drains automatically when it completes`);
+      }
+      const drained = this.queue.sendNow(sessionId, expectedQueueRevision);
+      if (drained.length === 0) return empty();
+      this.broadcastQueueUpdated(sessionId);
+      const affected: SendQueuedNowReceipt['affected'] = [];
+      for (let i = 0; i < drained.length; i++) {
+        const entry = drained[i]!;
+        try {
+          const receipt = await this.steerMessage(
+            sessionId,
+            entry.text,
+            entry.items,
+            entry.contextItems,
+            entry.composerDocument,
+            entry.toolRequestId,
+          );
+          this.deliveryLifecycle?.queueSteered(entry, receipt);
+          affected.push({
+            queueId: entry.id,
+            ...(entry.toolRequestId ? { toolRequestId: entry.toolRequestId } : {}),
+            state: 'steered',
+            turnId: receipt.turnId,
+            turnNumber: receipt.turnNumber,
+          });
+        } catch (err) {
+          const remaining = drained.slice(i);
+          this.queue.restore(sessionId, remaining);
+          for (const restored of remaining) this.deliveryLifecycle?.queueRestored(restored);
+          this.broadcastQueueUpdated(sessionId);
+          throw err;
+        }
+      }
+      return {
+        mode: 'steered',
+        affected,
+        queue: this.queue.list(sessionId),
+        queueRevision: this.queue.getRevision(sessionId),
+      };
+    }
+    const next = this.queue.popNext(sessionId, expectedQueueRevision);
+    if (!next) return empty();
+    this.broadcastQueueUpdated(sessionId);
+    const started = await this.sendMessage(
+      sessionId,
+      next.text,
+      next.items,
+      undefined,
+      next.toolRequestId,
+      next.contextItems,
+      next.composerDocument,
+    );
+    if (!started) {
+      this.queue.restore(sessionId, [next]);
+      this.deliveryLifecycle?.queueRestored(next);
+      this.broadcastQueueUpdated(sessionId);
+      throw new Error(`session not found: ${sessionId}`);
+    }
+    return {
+      mode: 'started',
+      affected: [{
+        queueId: next.id,
+        ...(next.toolRequestId ? { toolRequestId: next.toolRequestId } : {}),
+        state: 'started',
+        turnId: started.turnId,
+        turnNumber: started.turnNumber,
+      }],
+      queue: this.queue.list(sessionId),
+      queueRevision: this.queue.getRevision(sessionId),
+    };
+  }
+
+  /** `undefined` when the Proxy client is missing or its initialize result
+   *  cannot be read. An explicit capabilities map without `turn.steer` is false. */
+  private async turnSteerAdvertised(sessionId: string): Promise<boolean | undefined> {
+    const client = this.proxy.get(sessionId);
+    if (!client) return undefined;
+    try {
+      const initialized = await client.initialize();
+      const capabilities = initialized?.capabilities;
+      if (!capabilities || typeof capabilities !== 'object') return undefined;
+      return capabilities['turn.steer'] !== undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Mid-turn injection (`turn.steer`): append the message to the session's
+   *  ACTIVE turn instead of queueing it for the next one. The user message is
+   *  recorded on the active turn so the transcript shows it inline with the
+   *  work it steered. */
+  async steerMessage(
+    sessionId: string,
+    text: string,
+    items?: import('@gian/shared').InputItem[],
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
+    toolRequestId?: string,
+  ): Promise<SteerReceipt> {
+    if (this.sidechats.has(sessionId)) {
+      const normalizedContextItems = normalizeMessageContextItems(
+        contextItems,
+        { workingTreeRoot: this.sidechatTreeRoot(sessionId) },
+      );
+      const normalizedDocument = normalizeMessageComposerDocument(
+        composerDocument,
+        items,
+        normalizedContextItems,
+      );
+      await this.sidechats.steerTurn(
+        sessionId,
+        compileContextIntoInput(
+          text,
+          items,
+          normalizedContextItems,
+          normalizedDocument,
+          this.resolveSessionTranscript,
+        ),
+      );
+      return { turnId: sessionId, turnNumber: 0 };
+    }
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
+    assertLocalFilesBelongToSession(sessionId, items);
+    const normalizedContextItems = normalizeMessageContextItems(
+      contextItems,
+      { workingTreeRoot: this.cwdForSession(session) },
+    );
+    const normalizedDocument = normalizeMessageComposerDocument(
+      composerDocument,
+      items,
+      normalizedContextItems,
+    );
+    const client = this.proxy.get(sessionId);
+    if (!client?.steerTurn) {
+      throw new Error(`${session.executor} does not support steering`);
+    }
+    const active = this.turns.get(sessionId);
+    if (!active) {
+      throw new Error(`no active turn for session ${sessionId}; send a normal message instead`);
+    }
+    const proxySessionId = await this.proxySessions.ensure(session);
+    const translation = text.trim() && this.translations?.enabled(sessionId)
+      ? await this.translations.translate({ sessionId, requestId: randomUUID(), text, purpose: 'send', document: composerDocument },
+        loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES }) : undefined;
+    if (this.turns.get(sessionId)?.id !== active.id) {
+      throw new Error('The active turn ended while translating. Send the message as a new turn.');
+    }
+
+    const dispatchItems = translateItemsForExecutor(
+      session.executor,
+      compileContextIntoInput(
+        translation?.text ?? text,
+        translation ? items?.map(item => item.type === 'text' ? { ...item, text: translation.text } : item) : items,
+        normalizedContextItems,
+        translation?.translatedDocument ?? normalizedDocument,
+        this.resolveSessionTranscript,
+      ),
+    );
+    const attachments = buildAttachmentsFromItems(sessionId, items);
+    const userMessagePayload: Record<string, unknown> = { text };
+    if (translation) userMessagePayload.translation = translation;
+    if (attachments.length > 0) userMessagePayload.attachments = attachments;
+    if (normalizedContextItems.length > 0) userMessagePayload.context_items = normalizedContextItems;
+    if (normalizedDocument) userMessagePayload.composer_document = normalizedDocument;
+
+    if (toolRequestId) userMessagePayload.tool_request_id = toolRequestId;
+    await client.steerTurn({ sessionId: proxySessionId, input: dispatchItems });
+
+    try {
+      // Only record the message after Codex accepted the steer. Persisting it
+      // before the RPC made a rejected steer look successful and caused a
+      // re-queued entry to appear twice when it later drained normally.
+      this.persistAndBroadcastUserMessage(
+        sessionId,
+        active.id,
+        active.number,
+        userMessagePayload,
+      );
+    } catch {
+      const unknown = new Error('Provider accepted the steer but the receipt was not persisted');
+      (unknown as Error & { code: string }).code = 'UNKNOWN_OUTCOME';
+      throw unknown;
+    }
+    return { turnId: active.id, turnNumber: active.number };
+  }
+
+  // -------------------------------------------------------------------------
+  // onEvent hook — M3 IM router subscribes here
+  // -------------------------------------------------------------------------
+
+  /** Subscribe to every dispatched provider-native chat event. */
+  onEvent(fn: (e: ChatEvent) => void): () => void {
+    return this.events.onEvent(fn);
+  }
+
+  /** Convenience read for IM router to check queue depth without importing QueueManager. */
+  getQueueLength(sessionId: string): number {
+    return this.queue.list(sessionId).length;
+  }
+
+  getQueue(sessionId: string): import('../queue/manager.js').QueueEntry[] {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.queue(sessionId);
+    return this.queue.list(sessionId);
+  }
+
+  /** Fail-closed lifecycle gate for scheduled dispatch (contract J): the
+   *  control conversation must still be open for input and its Agent must
+   *  still exist. Throws otherwise; the schedule layer pauses fail-closed. */
+  assertReadyForScheduledTurn(sessionId: string): Session {
+    const session = this.getSession(sessionId);
+    if (session.archived) {
+      throw Object.assign(
+        new Error(`session is archived: ${sessionId}`),
+        { code: 'SCHEDULE_CONTROL_SESSION_ARCHIVED' },
+      );
+    }
+    assertSessionAcceptsInput(session);
+    this.agentResolver?.requireCliPathForSession(session);
+    return session;
+  }
+
+  /** Busy check for the idle-vs-fork decision (contract G): a live Turn or a
+   *  queued user delivery that would claim the next Turn both count. */
+  isBusyForScheduledTurn(sessionId: string): boolean {
+    return this.hasRunningTurn(sessionId) || this.getQueueLength(sessionId) > 0;
+  }
+
+  /** Reattach (or confirm the attach of) a session's Proxy after a Host
+   *  restart. Schedule reconciliation drives this for its live Runs: hidden
+   *  Fork Sessions have no user path that would trigger the lazy attach, and
+   *  without it a Provider-side completion would never be observed. Before
+   *  the attach may deliver provider events synchronously, the single
+   *  persisted `running` Turn is restored as the active generation from the
+   *  canonical turns/proxy_replay_turns rows, so terminal notifications
+   *  settle the restored Turn instead of being dropped. Idempotent and cheap
+   *  when already attached. */
+  async ensureProxyAttached(sessionId: string, expectedTurnId: string): Promise<void> {
+    const activeBefore = this.turns.get(sessionId);
+    const restored = this.turns.restoreActiveGenerationFromDb(sessionId, expectedTurnId);
+    if (!restored) {
+      throw new Error(`cannot restore the accepted scheduled Turn ${expectedTurnId}`);
+    }
+    try {
+      await this.proxySessions.ensure(this.getSession(sessionId));
+    } catch (error) {
+      if (!activeBefore) this.turns.clearRestoredGeneration(sessionId, expectedTurnId);
+      throw error;
+    }
+  }
+
+  /** Fail closed after bounded reattach attempts. The Schedule Run becomes
+   *  unknown separately, while this method clears the recovered generation
+   *  and settles its canonical Turn/Session so the target is not left busy. */
+  settleUnattachableScheduledTurn(sessionId: string, turnId: string): boolean {
+    this.turns.clearRestoredGeneration(sessionId, turnId);
+    return this.settleLostRuntimeTurn(sessionId, turnId);
+  }
+
+  getActiveTurn(sessionId: string): import('./turn-runtime.js').ActiveTurn | null {
+    if (this.remoteController?.owns(sessionId)) {
+      const active = this.remoteController.replicas.snapshot(sessionId)?.session.active_turn;
+      return active ? { id: localRemoteTurnId(sessionId, active.turn_number), number: active.turn_number } : null;
+    }
+    return this.turns.get(sessionId) ?? null;
+  }
+
+  runtimeActivationBlockers(pluginId: string): Array<{
+    kind: 'turn' | 'interaction';
+    id: string;
+  }> {
+    const turns = this.db.prepare(
+      `SELECT t.id AS id
+         FROM turns t
+         JOIN sessions s ON s.id = t.session_id
+        WHERE s.proxy_plugin_id = ? AND t.status = 'running'`,
+    ).all(pluginId) as Array<{ id: string }>;
+    const interactions = this.db.prepare(
+      `SELECT p.interaction_id AS id
+         FROM proxy_interactions p
+         JOIN sessions s ON s.id = p.session_id
+        WHERE s.proxy_plugin_id = ? AND p.outcome IS NULL`,
+    ).all(pluginId) as Array<{ id: string }>;
+    return [
+      ...turns.map(row => ({ kind: 'turn' as const, id: row.id })),
+      ...interactions.map(row => ({ kind: 'interaction' as const, id: row.id })),
+    ];
+  }
+
+  getApprovalModeForActiveTurn(sessionId: string): ApprovalMode | null {
+    const snapshot = this.turns.get(sessionId)?.configSnapshot;
+    const mode = snapshot?.['approval_mode'];
+    return isApprovalMode(mode) ? mode : this.getSession(sessionId).approval_mode;
+  }
+
+  // -------------------------------------------------------------------------
+  // Read APIs
+  // -------------------------------------------------------------------------
+
+  getSession(id: string): Session {
+    return this.sessions.get(id);
+  }
+
+  hasSession(id: string): boolean {
+    try {
+      this.sessions.get(id);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  getPendingApproval(
+    id: string,
+    sessionId?: string,
+  ): import('../approval/manager.js').ApprovalRecord | undefined {
+    return this.approvals.getPending(id, sessionId);
+  }
+
+  listPendingApprovals(): import('../approval/manager.js').ApprovalRecord[] {
+    return this.approvals.listPending();
+  }
+
+  listSessions(opts: { includeArchived?: boolean; archivedOnly?: boolean } = {}): Session[] {
+    return this.sessions.list(opts);
+  }
+
+  completeSubtask(sessionId: string): void {
+    this.subtasks.complete(sessionId);
+  }
+
+  reopenSubtask(sessionId: string): void {
+    this.subtasks.reopen(sessionId);
+  }
+
+  abandonSubtask(sessionId: string): void {
+    this.subtasks.abandon(sessionId);
+  }
+
+
+  // -------------------------------------------------------------------------
+  // Worktree lifecycle (Phase 1)
+  //
+  // Sessions in worktree mode have a dedicated branch + working directory.
+  // After merge or drop, the worktree is gone but the branch+base+outcome
+  // remain on the row for history. Terminated sessions are auto-archived;
+  // sendMessage is blocked.
+  // -------------------------------------------------------------------------
+
+  async mergeWorktree(sessionId: string, signal?: AbortSignal): Promise<void> {
+    await this.lifecycle.mergeWorktree(sessionId, signal);
+  }
+
+  async dropWorktree(sessionId: string): Promise<void> {
+    await this.lifecycle.dropWorktree(sessionId);
+  }
+
+  private async teardownProxy(sessionId: string): Promise<void> {
+    const proxyClient = this.proxy.get(sessionId);
+    const proxySessionId = this.proxySessions.get(sessionId);
+    if (proxyClient && proxySessionId) {
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        // Proxy shutdown is best-effort, but it must never hold the session
+        // lifecycle guard forever. Catch the RPC promise itself so a late
+        // rejection after the deadline cannot become unhandled.
+        await Promise.race([
+          Promise.resolve()
+            .then(() => proxyClient.closeSession(proxySessionId))
+            .catch(() => undefined),
+          new Promise<void>(resolveTimeout => {
+            timeout = setTimeout(resolveTimeout, PROXY_CLOSE_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    }
+    this.proxySessions.forget(sessionId);
+    this.turns.forget(sessionId);
+    this.watcher?.stop(sessionId);
+  }
+
+  async archiveSession(sessionId: string, archived: boolean): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) {
+      this.db.prepare('UPDATE sessions SET archived = ? WHERE id = ?').run(archived ? 1 : 0, sessionId);
+      this.broadcastSessionUpdated(sessionId, { archived: archived ? 1 : 0 });
+      return;
+    }
+    await this.lifecycle.archive(sessionId, archived);
+  }
+
+  requestWorktreeView(
+    sessionId: string,
+    path: string,
+    source: 'agent' | 'gian_tool',
+  ): Session {
+    const session = this.sessions.get(sessionId);
+    if (!session.workspace_id) throw new Error(`session has no workspace: ${sessionId}`);
+    this.db.prepare(
+      `UPDATE sessions
+       SET detected_worktree_path = ?, detected_worktree_source = ?,
+           detected_worktree_revision = detected_worktree_revision + 1
+       WHERE id = ?`,
+    ).run(path, source, sessionId);
+    const updated = this.sessions.get(sessionId);
+    this.broadcastSessionUpdated(sessionId, {
+      detected_worktree_path: path,
+      detected_worktree_source: source,
+      detected_worktree_revision: updated.detected_worktree_revision ?? 0,
+    });
+    this.broadcaster.broadcast({
+      type: 'workspace:git-updated',
+      workspace_id: session.workspace_id,
+      reason: source === 'gian_tool' ? 'worktree-created' : 'worktree-detected',
+    });
+    return updated;
+  }
+
+  assignTask(sessionId: string, taskId: string | null): void {
+    this.lifecycle.assignTask(sessionId, taskId);
+  }
+
+  notifyTaskSessionsUpdated(taskId: string): void {
+    this.lifecycle.notifyTaskSessionsUpdated(taskId);
+  }
+
+  /**
+   * Toggle the unread marker. Deliberately does NOT touch `updated_at` — read/
+   * unread is a view-state change and must not reorder the sidebar. Idempotent.
+   */
+  setUnread(sessionId: string, unread: boolean): void {
+    this.lifecycle.setUnread(sessionId, unread);
+  }
+
+  /** Toggle the pinned marker (sidebar ordering). See LifecycleService. */
+  setPinned(sessionId: string, pinned: boolean): void {
+    this.lifecycle.setPinned(sessionId, pinned);
+  }
+
+  /**
+   * Permanently delete a session. If the session is a still-live worktree
+   * (no outcome yet), drop the worktree first to avoid orphaning the dir
+   * on disk. Then teardown proxy + cascade-delete via FK constraints.
+   */
+  /** Ids of every session owned by a Task (its PM manager + all subtasks).
+   *  Used by the cascade delete path in ws-handler `task:delete`. */
+  listSessionIdsForTask(taskId: string): string[] {
+    return this.lifecycle.listSessionIdsForTask(taskId);
+  }
+
+  async deleteSession(sessionId: string, confirmedSidechatIds?: string[]): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) {
+      try {
+        this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+      } catch (error) {
+        this.expireInboxIfSessionGone(sessionId);
+        throw error;
+      }
+      this.expireInboxIfSessionGone(sessionId);
+      this.sessions.forget(sessionId);
+      this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
+      return;
+    }
+    if (this.sidechats.has(sessionId)) {
+      throw requestViolation('SESSION_NOT_FOUND', `session not found: ${sessionId}`);
+    }
+    await this.sidechats.closeAllForParent(sessionId, confirmedSidechatIds ?? []);
+    this.forgetSessionInteractionResponses(sessionId);
+    try {
+      await this.lifecycle.delete(sessionId);
+    } catch (error) {
+      this.expireInboxIfSessionGone(sessionId);
+      throw error;
+    }
+    this.expireInboxIfSessionGone(sessionId);
+  }
+
+  /** Inbox expiry follows the sessions row. A living session keeps its pending items. */
+  private expireInboxIfSessionGone(sessionId: string): void {
+    const row = this.db.prepare(
+      'SELECT 1 AS ok FROM sessions WHERE id = ?',
+    ).get(sessionId);
+    if (row === undefined) this.sessionInbox?.expireSession(sessionId);
+  }
+
+  listEvents(sessionId: string): EventEnvelope[] {
+    if (this.remoteController?.owns(sessionId)) {
+      return this.remoteController.historyEvents(sessionId);
+    }
+    this.assertOrdinarySession(sessionId);
+    return this.history.listEvents(sessionId);
+  }
+
+  listEventPage(sessionId: string, beforeTurn: number | null, pageSize?: number): EventHistoryPage {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.historyPage(sessionId, beforeTurn, pageSize);
+    this.assertOrdinarySession(sessionId);
+    return this.history.listEventPage(sessionId, beforeTurn, pageSize);
+  }
+
+  /**
+   * Read-only Trace snapshot for a session. Throws `session not found: <id>`
+   * for unknown sessions (same error model as repository-backed reads).
+   * Sessions without trace evidence yield an empty partial snapshot.
+   */
+  getTraceSnapshot(sessionId: string): TraceSnapshot {
+    this.assertOrdinarySession(sessionId);
+    this.sessions.get(sessionId);
+    const rows = this.traceEvidence.listEvidence(sessionId);
+    if (rows.length === 0) {
+      // A session that never executed a turn has a normal empty trace; only
+      // sessions with turns but no recoverable evidence are partial.
+      const turnCount = this.db.prepare(
+        'SELECT COUNT(*) AS n FROM turns WHERE session_id = ?',
+      ).get(sessionId) as { n: number };
+      if (turnCount.n === 0) {
+        return { sessionId, generatedAt: new Date().toISOString(), partial: false, items: [] };
+      }
+    }
+    return projectTraceSnapshot(sessionId, rows, new Date().toISOString());
+  }
+
+  private persistNativeConfigSnapshot(
+    sessionId: string,
+    state: ExecutorConfigState,
+    options: NativeConfigOption[],
+  ): void {
+    this.events.persistNativeConfigSnapshot(sessionId, state, options);
+  }
+
+  private adoptForkChild(client: ProtocolV2SessionClient, sessionId: string): void {
+    const existing = this.proxy.get(sessionId);
+    if (clientHasAttachedSession(existing)) return;
+    if (existing) {
+      throw requestViolation('INTERNAL', 'Fork child facade exists without an attachment');
+    }
+    const child = client.runtimeHost().createSessionClient(sessionId);
+    if (!clientHasAttachedSession(child)) {
+      throw requestViolation('INTERNAL', 'Fork child was not attached after session.fork');
+    }
+    this.proxy.adoptExisting(sessionId, child);
+    this.proxySessions.attachAdopted(sessionId, sessionId);
+  }
+
+  private readForkRequestIdentity(sessionId: string): StoredForkRequestIdentity | null {
+    return this.db.prepare(
+      `SELECT origin_source_stream_id AS sourceStreamId,
+              origin_anchor_type AS anchorType
+         FROM sessions
+        WHERE id = ? AND origin_kind = 'fork'`,
+    ).get(sessionId) as StoredForkRequestIdentity | undefined ?? null;
+  }
+
+  private async abandonForkChild(
+    client: ProtocolV2SessionClient,
+    sessionId: string,
+    nativeSessionId?: string | null,
+  ): Promise<string[]> {
+    const leftovers: string[] = [];
+    const host = client.runtimeHost();
+    const child = host.createSessionClient(sessionId);
+    try {
+      await child.closeSession();
+    } catch (error) {
+      leftovers.push(`session.close failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (nativeSessionId && typeof client.deleteNativeSession === 'function') {
+      try {
+        await client.deleteNativeSession(nativeSessionId);
+      } catch (error) {
+        leftovers.push(`session.native.delete failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (typeof host.unregister === 'function') {
+      host.unregister(sessionId, child);
+    }
+    this.proxy.forgetAdopted(sessionId);
+    return leftovers;
+  }
+
+  private persistKimiReplay(
+    sessionId: string,
+    updates: unknown[],
+    timestamp: string,
+    replayStreamId?: string,
+  ): { turns: number; events: number } {
+    return this.events.persistKimiReplay(sessionId, updates, timestamp, replayStreamId);
+  }
+
+  private completeTurn(
+    sessionId: string,
+    status: 'completed' | 'error' | 'stopped',
+  ): void {
+    this.events.completeTurn(sessionId, status);
+  }
+
+  private async translateCompletedTurn(sessionId: string, turn: number): Promise<void> {
+    const service = this.translations;
+    if (!service?.enabled(sessionId)) return;
+    const sourceId = `turn:${turn}`;
+    const key = `${sessionId}:${sourceId}`;
+    try {
+      const messages = compactHistoryEnvelopes(this.listEvents(sessionId))
+        .filter(event => event.turn === turn && event.display?.type === 'message');
+      const last = messages.filter(event => {
+        const data = event.display?.data as { role?: string; text?: string };
+        return data.role !== 'user' && !!data.text?.trim();
+      }).at(-1);
+      const text = (last?.display?.data as { text?: string } | undefined)?.text;
+      if (!text) return;
+      service.automatic.set(key, { pending: true });
+      await service.translate({ sessionId, requestId: randomUUID(), purpose: 'read', sourceId, text },
+        loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES });
+      service.automatic.delete(key);
+    } catch (error) {
+      service.automatic.set(key, { pending: false, error: error instanceof Error ? error.message : 'Translation failed' });
+    }
+  }
+
+  private hasRunningTurn(sessionId: string): boolean {
+    if (this.turns.has(sessionId)) return true;
+    return !!this.db
+      .prepare(
+        `SELECT 1
+         FROM turns
+         WHERE session_id = ? AND status = 'running'
+         LIMIT 1`,
+      )
+      .get(sessionId);
+  }
+
+  /** Persist and broadcast one canonical user-message envelope. Both paths
+   *  must share identity and time so live hydration can converge with history. */
+  /** Transcript resolver for `session` context items at compile time. Any
+   *  session known to this Host may be referenced — cross-workspace included,
+   *  since it is all the user's own data. Unknown/deleted sessions and
+   *  sessions without conversation text return null so the reference degrades
+   *  to a plain item note instead of failing the send. */
+  private resolveSessionTranscript = (referencedSessionId: string): SessionTranscriptSlice | null => {
+    const row = this.db
+      .prepare('SELECT name FROM sessions WHERE id = ?')
+      .get(referencedSessionId) as { name: string | null } | undefined;
+    if (!row) return null;
+    const entries = this.history.conversationMessages(referencedSessionId);
+    if (entries.length === 0) return null;
+    return {
+      title: row.name?.trim() || `session ${referencedSessionId.slice(0, 6)}`,
+      entries,
+    };
+  };
+
+  private persistAndBroadcastUserMessage(
+    sessionId: string,
+    turnId: string,
+    turnNumber: number,
+    data: Record<string, unknown>,
+    ts = Date.now(),
+  ): void {    const callId = randomUUID();
+    this.history.appendEvent(
+      sessionId,
+      turnId,
+      callId,
+      'user_message',
+      data,
+      { createdAt: new Date(ts).toISOString() },
+    );
+    this.broadcastEvent(sessionId, turnNumber, callId, 'user_message', data, ts);
+  }
+
+  private broadcastEvent(
+    sessionId: string,
+    turn: number,
+    callId: string,
+    event: string,
+    data: Record<string, unknown>,
+    ts?: number,
+  ): void {
+    this.events.broadcastEvent(sessionId, turn, callId, event, data, ts);
+  }
+
+  private broadcastSessionUpdated(id: string, partial: Partial<Session>): void {
+    this.events.broadcastSessionUpdated(id, partial);
+  }
+
+  private broadcastQueueUpdated(sessionId: string): void {
+    this.events.broadcastQueueUpdated(sessionId);
+  }
+
+  private assertOrdinarySession(sessionId: string): void {
+    if (this.sidechats.has(sessionId)) {
+      throw requestViolation('SESSION_NOT_FOUND', `session not found: ${sessionId}`);
+    }
+  }
+}
+
+function isV2Client(client: unknown): client is ProtocolV2SessionClient {
+  return !!client
+    && typeof client === 'object'
+    && 'protocolV2' in client
+    && (client as { protocolV2?: true }).protocolV2 === true
+    && 'runtimeHost' in client;
+}
+
+/** Proxy-advertised wire actionIds recorded on an exit_plan_mode request. */
+function exitPlanWireActions(
+  pending: { category: string; payload?: Record<string, unknown> } | undefined,
+): { allow: string; deny: string } | null {
+  if (pending?.category !== 'exit_plan_mode') return null;
+  const raw = pending.payload?.['wireActions'];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const allow = (raw as Record<string, unknown>)['allow'];
+  const deny = (raw as Record<string, unknown>)['deny'];
+  return typeof allow === 'string' && allow && typeof deny === 'string' && deny
+    ? { allow, deny }
+    : null;
+}
+
+interface PlanExitSeen {
+  turnId: string;
+  approvalMode: Session['approval_mode'];
+  optionId: string;
+  turnConfigMode: string;
+}
+
+function inboxTargetMatches(targetJson: string, sessionId: string, approvalId: string): boolean {
+  let target: { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+  try {
+    target = JSON.parse(targetJson) as { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+  } catch {
+    return false;
+  }
+  return target.type === 'session'
+    && target.session_id === sessionId
+    && target.interaction_id === approvalId;
+}
+
+function preconditionFailed(message: string): Error {
+  const error = new Error(message);
+  (error as Error & { code: string }).code = 'PRECONDITION_FAILED';
+  return error;
+}
+
+function expectedInboxRef(value: unknown): { id: string; generation: number } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as { id?: unknown; generation?: unknown };
+  const generation = candidate.generation;
+  if (typeof candidate.id !== 'string') return null;
+  if (candidate.id.length < 1 || candidate.id.length > 128 || candidate.id.includes('\0')) return null;
+  if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) return null;
+  return { id: candidate.id, generation };
+}
+
+function providerNativeSessionId(session: { nativeSession?: { id?: string } }): string | null {
+  const id = session.nativeSession?.id;
+  return typeof id === 'string' && id.length > 0 ? id : null;
+}
+
+interface StoredForkRequestIdentity {
+  sourceStreamId: string | null;
+  anchorType: 'head' | 'turn' | null;
+}
+
+function isPublishedForkIdentity(
+  session: Session,
+  identity: StoredForkRequestIdentity | null,
+  sourceId: string,
+  sourceStreamId: string,
+  anchor: SessionForkFromInput['anchor'],
+): boolean {
+  if (
+    session.origin?.kind !== 'fork'
+    || session.origin.session_id !== sourceId
+    || identity?.sourceStreamId !== sourceStreamId
+    || identity.anchorType !== anchor.type
+  ) {
+    return false;
+  }
+  if (anchor.type === 'head') return true;
+  return session.origin.turn_id === anchor.turnId
+    && session.origin.source_turn_id === anchor.sourceTurnId;
+}
+
+function clientHasAttachedSession(client: { hasAttachedSession?: () => boolean } | undefined): boolean {
+  return typeof client?.hasAttachedSession === 'function' && client.hasAttachedSession();
+}
+
+function throwIfForkLeftovers(leftovers: string[], original?: unknown): void {
+  if (leftovers.length === 0) return;
+  const extra = original instanceof Error ? original.message : original ? String(original) : '';
+  throw requestViolation(
+    'RUNTIME_ERROR',
+    extra
+      ? `session.fork left Provider resources: ${leftovers.join('; ')}. ${extra}`
+      : `session.fork left Provider resources: ${leftovers.join('; ')}`,
+  );
+}

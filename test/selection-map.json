@@ -1,0 +1,1075 @@
+{
+  "version": 1,
+  "stages": {
+    "quick": {
+      "runScopes": [
+        "unit",
+        "integration"
+      ]
+    },
+    "merge": {
+      "runScopes": [
+        "unit",
+        "integration",
+        "system"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "id": "catalog-localization",
+      "patterns": ["packages/proxy-catalog-contract/src/localization.ts", "packages/shared/src/proxy-catalog-projection.ts", "catalog/proxy-information/**"],
+      "modules": ["scripts", "proxy-catalog-contract", "shared", "host", "web"],
+      "scopes": ["unit", "integration"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Signed localized Catalog metadata and documents cross compiler, Host projection and locale-aware Web cache boundaries."
+    },
+    {
+      "id": "conversation-translation",
+      "patterns": ["packages/shared/src/translation.ts", "packages/host/src/translation/**", "packages/host/src/web/routes/translation.ts", "packages/host/migrations/082_translation.sql", "packages/host/migrations/083_remote_translation.sql", "packages/host/test/translation.test.ts", "packages/host/test/remote-translation.test.ts", "packages/web/src/translation/**", "packages/web/src/operations/translation.ts", "packages/web/test/translation.test.tsx", "packages/web/test/remote-translation.test.tsx", "packages/web/test/translation-font-scale.test.ts", "packages/web/test/translation-send-flow.test.tsx"],
+      "modules": ["shared", "host", "web", "chat-ui", "codex-proxy"],
+      "scopes": ["unit", "integration"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Translation binds settings, isolated Provider calls, original-message persistence and reading-only projections."
+    },
+    {
+      "id": "proxy-information-projection",
+      "patterns": ["catalog/proxy-information/**"],
+      "modules": ["scripts", "proxy-catalog-contract"],
+      "scopes": ["integration", "unit"],
+      "checks": ["quality:test-catalog"],
+      "reason": "Authored Proxy tutorials and histories project to signed v1-compatible Catalog documents."
+    },
+    {
+      "id": "proxy-protocol-delivery",
+      "patterns": ["delivery/proxies/**", "scripts/export-proxies.mjs", "scripts/proxies-delivery.test.mjs", "scripts/proxy-protocol-package.mjs", "scripts/proxy-protocol-package.test.mjs", "scripts/import-proxy-protocol.mjs", "scripts/fixtures/proxy-protocol-consumer.mts", ".github/workflows/proxy-protocol-release.yml"],
+      "modules": ["proxy-protocol", "scripts"],
+      "scopes": ["unit", "integration", "system"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Public Proxy Protocol delivery binds the standalone consumer to immutable public package bytes."
+    },
+    {
+      "id": "remote-delivery",
+      "patterns": ["delivery/remote/**", "scripts/export-remote.mjs", "scripts/remote-delivery.test.mjs", "scripts/remote-deployment-system.test.mjs", "scripts/remote-protocol-package.mjs", "scripts/remote-protocol-package.test.mjs", "scripts/import-remote-protocol.mjs"],
+      "modules": ["remote-protocol", "remote-server", "remote-web", "chat-ui", "scripts"],
+      "scopes": ["unit", "integration", "system"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Remote export and delivery changes affect its independent build, artifact integrity and deployment boundary."
+    },
+    {
+      "id": "public-english-export",
+      "patterns": [
+        "scripts/public-english.mjs",
+        "scripts/check-public-english.mjs",
+        "scripts/check-public-english.test.mjs",
+        "scripts/media-review.json",
+        "scripts/public-english.test.mjs",
+        "scripts/capture-proxy-release-evidence.mjs",
+        "scripts/capture-proxy-release-evidence.test.mjs",
+        "scripts/export-app.mjs",
+        "scripts/export-app.test.mjs",
+        ".github/workflows/public-english.yml"
+      ],
+      "modules": ["scripts"],
+      "scopes": ["unit", "system"],
+      "checks": ["quality:test-catalog"],
+      "reason": "Public exports fail closed unless paths and text are English and every binary has an exact reviewed digest."
+    },
+    {
+      "id": "gian-tool-skill-package",
+      "patterns": [
+        "scripts/package-gian-tool-skill.mjs",
+        "scripts/package-gian-tool-skill.test.mjs",
+        "skill/gian-tool-install.md",
+        "packages/tool-cli/skill/gian-tool/SKILL.md"
+      ],
+      "modules": ["scripts"],
+      "scopes": ["unit"],
+      "checks": ["quality:test-catalog"],
+      "reason": "The installed Gian Tool skill packages skill-local helpers and leaves MCP configuration unchanged."
+    },
+    {
+      "id": "root-test-infrastructure",
+      "patterns": [
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "tsconfig.json",
+        "test/*.json",
+        "test/e2e/**",
+        "playwright.config.ts",
+        "playwright.remote-acceptance.config.mjs",
+        "scripts/run-giandev-acceptance.mjs",
+        "scripts/run-tests.mjs",
+        "scripts/test-catalog.mjs",
+        "scripts/run-affected-tests.mjs",
+        "scripts/test-selection.mjs",
+        "scripts/local-verification.mjs",
+        "scripts/execution-policy.mjs",
+        "scripts/run-verification.mjs",
+        "scripts/typecheck.mjs",
+        ".github/workflows/*.yml"
+      ],
+      "modules": [
+        "antigravity-proxy",
+        "cc-proxy",
+        "codex-proxy",
+        "desktop",
+        "dsh-bridge",
+        "dsh-proxy",
+        "grok-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-catalog-contract",
+        "proxy-protocol",
+        "scripts",
+        "shared",
+        "tool-cli",
+        "tool-mcp",
+        "web",
+        "zcode-proxy",
+        "chat-ui",
+        "remote-protocol",
+        "remote-server",
+        "remote-web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:test-catalog",
+        "quality:test-selection",
+        "quality:functional-evidence",
+        "quality:docs",
+        "quality:operations:strict",
+        "quality:versions"
+      ],
+      "reason": "Root build, catalog, runner, or CI changes can alter every deterministic test path."
+    },
+    {
+      "id": "quality-docs",
+      "patterns": [
+        "*.md",
+        "docs/archive/**",
+        "docs/**/*.md",
+        ".agents/skills/**",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/mockups/**",
+        "design/**"
+      ],
+      "optionalPatterns": [
+        "docs/archive/**",
+        "docs/**/*.md",
+        ".agents/skills/**",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/mockups/**",
+        "design/**"
+      ],
+      "modules": [],
+      "scopes": [],
+      "checks": [
+        "quality:docs"
+      ],
+      "reason": "Documentation and historical snapshots need valid active links, not product regression or a manual ledger."
+    },
+    {
+      "id": "scripts",
+      "patterns": [
+        "scripts/**"
+      ],
+      "modules": [
+        "scripts"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Repository automation changes select the script regression surface."
+    },
+    {
+      "id": "shared-contract",
+      "patterns": [
+        "packages/shared/**"
+      ],
+      "modules": [
+        "antigravity-proxy",
+        "cc-proxy",
+        "codex-proxy",
+        "desktop",
+        "dsh-bridge",
+        "dsh-proxy",
+        "grok-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-protocol",
+        "shared",
+        "web",
+        "zcode-proxy",
+        "chat-ui"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Shared contracts are consumed by the Host, UI, Desktop, and all proxies."
+    },
+    {
+      "id": "proxy-protocol-contract",
+      "patterns": [
+        "packages/proxy-protocol/**"
+      ],
+      "modules": [
+        "antigravity-proxy",
+        "cc-proxy",
+        "codex-proxy",
+        "dsh-proxy",
+        "grok-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-protocol",
+        "zcode-proxy"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Proxy protocol changes expand to every proxy consumer and Host routing."
+    },
+    {
+      "id": "proxy-catalog-contract",
+      "patterns": [
+        "packages/proxy-catalog-contract/**"
+      ],
+      "modules": [
+        "proxy-catalog-contract"
+      ],
+      "scopes": [
+        "unit"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Official Catalog Source/Bundle contract changes stay at the isolated contract package."
+    },
+    {
+      "id": "official-catalog-source",
+      "patterns": [
+        "catalog/official-source/**",
+        "scripts/compile-official-catalog.mjs",
+        "scripts/verify-official-catalog-source.mjs"
+      ],
+      "modules": [
+        "proxy-catalog-contract",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "catalog:verify"
+      ],
+      "reason": "Official Catalog source and compile/verify scripts must stay mapped; unknown-path full-suite fallback is forbidden."
+    },
+    {
+      "id": "proxy-step-request-trace",
+      "patterns": [
+        "packages/proxy-protocol/src/constants.ts",
+        "packages/proxy-protocol/src/schemas.ts",
+        "packages/proxy-protocol/src/conformance.ts",
+        "packages/shared/src/trace.ts",
+        "packages/host/src/trace/**",
+        "packages/host/src/event/project-protocol-v2.ts",
+        "packages/web/src/trace/**",
+        "scripts/fixtures/fake-catalog-ui-proxy.mjs"
+      ],
+      "modules": [
+        "proxy-protocol",
+        "shared",
+        "host",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:operations:strict"
+      ],
+      "reason": "Step/request protocol identities cross the canonical evidence, Trace projection, and Web hierarchy boundaries."
+    },
+    {
+      "id": "host",
+      "patterns": [
+        "packages/host/**"
+      ],
+      "modules": [
+        "host",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Host behavior selects Host tests plus Web contract and component integration."
+    },
+    {
+      "id": "gian-tool",
+      "patterns": [
+        "packages/shared/src/tool.ts",
+        "packages/shared/src/model.ts",
+        "packages/shared/src/runtime-contracts.ts",
+        "packages/host/src/tool/**",
+        "packages/host/src/workspace/git.ts",
+        "packages/host/src/session/event-coordinator.ts",
+        "packages/host/src/session/manager.ts",
+        "packages/host/migrations/056_gian_tool_v0.sql",
+        "packages/host/migrations/061_gian_tool_credentials.sql",
+        "packages/host/migrations/062_gian_tool_roles_and_session_ownership.sql",
+        "packages/host/migrations/065_gian_tool_internal_credential_renewal.sql",
+        "packages/host/migrations/066_session_worktree_view_source.sql",
+        "packages/host/test/gian-tool-*.test.ts",
+        "packages/host/test/gian-session-host-services.test.ts",
+        "packages/host/test/session-agent-binding.test.ts",
+        "packages/tool-cli/**",
+        "packages/tool-mcp/**",
+        "packages/proxy-protocol/src/schemas.ts",
+        "packages/proxy-protocol/src/conformance.ts",
+        "packages/proxies/codex-proxy/src/core/**",
+        "packages/proxies/codex-proxy/src/protocol/**",
+        "packages/proxies/codex-proxy/src/runtime/**",
+        "packages/proxies/codex-proxy/skills/gian-session/SKILL.md",
+        "packages/web/src/App.tsx",
+        "packages/web/src/feedback.ts",
+        "packages/web/src/presentation/wt-view.ts",
+        "packages/web/src/components/Toaster.tsx",
+        "packages/web/test/wt-view.test.ts",
+        "packages/web/test/feedback.test.tsx",
+        "scripts/fixtures/gian-tool-mcp-provider-cases.json",
+        "docs/operations/gian-tool-v0-api-and-implementation.md",
+        "docs/adr/0043-authenticate-host-listened-gian-tool-mcp.md",
+        "docs/adr/0044-authorize-gian-tool-by-role-and-direct-session-ownership.md",
+        "docs/adr/0049-inject-session-scoped-gian-mcp.md",
+        "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md",
+        "packages/host/migrations/072_queue_and_resource_revisions.sql",
+        "packages/host/migrations/073_remote_identity.sql",
+        "packages/host/src/remote/**",
+        "packages/host/test/remote-*.test.ts"
+      ],
+      "optionalPatterns": [
+        "docs/adr/0043-authenticate-host-listened-gian-tool-mcp.md",
+        "docs/adr/0044-authorize-gian-tool-by-role-and-direct-session-ownership.md",
+        "docs/adr/0049-inject-session-scoped-gian-mcp.md",
+        "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md",
+        "docs/operations/gian-tool-v0-api-and-implementation.md"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "tool-cli",
+        "tool-mcp",
+        "proxy-protocol",
+        "codex-proxy",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "Gian Tool contracts cross shared validation, role/direct-ownership authorization, Host domain orchestration, private transports, Session-scoped Host Service injection, worktree view context, and the Codex runtime adapter."
+    },
+    {
+      "id": "host-process-git-runtime",
+      "patterns": [
+        "packages/host/test/runtime-install-fixtures.ts",
+        "packages/host/test/fixtures/send-catalog-protocol-stub.mjs",
+        "packages/host/src/proxy/**",
+        "packages/host/src/runtime/**",
+        "packages/host/src/term/**",
+        "packages/host/src/agents/**",
+        "packages/host/src/workspace/git*.ts",
+        "packages/host/src/session/worktree-detect.ts",
+        "packages/host/src/index.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "system"
+      ],
+      "checks": [],
+      "reason": "Process, Provider adapter, port, Git, worktree, and terminal boundaries require System coverage."
+    },
+    {
+      "id": "sidechat-fork-core",
+      "patterns": [
+        "packages/proxy-protocol/src/constants.ts",
+        "packages/proxy-protocol/src/schemas.ts",
+        "packages/proxy-protocol/src/conformance.ts",
+        "packages/proxy-protocol/src/redact.ts",
+        "packages/proxy-protocol/src/sidechat-resume-store.ts",
+        "packages/proxy-protocol/test/sidechat-resume-store.test.ts",
+        "packages/shared/src/sidechat.ts",
+        "packages/shared/src/operations.ts",
+        "packages/host/src/session/sidechat-*.ts",
+        "packages/host/src/session/fork.ts",
+        "packages/host/migrations/052_sidechat_transients_and_fork_origin.sql",
+        "packages/host/migrations/053_fork_request_identity.sql",
+        "packages/host/migrations/054_sidechat_public_state.sql",
+        "packages/host/migrations/063_sidechat_turn_config.sql",
+        "packages/host/test/fixtures/fake-sidechat-fork-proxy.mjs",
+        "packages/host/test/sidechat-fork-*.test.ts",
+        "packages/proxies/cc-proxy/src/protocol/v2-adapter.ts",
+        "packages/proxies/codex-proxy/src/protocol/v2-adapter.ts",
+        "packages/proxies/kimi-proxy/src/protocol/v2-adapter.ts",
+        "packages/proxies/grok-proxy/src/protocol/v2-adapter.ts"
+      ],
+      "modules": [
+        "proxy-protocol",
+        "shared",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Side Chat and Session Fork contracts cross protocol schemas, Host transient persistence, and Fake Proxy subprocess evidence."
+    },
+    {
+      "id": "host-approval-scope",
+      "patterns": [
+        "packages/host/src/approval/manager.ts",
+        "packages/host/src/session/event-coordinator.ts",
+        "packages/host/src/session/manager.ts",
+        "packages/host/src/tool/service.ts",
+        "packages/host/src/remote/runtime.ts",
+        "packages/host/src/remote/command-adapter.ts",
+        "packages/host/src/remote/projection.ts",
+        "packages/host/src/remote/execution-journal.ts",
+        "packages/host/test/approval-scope.test.ts",
+        "packages/host/test/approval-response-scope.test.ts",
+        "packages/host/test/remote-interaction-scope.test.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "integration"
+      ],
+      "checks": [],
+      "reason": "Pending approvals, response idempotency ids, and remote interaction cards are isolated by host session id, the authoritative host turn occurrence, and the original approval id."
+    },
+    {
+      "id": "host-session-inbox",
+      "patterns": [
+        "packages/host/src/inbox/session-adapter.ts",
+        "packages/host/src/inbox/projection-facts.ts",
+        "packages/host/src/inbox/signal.ts",
+        "packages/host/src/inbox/service.ts",
+        "packages/host/src/approval/manager.ts",
+        "packages/host/src/session/attention.ts",
+        "packages/host/src/session/event-coordinator.ts",
+        "packages/host/src/native/watcher.ts",
+        "packages/host/src/session/manager.ts",
+        "packages/host/src/web/app.ts",
+        "packages/host/src/web/ws-handler.ts",
+        "packages/host/test/attention-broadcast.test.ts",
+        "packages/host/test/jsonl-watcher.test.ts",
+        "packages/host/test/session-inbox-adapter.test.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "integration"
+      ],
+      "checks": [],
+      "reason": "Main-session questions and approvals mirror into Inbox only after a real pending registration, and close only after the domain accepts the outcome."
+    },
+    {
+      "id": "attention-inbox-contract",
+      "patterns": [
+        "packages/shared/src/attention.ts",
+        "packages/shared/src/inbox.ts",
+        "packages/shared/src/index.ts",
+        "packages/shared/src/web.ts",
+        "packages/shared/src/runtime-contracts.ts",
+        "packages/shared/test/attention-contract.test.mjs",
+        "packages/desktop/src/attention-client.ts",
+        "packages/desktop/test/attention-client.test.ts",
+        "packages/desktop/src/main.ts",
+        "packages/desktop/src/native-notifications.ts",
+        "packages/desktop/test/native-notifications.test.ts",
+        "packages/host/src/web/routes/inbox.ts",
+        "packages/host/test/inbox-routes.test.ts",
+        "packages/host/src/schedule/dispatcher.ts",
+        "packages/host/test/schedule-dispatcher.test.ts",
+        "packages/host/src/inbox/service.ts",
+        "packages/host/src/inbox/pairing-producer.ts",
+        "packages/host/src/inbox/catalog-update-producer.ts",
+        "packages/host/src/catalog/service.ts",
+        "packages/host/migrations/089_inbox_source_epoch.sql",
+        "packages/host/migrations/090_inbox_schedule_confirmation.sql",
+        "packages/host/migrations/091_inbox_repair_source.sql",
+        "packages/host/src/inbox/account-repair-producer.ts",
+        "packages/host/test/account-repair-inbox.test.ts",
+        "packages/host/src/inbox/schedule-confirmation-producer.ts",
+        "packages/host/src/schedule/confirmation-attention.ts",
+        "packages/host/test/schedule-confirmation-inbox.test.ts",
+        "packages/host/src/remote/pairing.ts",
+        "packages/host/src/web/app.ts",
+        "packages/host/test/pairing-inbox.test.ts",
+        "packages/host/test/catalog-update-inbox.test.ts",
+        "packages/host/src/web/ws-broadcast.ts",
+        "packages/host/src/web/ws-handler.ts",
+        "packages/host/test/inbox-service.test.ts",
+        "packages/host/test/ws-broadcast.test.ts"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "desktop"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [],
+      "reason": "Attention semantic events, safe names, typed targets, and exact-generation read/withdraw frames stay on the attention socket."
+    },
+    {
+      "id": "host-migrations",
+      "patterns": [
+        "packages/host/migrations/*.sql",
+        "packages/host/src/storage/db.ts",
+        "packages/host/src/storage/event-storage-v3-migrator.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "integration",
+        "system"
+      ],
+      "checks": [],
+      "specialEntrypoints": [
+        "packaged-app-smoke"
+      ],
+      "reason": "Schema and migration changes require temporary-database integration and packaged migration smoke."
+    },
+    {
+      "id": "web",
+      "patterns": [
+        "packages/web/**"
+      ],
+      "modules": [
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:operations:strict"
+      ],
+      "reason": "Web changes select pure UI logic and component integration."
+    },
+    {
+      "id": "desktop",
+      "patterns": [
+        "packages/desktop/**"
+      ],
+      "modules": [
+        "desktop"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "desktop-electron-smoke"
+      ],
+      "reason": "Desktop lifecycle changes require deterministic Desktop tests and an explicit Electron smoke."
+    },
+    {
+      "id": "proxy-branding",
+      "patterns": [
+        "packages/proxies/BRANDING.md"
+      ],
+      "modules": [
+        "cc-proxy",
+        "codex-proxy",
+        "dsh-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-protocol",
+        "scripts",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "Proxy-owned branding changes cross artifact manifests, Host asset validation, and Agent UI rendering."
+    },
+    {
+      "id": "cc-proxy",
+      "patterns": [
+        "packages/proxies/cc-proxy/**"
+      ],
+      "modules": [
+        "cc-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
+      "reason": "Claude proxy changes expand to proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "codex-proxy",
+      "patterns": [
+        "docs/adr/0099-disk-paged-codex-native-replay.md",
+        "packages/proxies/codex-proxy/**"
+      ],
+      "optionalPatterns": [
+        "docs/adr/0099-disk-paged-codex-native-replay.md"
+      ],
+      "modules": [
+        "codex-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
+      "reason": "Codex proxy changes expand to stdio app-server lifecycle tests, proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "kimi-proxy",
+      "patterns": [
+        "packages/proxies/kimi-proxy/**"
+      ],
+      "modules": [
+        "kimi-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
+      "reason": "Kimi proxy changes expand to proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "antigravity-proxy",
+      "patterns": ["packages/proxies/antigravity-proxy/**", "scripts/build-antigravity-runtime*"],
+      "modules": ["antigravity-proxy", "host", "scripts"],
+      "scopes": ["unit", "integration", "system"],
+      "checks": ["typecheck"],
+      "specialEntrypoints": ["real-provider-canaries"],
+      "reason": "Antigravity changes require focused ACP transport, session, permission and Host protocol regression; real Gemini acceptance is separately selected."
+    },
+    {
+      "id": "grok-proxy",
+      "patterns": [
+        "packages/proxies/grok-proxy/**"
+      ],
+      "modules": [
+        "grok-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
+      "reason": "Grok proxy changes expand to proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "dsh-bridge-package",
+      "patterns": [
+        "packages/proxies/dsh-bridge/**"
+      ],
+      "modules": [
+        "dsh-bridge"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "dsh-bridge-runtime-canary",
+        "dsh-proxy-runtime-canary"
+      ],
+      "reason": "DSH bridge bundle is the private bridge/1.0 runtime under test."
+    },
+    {
+      "id": "dsh-proxy-package",
+      "patterns": [
+        "packages/proxies/dsh-proxy/**"
+      ],
+      "modules": [
+        "dsh-proxy",
+        "proxy-protocol"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "dsh-proxy-runtime-canary"
+      ],
+      "reason": "DSH proxy implements gian.proxy/2.1 against the frozen bridge contract."
+    },
+    {
+      "id": "zcode-proxy-package",
+      "patterns": [
+        "packages/proxies/zcode-proxy/**",
+        "scripts/build-zcode-runtime.mjs",
+        "scripts/zcode-runtime-source.mjs",
+        "scripts/zcode-runtime-integration.mjs",
+        "scripts/verify-zcode-runtime-protocol.mjs"
+      ],
+      "modules": [
+        "zcode-proxy",
+        "proxy-protocol",
+        "scripts"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "zcode-real-app-server-canary"
+      ],
+      "reason": "ZCode proxy implements gian.proxy/2.1 over the WP0-frozen ZCode Protocol v1 facts."
+    },
+    {
+      "id": "conversation-schedules",
+      "patterns": [
+        "packages/shared/src/schedule.ts",
+        "packages/shared/src/tool.ts",
+        "packages/shared/src/web.ts",
+        "packages/shared/src/operations.ts",
+        "packages/shared/test/schedule-contract.test.mjs",
+        "packages/shared/test/tool-contract.test.mjs",
+        "packages/host/src/schedule/**",
+        "packages/host/src/web/routes/schedules.ts",
+        "packages/host/src/session/manager.ts",
+        "packages/host/src/session/repository.ts",
+        "packages/host/src/session/fork.ts",
+        "packages/host/src/tool/**",
+        "packages/host/src/web/app.ts",
+        "packages/host/src/web/watcher-bootstrap.ts",
+        "packages/host/migrations/069_conversation_schedules.sql",
+        "packages/host/test/schedule-*.test.ts",
+        "packages/host/test/gian-tool-schedule.test.ts",
+        "packages/tool-mcp/**"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "tool-mcp"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Conversation-bound schedules cross the shared contract, the Host schedule state machine, Session fork/send surfaces, the Gian Tool boundary, and migration 069."
+    },
+    {
+      "id": "chat-ui",
+      "patterns": [
+        "packages/chat-ui/**"
+      ],
+      "modules": [
+        "chat-ui",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "The shared chat renderer is consumed by local Web (and later Remote Web); changes select the chat-ui component tests and the web transcript/interaction regressions."
+    },
+    {
+      "id": "remote-host",
+      "patterns": [
+        "packages/host/src/remote/**",
+        "packages/host/migrations/072_queue_and_resource_revisions.sql",
+        "packages/host/migrations/073_remote_identity.sql",
+        "packages/host/test/remote-*.test.ts",
+        "packages/host/test/gian-tool-queue-revision.test.ts",
+        "packages/desktop/src/remote-identity-*.ts",
+        "packages/desktop/src/managed-host.ts",
+        "packages/desktop/test/remote-identity-broker.test.ts",
+        "packages/desktop/test/managed-host.test.ts",
+        "packages/remote-protocol/src/**",
+        "docs/proposals/remote-web-v1-architecture-and-protocol.md",
+        "docs/data-model.md",
+        "docs/operations/gian-tool-v0-api-and-implementation.md",
+        "packages/host/migrations/077_remote_settings_lifecycle.sql",
+        "packages/host/migrations/079_remote_execution_bindings.sql",
+        "packages/host/migrations/080_remote_execution_history.sql",
+        "packages/host/migrations/081_remote_controller_environments.sql"
+      ],
+      "optionalPatterns": [
+        "docs/proposals/remote-web-v1-architecture-and-protocol.md",
+        "docs/data-model.md",
+        "docs/operations/gian-tool-v0-api-and-implementation.md"
+      ],
+      "modules": [
+        "host",
+        "desktop",
+        "shared",
+        "remote-protocol"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "Remote Web V1 Host identity, Queue revision, closed facade, and outbound connector share protocol types without copying schemas."
+    },
+    {
+      "id": "remote-protocol-contract",
+      "patterns": [
+        "packages/remote-protocol/**"
+      ],
+      "modules": [
+        "remote-protocol",
+        "remote-server"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Remote protocol is the frozen closed schema consumed by Remote Server."
+    },
+    {
+      "id": "remote-server-package",
+      "patterns": [
+        "packages/remote-server/**"
+      ],
+      "modules": [
+        "remote-server"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Remote Server owns auth, pairing, presence, and opaque relay only."
+    },
+    {
+      "id": "remote-web",
+      "patterns": [
+        "packages/remote-web/**"
+      ],
+      "modules": [
+        "remote-web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "Remote Web is the standalone remote UI; changes select its fixture-driven component tests. Shared chat rendering changes also flow through the chat-ui rule."
+    },
+    {
+      "id": "remote-settings-live",
+      "patterns": [
+        "packages/web/src/remote-settings/**",
+        "packages/web/src/components/SettingsRemotePage.tsx",
+        "packages/web/test/remote-settings*.test.*",
+        "packages/shared/src/remote-settings.ts",
+        "packages/host/src/remote/settings-routes.ts",
+        "packages/host/test/remote-settings.test.ts",
+        "packages/remote-web/src/pairing-link.ts",
+        "packages/remote-web/test/pairing-link.test.ts",
+        "docs/operations/remote-settings.md"
+      ],
+      "modules": [
+        "host",
+        "web",
+        "remote-web",
+        "remote-server",
+        "shared"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "Production Settings and QR pairing cross the local Host, Remote Server, and browser authorization boundary.",
+      "optionalPatterns": [
+        "docs/operations/remote-settings.md"
+      ]
+    },
+    {
+      "id": "agent-custom-runtime",
+      "patterns": [
+        "packages/shared/src/agents.ts",
+        "packages/shared/src/managed-runtime.ts",
+        "packages/host/src/agents/**",
+        "packages/host/src/session/binding-planner.ts",
+        "packages/host/src/web/routes/agents.ts",
+        "packages/host/test/agent-custom-runtime.test.ts",
+        "packages/host/test/agents-routes.test.ts",
+        "packages/web/src/views/agent-dialog.tsx",
+        "packages/web/src/views/AgentsView.tsx",
+        "packages/web/src/agents/AgentDetailPanel.tsx",
+        "packages/web/src/operations/**",
+        "packages/web/test/agents-view.test.tsx",
+        "docs/adr/0094-custom-agent-runtime-binding.md"
+      ],
+      "optionalPatterns": [
+        "docs/adr/0094-custom-agent-runtime-binding.md"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "web"
+      ],
+      "scopes": [
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:test-catalog"
+      ],
+      "reason": "Custom Agent Runtime binding (ADR-0094) spans the Agent model, Host probing and session binding, REST routes, and the Agents dialog."
+    },
+    {
+      "id": "search-backend",
+      "patterns": [
+        "packages/shared/src/search.ts",
+        "packages/shared/src/search-text.ts",
+        "packages/host/src/search/**",
+        "packages/host/src/web/routes/search.ts",
+        "packages/host/src/web/app.ts",
+        "packages/host/migrations/088_search_index.sql",
+        "packages/host/test/search-contract.test.ts",
+        "packages/host/test/search-text.test.ts",
+        "packages/host/test/search-index.test.ts",
+        "packages/host/test/search-repair.test.ts",
+        "packages/host/test/search-assembly.test.ts"
+      ],
+      "modules": [
+        "shared",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:test-catalog"
+      ],
+      "reason": "0.6.7 search DTOs, persistent index, and query APIs stay on the Host side of the Web static command registry."
+    }
+  ]
+}

@@ -1,0 +1,3307 @@
+import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import type { ApprovalDecision, AttentionMessage, InboxAction, InboxItemPublic, RunnerInfo, SearchResult, Session, SideChatInfo, Task, TerminalOptions, Workspace } from '@gian/shared';
+import { CHAT_FONT_FAMILY_STACKS, DEFAULT_CHAT_FONT_SIZE, DEFAULT_TERMINAL_PREFERENCES, isScheduleConfirmationAttentionMessage } from '@gian/shared';
+import { LocaleProvider } from './i18n/index.js';
+import { EN } from './i18n/en.js';
+import type { WsState } from './ws.js';
+import { GianWs } from './ws.js';
+import {
+  fetchWsToken,
+  loadSettings,
+  loadTerminalOptions,
+  loadAgents,
+  loadSessions,
+  loadArchivedSessions,
+  loadTasks,
+  loadWorkspaces,
+  loadInboxItem,
+  makeWsUrl,
+  updateCatalogProxy,
+} from './api.js';
+import { injectComposerDraft } from './components/Composer.js';
+import { createSessionCanon, sortSessionsForRail } from './session-routing.js';
+import { GitHistoryRequestError, loadGitHistoryCommitReachability } from './api.js';
+import { useHistoryMovementRevision } from './controllers/use-history.js';
+import { applyChangesScopeRequest, requestChangesDiffAnchor } from './controllers/use-changes-diff.js';
+import './operations/git-history.js';
+import { FileRefRehypeContext } from './transcript/items.js';
+import type { PlanLifecycleState } from './transcript/apply.js';
+import {
+  DiffOpenContext,
+  ImageZoomContext,
+  PlanOpenContext,
+  ScheduleOpenContext,
+} from './transcript/items.js';
+import { LinkBehaviorProvider } from './links/LinkBehaviorProvider.js';
+import { ScheduleConfirmationHost } from './components/ScheduleConfirmations.js';
+import {
+  focusScheduleConfirmation,
+  getScheduleConfirmationsSnapshot,
+  hydrateScheduleConfirmations,
+  pendingScheduleConfirmations,
+  subscribeScheduleConfirmations,
+} from './controllers/schedule-confirmations.js';
+import { resolveScheduleConfirmationNavigation } from './controllers/schedule-confirmation-navigation.js';
+import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
+import { AssignSessionTaskDialog } from './components/AssignSessionTaskDialog.js';
+import { Topbar } from './components/Topbar.js';
+import type { Mode } from './components/Topbar.js';
+import type { SidebarListMode } from './components/SidebarChrome.js';
+import { Dock } from './components/Dock.js';
+import { Toaster } from './components/Toaster.js';
+import { confirm as confirmDialog, getSnapshot as getFeedbackSnapshot, subscribe as subscribeFeedback, toast } from './feedback.js';
+import { Splitter } from './components/Splitter.js';
+import { Inspector } from './components/Inspector.js';
+import { SettingsBody, settingsSectionHasAnchor } from './components/SettingsBody.js';
+import { elementIsLayoutHidden } from './components/sheet-model.js';
+import { BrowserPanel } from './components/BrowserPanel.js';
+import type { NavKey } from './components/SettingsBody.js';
+import { createRemoteSettingsController } from './remote-settings/production.js';
+import { GitHubAuthorizationHost } from './components/GitHubAuthorizationHost.js';
+import type { RemoteSettingsController } from './remote-settings/types.js';
+import { makeWorkbenchWire } from './components/terminal-wire.js';
+import { ChatContextPanel } from './components/ChatContextPanel.js';
+import { SessionSurface } from './views/SessionSurface.js';
+import { WorkspaceDialog } from './views/workspace-dialog.js';
+import type { WorkspaceDialogState } from './views/workspace-dialog.js';
+import { TasksView, reorderableSubtasks } from './views/TasksView.js';
+import { PageWithSidebar } from './views/PageWithSidebar.js';
+// The primary view is imported statically: lazy-loading it served no purpose
+// (it renders on every launch) and its suspension used to tear down the whole
+// shell via the root Suspense boundary (the "full-screen flash" bug).
+import { CodingView } from './views/CodingView.js';
+import type { SystemConfig } from '@gian/shared';
+import type { QueueEntry, TranscriptItem } from './types.js';
+import { applyGianIconAppearance } from './brand-icon.js';
+import { resolveTheme, useSystemDark } from './theme.js';
+import { ChatPanelOpenContext } from './presentation/chat-panel.js';
+import { decideWorktreeViewRequest, readWtAutoApplied, worktreeDisplayName, writeWtAutoApplied } from './presentation/wt-view.js';
+import { useSessionCommands } from './controllers/use-session-commands.js';
+import { reloadFailedSessionMetadata } from './controllers/session-failure-reload.js';
+import { useAppAuth } from './controllers/use-app-auth.js';
+import { useOnboarding } from './controllers/use-onboarding.js';
+import { useAppSocket } from './controllers/use-app-socket.js';
+import { useCatalogActions } from './controllers/use-catalog-actions.js';
+import { useTranscriptHydration } from './controllers/use-transcript-hydration.js';
+import { useTopbarModel } from './controllers/use-topbar-model.js';
+import { useWorkbench } from './controllers/use-workbench.js';
+import { useAppShortcuts } from './controllers/use-app-shortcuts.js';
+import { useSessionSelection } from './controllers/use-session-selection.js';
+import { useWorkbenchLayout } from './controllers/use-workbench-layout.js';
+import { useViewNav } from './controllers/use-view-nav.js';
+import { useWorkingTrees } from './controllers/use-working-trees.js';
+import { actionControlState } from './components/action-gating.js';
+import { peekSteerCached, queueSendNowEnabled } from './components/composer/capabilities.js';
+import { dispatchHeadFork, useForkRunSettledToast } from './components/ForkControls.js';
+import {
+  consumeForkNavigation,
+  forkBeatsUserIntent,
+  noteUserNavigationIntent,
+  peekForkNavigationSequence,
+  retireForkNavigationIntent,
+} from './presentation/fork-navigation.js';
+import { usePanelLayout } from './controllers/use-panel-layout.js';
+import {
+  applyInboxItemIfCurrent,
+  getInboxSnapshot,
+  inboxWriteEpoch,
+  invalidateInbox,
+  markInboxRefRead,
+  skipInboxItemVersion,
+  subscribeInbox,
+} from './controllers/inbox.js';
+import { peekPendingApproval } from './controllers/pending-approvals.js';
+import { nativeOptionForDecision } from './operations/approval.js';
+import { useAppZoom } from './display-prefs.js';
+import { setKeymapPreferences } from './shortcut-prefs.js';
+import { createOperationDispatcher, type OperationDispatcher } from './operations/dispatcher.js';
+import { wireInboxOperations } from './operations/inbox.js';
+import {
+  desktopBridge,
+  type GianDesktopNavigationTarget,
+} from './desktop-bridge.js';
+import { resolveSessionNavigation, subscribeDesktopNavigation, workbenchListMode } from './desktop-navigation.js';
+import { peekSessionReveal, requestSessionReveal, retireSessionReveal, subscribeSessionReveal } from './presentation/session-reveal.js';
+import type {
+  ConversationListMode,
+  DesktopNavigationDelivery,
+  DesktopNavigationRetry,
+  SessionNavigationAction,
+} from './desktop-navigation.js';
+import {
+  maybeNotifyForAttention,
+  nativeNotificationPreferencesForMigration,
+  visibleSessionForNativeNotification,
+} from './notifications.js';
+// Importing the operations modules registers the operation definitions on
+// the product registry as a side effect (session.js directly here;
+// message/queue/approval via use-session-commands.js below; task/workspace
+// via the entity-key/sink imports here and via use-operations.js; auth via
+// use-app-auth.js; settings via use-operations.js; agents/git via
+// SettingsBody/Inspector; native via spaces-native-sessions). terminal.js
+// and files.js have no importing call site that pulls the definitions in
+// (their dispatches are by name), so they are imported here explicitly.
+import './operations/terminal.js';
+import './operations/files.js';
+import './operations/browser.js';
+import './operations/onboarding.js';
+import './operations/sidechat.js';
+import './operations/schedule.js';
+import './operations/translation.js';
+import { applySessionOverlays, sessionEntityKey, wireSessionCanonicalPatch } from './operations/session.js';
+import {
+  createMessageEchoSink,
+  dispatchAttachmentUpload,
+  wireMessageEchoSink,
+} from './operations/message.js';
+import { QUEUE_OVERLAY_FIELD, wireCanonicalQueueReader } from './operations/queue.js';
+import {
+  TASK_LIST_ENTITY_KEY,
+  TASK_ORDER_FIELD,
+  wireSubtaskCanonicalSink,
+  wireTaskCanonicalSink,
+} from './operations/task.js';
+import { SETTINGS_ENTITY_KEY, wireSettingsSink } from './operations/settings.js';
+import {
+  applyWorkspaceOrderOverlay,
+  wireWorkspaceCanonicalSink,
+  WORKSPACE_LIST_ENTITY_KEY,
+  WORKSPACE_ORDER_FIELD,
+} from './operations/workspace.js';
+import { createOperationStore, entityFieldKey, type OperationStore } from './operations/store.js';
+import {
+  OperationDispatcherProvider,
+  OperationStoreProvider,
+  useStoreOperationRun,
+  useStorePendingOperations,
+  useStoreSessionsWithOverlays,
+  useStoreSettingsWithOverlays,
+  useStoreTasksWithOverlays,
+  useStoreWorkspacesWithOverlays,
+  waitForRunSettle,
+} from './operations/use-operations.js';
+import type { PendingFirstMessageValue } from './pending-first-message.js';
+import { routeScreenshotCapture } from './screenshot-routing.js';
+
+// Lazy surfaces each get their OWN Suspense boundary at the usage site below.
+// A single root boundary used to wrap the whole shell: the first render of
+// any of these after a click suspended it and unmounted everything (Topbar,
+// Dock, sidebar) in favor of an unstyled empty fallback — the full-screen
+// flash. Local boundaries confine the fallback to the surface that's loading.
+const SpacesView = lazy(() =>
+  import('./views/SpacesView.js').then(module => ({ default: module.SpacesView })));
+const CustomView = lazy(() =>
+  import('./views/CustomView.js').then(module => ({ default: module.CustomView })));
+const CommandPalette = lazy(() =>
+  import('./components/CommandPalette.js').then(module => ({ default: module.CommandPalette })));
+const InboxPanel = lazy(() =>
+  import('./components/InboxPanel.js').then(module => ({ default: module.InboxPanel })));
+const Sheet = lazy(() =>
+  import('./components/Sheet.js').then(module => ({ default: module.Sheet })));
+const Terminal = lazy(() =>
+  import('./components/Terminal.js').then(module => ({ default: module.Terminal })));
+const HistoryInspector = lazy(() =>
+  import('./components/HistoryInspector.js').then(module => ({ default: module.HistoryInspector })));
+const HistoryCommitBody = lazy(() =>
+  import('./components/HistoryCommitBody.js').then(module => ({ default: module.HistoryCommitBody })));
+const ChangesDiffBody = lazy(() =>
+  import('./components/ChangesDiffBody.js').then(module => ({ default: module.ChangesDiffBody })));
+const WorkspaceDetailBody = lazy(() =>
+  import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspaceDetailBody })));
+const LoginView = lazy(() =>
+  import('./views/LoginView.js').then(module => ({ default: module.LoginView })));
+const OnboardingView = lazy(() =>
+  import('./views/OnboardingView.js').then(module => ({ default: module.OnboardingView })));
+const AgentsView = lazy(() =>
+  import('./views/AgentsView.js').then(module => ({ default: module.AgentsView })));
+// Timer (Issue #51): the conversation-bound Schedule management surface.
+const TimerView = lazy(() =>
+  import('./views/TimerView.js').then(module => ({ default: module.TimerView })));
+
+/**
+ * Unresolved-reload reconcile (Phase 3a, proposal §4.3): after a targeted
+ * canonical reload that is causally after the command, unresolved overlays
+ * whose value matches the fresh canonical field absorb silently; mismatches
+ * are dropped and surfaced as "change may not have been applied" warnings.
+ * Whole-array overlays (queue, workspace order) never Object.is-match a
+ * fresh canonical array, so their contents are deep-compared and the
+ * overlay's own reference is fed back when equal — that absorbs instead of
+ * false-mismatching.
+ */
+function reconcileUnresolvedEntity(
+  store: OperationStore,
+  entityKey: string,
+  fresh: (field: string) => unknown,
+  t: (key: string) => string,
+): void {
+  const provider = (field: string) => {
+    const overlay = store.getOverlay(entityFieldKey(entityKey, field));
+    const value = fresh(field);
+    if (overlay && Array.isArray(overlay.value) && Array.isArray(value)) {
+      if (JSON.stringify(value) === JSON.stringify(overlay.value)) {
+        return overlay.value;
+      }
+    }
+    return value;
+  };
+  const report = store.reconcileUnresolved(entityKey, provider);
+  if (report.dropped.length > 0) {
+    toast({ kind: 'warning', message: t('operations.mayNotHaveApplied') });
+  }
+}
+
+/** Right-click/status-bar hrefs for transcript file links come from
+ *  `fileLinkHref` in links/link-behavior.ts, surfaced through the unified
+ *  LinkBehaviorProvider mounted below. */
+
+/** The newest session open. In-app requests keep their own list and run focus;
+ *  desktop deliveries also remember the target that must be acknowledged. */
+interface PendingSessionNavigation {
+  generation: number;
+  sessionId: string;
+  requestedListMode: ConversationListMode | null;
+  focusRunId?: string;
+  desktopTarget?: Extract<GianDesktopNavigationTarget, { type: 'session' }>;
+  /** Search/Inbox/notification deep links open archived sessions read-only
+   *  (Issue #168) — never unarchive, never enable send/approval. */
+  allowArchivedReadOnly?: boolean;
+}
+
+function sameDesktopSessionTarget(
+  left: Extract<GianDesktopNavigationTarget, { type: 'session' }>,
+  right: GianDesktopNavigationTarget,
+): boolean {
+  return right.type === 'session'
+    && left.sessionId === right.sessionId
+    && left.turn === right.turn
+    && left.kind === right.kind;
+}
+
+/** Keep task ownership and session type paired when a newer canon fact
+ *  replaces the membership on a stale list body. */
+function sessionWithCanonicalMembership(session: Session, taskId: string | null): Session {
+  if (taskId) {
+    if (session.task_id === taskId && session.type === 'subtask' && session.archived !== 1) return session;
+    return { ...session, task_id: taskId, type: 'subtask', archived: 0 };
+  }
+  if (session.type !== 'subtask' && (session.task_id ?? null) === null && session.archived !== 1) return session;
+  return { ...session, task_id: null, type: session.type === 'subtask' ? 'coding' : session.type, archived: 0 };
+}
+
+export function App() {
+  useAppZoom();
+  // useAppAuth needs the operation dispatcher (auth.logout), which is created
+  // below — bind it lazily through a ref. The dispatch is only ever invoked
+  // from user actions (sign-out click), long after the dispatcher exists.
+  const opsDispatchRef = useRef<OperationDispatcher['dispatch'] | null>(null);
+  const authDispatch = useCallback<OperationDispatcher['dispatch']>((name, input) => {
+    const dispatch = opsDispatchRef.current;
+    if (!dispatch) throw new Error('operation dispatcher not ready');
+    return dispatch(name, input);
+  }, []);
+  const { status: authStatus, identity, signOut } = useAppAuth(authDispatch);
+  const onboarding = useOnboarding(authStatus);
+  const runtimeAuthStatus = authStatus === 'authenticated' && onboarding.status === 'complete'
+    ? 'authenticated'
+    : 'checking';
+  // The token getter runs every reconnect, after the HTTP login boundary has
+  // admitted the app shell.
+  const ws = useMemo(
+    () => new GianWs(makeWsUrl(), async () => (await fetchWsToken()) ?? ''),
+    [],
+  );
+  // UI Operation Layer (Phase 2a): the store holds transient run/overlay
+  // state; the dispatcher below binds it to the real socket. Canonical
+  // entities still live in the useState collections underneath.
+  const [operationStore] = useState(() => createOperationStore());
+  const [wsState, setWsState] = useState<WsState>('closed');
+  const [wsAttempt, setWsAttempt] = useState(0);
+  const [authed, setAuthed] = useState(false);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  // Maps workspace_id → current HEAD branch name, populated lazily for each
+  // workspace. Regular (non-worktree) sessions ride on the workspace's HEAD,
+  // so SessionRow falls through to this when session.branch itself is null.
+  // Refreshed on `workspace:git-updated` so external branch switches show up.
+  const [sessions, setSessions] = useState<Session[]>([]);
+  // Archived session opened read-only from search/Inbox (Issue #168): kept
+  // OUT of the canonical list (rails and applySessionUpdate must not see it);
+  // `activeSession` falls back to it only while it is the selected one.
+  const [readOnlySession, setReadOnlySession] = useState<Session | null>(null);
+  // Side Chat read model (gian.proxy/2.0 §10.5): wholesale-replaced by
+  // state_sync, upserted by sidechat:updated. Consumed by the SideChatDock
+  // surface mounted on the parent session's view; side chats NEVER join the
+  // session lists above (§10.5.2).
+  const [sideChats, setSideChats] = useState<SideChatInfo[]>([]);
+  const sideChatsRef = useRef<SideChatInfo[]>([]);
+  sideChatsRef.current = sideChats;
+  // Live id set for the echo-sink router (side chat sends echo into the
+  // sidechat stores, not itemsBySession) — see the wiring effect below.
+  const sideChatIdsRef = useRef<Set<string>>(new Set());
+  sideChatIdsRef.current = new Set(sideChats.map(entry => entry.id));
+  // The exact create attempt is App-owned so an unknown outcome cannot be
+  // forgotten by closing the form or switching away from Sessions mode.
+  const [sessionCreateRunId, setSessionCreateRunId] = useState<string | undefined>();
+  const [selectedSessionId, setActiveSessionId] = useState<string | null>(null);
+  // ─── Tasks (PRD-v3) ───────────────────────────────────────────────────────
+  // Tasks group Subtasks (sessions with type==='subtask' + a matching task_id).
+  // Seeded from state_sync, kept fresh via the WS task:* handlers below.
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
+  const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
+  const itemsBySessionRef = useRef<Record<string, TranscriptItem[]>>({});
+  itemsBySessionRef.current = itemsBySession;
+  const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
+  // Side Chat transcript/turn state, keyed by sidechat id and fully isolated
+  // from the parent session's stores (§10.5.1 route isolation). itemsBySidechat
+  // is fed by the snapshot projection in use-app-socket plus the echo-sink
+  // router below. pendingBySidechat is the echo sink's bookkeeping target
+  // only — turn-running state derives from each snapshot's `state` and the
+  // echo items themselves, so nothing renders from this map.
+  const [itemsBySidechat, setItemsBySidechat] = useState<Record<string, TranscriptItem[]>>({});
+  const [pendingBySidechat, setPendingBySidechat] = useState<Record<string, boolean>>({});
+  void pendingBySidechat;
+  const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
+  const [mode, setMode] = useState<Mode>('tasks');
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  // A selected Task row owns every Session surface and operation immediately,
+  // including the render before the stored selection is synchronized.
+  const activeSessionId = mode === 'tasks' && activeSubtaskId ? activeSubtaskId : selectedSessionId;
+  const [sidebarListMode, setSidebarListMode] = useState<SidebarListMode>('tasks');
+  // Last Repos/Tasks list the user actually chose. Null until that happens;
+  // the Tasks value above is only the startup display default.
+  const [explicitListMode, setExplicitListMode] = useState<ConversationListMode | null>(null);
+  const explicitListModeRef = useRef<ConversationListMode | null>(null);
+  // Assigned once the navigation generation refs exist. Page changes before
+  // that assignment are not possible; effects run after it.
+  const cancelNavigationIntentRef = useRef<() => void>(() => {});
+  // Assigned with the settings-scroll owner below. Navigation and surface
+  // commands call it once that owner exists; nothing invokes it earlier.
+  const retireSettingsScrollRef = useRef<() => void>(() => {});
+  const [newSubtaskForTaskId, setNewSubtaskForTaskId] = useState<string | null>(null);
+  const { workingTrees, reloadWorkingTrees } = useWorkingTrees();
+  const refreshWorkingTrees = useCallback(() => {
+    reloadWorkingTrees({ force: true });
+  }, [reloadWorkingTrees]);
+  // Active Settings section — owned here (controlled into SettingsBody +
+  // internal Settings directory) so it survives rail collapse/restore.
+  const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
+  // Both GianDev and packaged Desktop use the same local Host adapter.
+  const [remoteController, setRemoteController] = useState<RemoteSettingsController | null>(null);
+  useEffect(() => {
+    const controller = createRemoteSettingsController();
+    setRemoteController(controller);
+    return () => controller.dispose?.();
+  }, []);
+  const [shortcutCreateRequest, setShortcutCreateRequest] = useState<{
+    kind: 'session' | 'task';
+    sequence: number;
+  } | null>(null);
+  const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
+
+  // The visible list follows the page. This does not record an explicit choice.
+  useEffect(() => {
+    if (mode === 'tasks' || mode === 'sessions') setSidebarListMode(mode);
+  }, [mode]);
+  const rememberExplicitListMode = useCallback((next: ConversationListMode) => {
+    explicitListModeRef.current = next;
+    setExplicitListMode(next);
+    setSidebarListMode(next);
+  }, []);
+  const chooseMode = useCallback((next: Mode) => {
+    cancelNavigationIntentRef.current();
+    if (next === 'tasks' || next === 'sessions') rememberExplicitListMode(next);
+    startTransition(() => setMode(next));
+  }, [rememberExplicitListMode]);
+  const [terminalOptions, setTerminalOptions] = useState<TerminalOptions | null>(null);
+  // Canonical config for the operation layer's overlay `previous` values —
+  // read via ref, never the overlaid render value.
+  const systemConfigRef = useRef<SystemConfig | null>(null);
+  useEffect(() => { systemConfigRef.current = systemConfig; }, [systemConfig]);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteInitialQuery, setPaletteInitialQuery] = useState<string | undefined>(undefined);
+  // Inbox panel (Issue #53): the store snapshot is the WS-fed pending read
+  // model; the badge counts pending work, never unread.
+  const inboxState = useSyncExternalStore(subscribeInbox, getInboxSnapshot, getInboxSnapshot);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [assignTaskSessionId, setAssignTaskSessionId] = useState<string | null>(null);
+  const [assignTaskTargetId, setAssignTaskTargetId] = useState<string | null>(null);
+  const [assignTaskRunId, setAssignTaskRunId] = useState<string | undefined>();
+  // Image tapped in a transcript bubble → shown in the in-app lightbox
+  // (ImageZoomContext below), instead of opening a new browser tab.
+  const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null);
+  // Native WebContentsView sits above renderer DOM. Hide it whenever a Gian
+  // modal is present so confirmations, palette and lightbox remain usable.
+  const feedbackState = useSyncExternalStore(
+    subscribeFeedback,
+    getFeedbackSnapshot,
+    getFeedbackSnapshot,
+  );
+  const scheduleConfirmationState = useSyncExternalStore(
+    subscribeScheduleConfirmations,
+    getScheduleConfirmationsSnapshot,
+    getScheduleConfirmationsSnapshot,
+  );
+  const hasPendingScheduleConfirmation = pendingScheduleConfirmations(
+    scheduleConfirmationState,
+  ).length > 0;
+  const [runner, setRunner] = useState<RunnerInfo | null>(null);
+  const pendingFirstMessageRef = useRef<PendingFirstMessageValue>(null);
+  // New-session → New Repo dialog round trip (issue #57 v2, dialog since
+  // 2026-09-09): the view flags localStorage before opening the dialog; when
+  // the dialog's create lands we return to a fresh new-session page with that
+  // workspace preselected (the view's own draft restores message/agent/chips).
+  const [newSessionForWs, setNewSessionForWs] = useState<string | null>(null);
+  // App-owned New/Edit Repo modal: create from the Repos rail "+" / the
+  // new-session page's "+ New Repo" row; edit from a workspace group's ⋯ menu.
+  const [wsDialog, setWsDialog] = useState<WorkspaceDialogState | null>(null);
+  // Timer's New scheduled task CTA (design 05): opens the new-session page with a
+  // prefilled guidance prompt; CodingView consumes it once.
+  const [newSessionPrefill, setNewSessionPrefill] = useState<string | null>(null);
+  // ─── Timer / Schedules (Issue #51) ────────────────────────────────────────
+  // The Timer page's selected Schedule lives at App level so the transcript's
+  // "sent by a schedule" tag can deep-link into the detail from any mode.
+  const [timerScheduleId, setTimerScheduleId] = useState<string | null>(null);
+  // A bound-session Run navigation request: open the control conversation and
+  // scroll its transcript to the scheduled user message of this Run.
+  const [focusScheduleRun, setFocusScheduleRun] = useState<{
+    sessionId: string;
+    runId: string;
+  } | null>(null);
+  const workspaceIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    workspaceIdsRef.current = new Set(workspaces.map(w => w.id));
+  }, [workspaces]);
+
+  function handleWorkspaceListChanged() {
+    void loadWorkspaces().then(list => {
+      setWorkspaces(list);
+      let flagged = false;
+      try {
+        flagged = localStorage.getItem('gian.new-session.return.v1') === '1';
+        if (flagged) localStorage.removeItem('gian.new-session.return.v1');
+      } catch { /* best-effort */ }
+      if (!flagged) return;
+      const created = list.find(w => !workspaceIdsRef.current.has(w.id) && w.name !== '__gian_root__');
+      chooseMode('sessions');
+      // '' still reopens the page (no preselect) when the new row could not
+      // be identified — the view falls back to the remembered/first choice.
+      setNewSessionForWs(created?.id ?? '');
+    });
+  }
+  // Streamed plan text plus its turn-end lifecycle. Keeping completion beside
+  // the text lets a successful turn hide the shortcut without deleting the
+  // plan that an already-open/history detail view may still need.
+  const [planStateBySession, setPlanStateBySession] = useState<
+    Record<string, PlanLifecycleState>
+  >({});
+
+  useEffect(() => {
+    if (authStatus !== 'authenticated') return;
+    void loadSettings().then(cfg => { if (cfg) setSystemConfig(cfg); });
+    void loadTerminalOptions().then(setTerminalOptions).catch(() => undefined);
+    void loadAgents().catch(() => undefined);
+  }, [authStatus]);
+
+
+  // We need the latest sessions list when handling events (to look up executor).
+  const sessionsRef = useRef<Session[]>([]);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+  const workspacesRef = useRef<Workspace[]>([]);
+  useEffect(() => { workspacesRef.current = workspaces; }, [workspaces]);
+  const tasksRef = useRef<Task[]>([]);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+  // Canonical queues by session — read by the operation layer for queue
+  // overlay `previous` values and expected-array computation.
+  const queueBySessionRef = useRef<Record<string, QueueEntry[]>>({});
+  useEffect(() => { queueBySessionRef.current = queueBySession; }, [queueBySession]);
+
+  // The unresolved-reload handler (Phase 3a) is wired via a ref because it
+  // needs appT (declared below) for the mismatch warning toast.
+  const unresolvedReloadRef = useRef<(entityKey: string) => void>(() => {});
+  const failedReloadRef = useRef<(run: Parameters<typeof reloadFailedSessionMetadata>[0]) => void>(() => {});
+  failedReloadRef.current = run => {
+    void reloadFailedSessionMetadata(run, setSessions).catch(() => undefined);
+  };
+
+  // Operation dispatcher bound to the real socket. readCanonicalField reads
+  // the CANONICAL sessions/queues/tasks/workspaces (via the refs, never the
+  // overlaid render values) so overlay `previous` values roll back to Host
+  // truth. onUnresolved is the Phase 3a unresolved-reload hook: a timed-out
+  // run triggers a targeted canonical reload + reconcile (wired below).
+  const ops = useMemo(
+    () => createOperationDispatcher({
+      store: operationStore,
+      transport: ws,
+      readCanonicalField: (entityKey, field) => {
+        if (entityKey === SETTINGS_ENTITY_KEY) {
+          return systemConfigRef.current?.[field as keyof SystemConfig];
+        }
+        if (entityKey.startsWith('session:')) {
+          const sessionId = entityKey.slice('session:'.length);
+          // The queue overlay is a whole-array value keyed `session:<id>:queue`
+          // (operations/queue.ts); canonical queues live outside Session.
+          if (field === QUEUE_OVERLAY_FIELD) return queueBySessionRef.current[sessionId] ?? [];
+          const session = sessionsRef.current.find(s => s.id === sessionId);
+          return session?.[field as keyof Session];
+        }
+        if (entityKey === TASK_LIST_ENTITY_KEY) {
+          // The reorder overlay is the open group's ordered id array
+          // (`task:list:order`, see operations/task.ts).
+          if (field === TASK_ORDER_FIELD) {
+            return tasksRef.current.filter(task => task.status === 'open').map(task => task.id);
+          }
+          return undefined;
+        }
+        if (entityKey.startsWith('task:')) {
+          const task = tasksRef.current.find(t => t.id === entityKey.slice('task:'.length));
+          return task?.[field as keyof Task];
+        }
+        if (entityKey === WORKSPACE_LIST_ENTITY_KEY) {
+          // The reorder overlay is the full ordered id array
+          // (`workspace:list:order`, see operations/workspace.ts).
+          if (field === WORKSPACE_ORDER_FIELD) return workspacesRef.current.map(w => w.id);
+          return undefined;
+        }
+        if (entityKey.startsWith('workspace:')) {
+          // Keys may carry a sub-suffix (`workspace:<id>:claude-md`).
+          const workspaceId = entityKey.slice('workspace:'.length).split(':')[0];
+          const workspace = workspacesRef.current.find(w => w.id === workspaceId);
+          return workspace?.[field as keyof Workspace];
+        }
+        return undefined;
+      },
+      onUnresolved: entityKey => unresolvedReloadRef.current(entityKey),
+      onFailed: run => failedReloadRef.current(run),
+    }),
+    [operationStore, ws],
+  );
+  useEffect(() => {
+    // React StrictMode intentionally runs effect setup -> cleanup -> setup in
+    // development. Reconnect here so the simulated cleanup cannot leave the
+    // retained dispatcher deaf to operation:result frames.
+    ops.connect();
+    return () => ops.dispose();
+  }, [ops]);
+  useEffect(() => wireInboxOperations(ops, invalidateInbox), [ops]);
+  // Late-bound dispatch for useAppAuth (see the declaration above).
+  useEffect(() => { opsDispatchRef.current = ops.dispatch; }, [ops]);
+
+  // Operation-layer wiring for transcript- and queue-adjacent state (Phase
+  // 2b): the echo sink appends send echoes / marks them failed in place
+  // (proposal §9), and the canonical queue reader feeds the whole-array
+  // queue overlay — it reads the RENDERED queue (canonical + any in-flight
+  // queue overlay) so two rapid queue edits compose (see operations/queue.ts).
+  useEffect(() => {
+    // The send echo sink routes by target id: Side Chat sends (session_id =
+    // sidechat id, §10.5.1) echo into the sidechat stores so their optimistic
+    // bubbles / pending flags / failure marks never touch the parent's
+    // transcript. The id set ref is repopulated every render, so the router
+    // always sees the current read model.
+    const sessionSink = createMessageEchoSink(setItemsBySession, setPendingBySession);
+    const sidechatSink = createMessageEchoSink(setItemsBySidechat, setPendingBySidechat);
+    const route = (sessionId: string) =>
+      sideChatIdsRef.current.has(sessionId) ? sidechatSink : sessionSink;
+    wireMessageEchoSink({
+      append: (sessionId, item) => route(sessionId).append(sessionId, item),
+      markConfirmed: (runId, sessionId) => route(sessionId).markConfirmed(runId, sessionId),
+      markFailed: (runId, sessionId) => route(sessionId).markFailed(runId, sessionId),
+      appendTranslating: (sessionId, item) => route(sessionId).appendTranslating?.(sessionId, item),
+      adopt: (sessionId, echoId, runId, payload) =>
+        route(sessionId).adopt?.(sessionId, echoId, runId, payload) ?? false,
+      remove: (sessionId, echoId) => route(sessionId).remove?.(sessionId, echoId),
+    });
+    wireCanonicalQueueReader(sessionId => {
+      const overlay = operationStore.getOverlay(
+        entityFieldKey(sessionEntityKey(sessionId), QUEUE_OVERLAY_FIELD),
+      );
+      return overlay ? (overlay.value as QueueEntry[]) : (queueBySessionRef.current[sessionId] ?? []);
+    });
+    return () => {
+      wireMessageEchoSink(null);
+      wireCanonicalQueueReader(null);
+    };
+  }, [operationStore]);
+
+  // REST canonical convergence sinks (Phase 3a, inventory §4 note 7): the
+  // host does NOT broadcast workspace PATCH/reorder/claude_md PUT, and the
+  // subtask complete/reopen REST handlers broadcast over a different channel
+  // than the HTTP response — so the workspace/task operation definitions
+  // patch canonical client state directly on success through these sinks
+  // (and refetch, preserving the pre-migration onChange() semantics).
+  useEffect(() => {
+    wireWorkspaceCanonicalSink({
+      upsert: workspace => setWorkspaces(previous =>
+        previous.some(w => w.id === workspace.id)
+          ? previous.map(w => (w.id === workspace.id ? workspace : w))
+          : [...previous, workspace]),
+      remove: workspaceId => setWorkspaces(previous => previous.filter(w => w.id !== workspaceId)),
+      applyOrder: ids => setWorkspaces(previous => applyWorkspaceOrderOverlay(previous, ids)),
+      refetch: () => { void loadWorkspaces().then(setWorkspaces); },
+      refetchSessions: () => { void loadSessions().then(setSessions); },
+    });
+    wireSubtaskCanonicalSink((sessionId, partial) => {
+      setSessions(previous => previous.map(s => (s.id === sessionId ? { ...s, ...partial } : s)));
+    });
+    // Drag reorder (2026-08-29, migration 067): the tasks/sessions reorder
+    // REST endpoints do NOT broadcast either — stamp the confirmed order
+    // values onto the canonical lists so the absorbed whole-list overlays
+    // leave Host truth behind (task.ts/session.ts reconcile).
+    wireTaskCanonicalSink({
+      applyOrder: ids => setTasks(previous => previous.map(task => {
+        const index = ids.indexOf(task.id);
+        return index >= 0 && task.sort_order !== index + 1
+          ? { ...task, sort_order: index + 1 }
+          : task;
+      })),
+      refetch: () => { void loadTasks().then(setTasks); },
+    });
+    wireSessionCanonicalPatch((sessionId, partial) => {
+      setSessions(previous => previous.map(s => (s.id === sessionId ? { ...s, ...partial } : s)));
+    });
+    // Settings convergence (Phase 3b, same no-broadcast rule): the settings
+    // PATCH response IS the canonical successor — patch it in so the
+    // absorbed overlay leaves Host truth behind.
+    wireSettingsSink({ saved: config => setSystemConfig(config) });
+    return () => {
+      wireWorkspaceCanonicalSink(null);
+      wireSubtaskCanonicalSink(null);
+      wireTaskCanonicalSink(null);
+      wireSessionCanonicalPatch(null);
+      wireSettingsSink(null);
+    };
+  }, []);
+
+  // In-flight operation runs drive the create/fork busy UX: true from
+  // dispatch until the operation:result lands (session:created still
+  // populates canonical state and arrives first, host-side).
+  const pendingRuns = useStorePendingOperations(operationStore);
+  const sessionCreateRun = useStoreOperationRun(operationStore, sessionCreateRunId);
+  const assignTaskRun = useStoreOperationRun(operationStore, assignTaskRunId);
+  const creatingSession = pendingRuns.some(run => run.name === 'session.create');
+  const forkingSession = pendingRuns.some(run => run.name === 'session.fork');
+  // A failed / unknown-outcome create must not leave a stale first message in
+  // pendingFirstMessageRef — the session:created handler consumes it for ANY
+  // create, so an orphan would leak into the next session created anywhere.
+  useEffect(() => {
+    if (sessionCreateRun?.phase === 'failed' || sessionCreateRun?.phase === 'timed-out') {
+      pendingFirstMessageRef.current = null;
+    }
+  }, [sessionCreateRun?.phase]);
+  // Rendered sessions = canonical + overlays (proposal §4.3). Canonical
+  // `sessions` stays untouched for refs, effects, and the reload paths.
+  const displaySessions = useStoreSessionsWithOverlays(operationStore, sessions);
+  const displaySessionsRef = useRef(displaySessions);
+  displaySessionsRef.current = displaySessions;
+  // Last effective task seen for the surface session. A change here is an
+  // overlay or rollback, so task and subtask selection follow both directions.
+  const surfaceMembershipRef = useRef(new Map<string, string | null>());
+  useEffect(() => {
+    if (mode !== 'tasks') return;
+    const surfaceId = activeSubtaskId ?? selectedSessionId;
+    if (!surfaceId) return;
+    const effective = displaySessions.find(session => session.id === surfaceId);
+    if (!effective) return;
+    const taskId = effective.type === 'subtask' ? (effective.task_id ?? null) : null;
+    const previous = surfaceMembershipRef.current.get(surfaceId);
+    surfaceMembershipRef.current.set(surfaceId, taskId);
+    if (previous === undefined) {
+      if (activeSubtaskId === surfaceId && taskId === null) {
+        setActiveSubtaskId(null);
+        setActiveTaskId(null);
+      } else if (activeSubtaskId === surfaceId && taskId && activeTaskId !== taskId) {
+        setActiveTaskId(taskId);
+      }
+      return;
+    }
+    if (previous === taskId) return;
+    if (taskId) {
+      if (activeSubtaskId !== surfaceId) setActiveSubtaskId(surfaceId);
+      if (activeTaskId !== taskId) setActiveTaskId(taskId);
+      return;
+    }
+    if (activeSubtaskId !== null) setActiveSubtaskId(null);
+    if (activeTaskId !== null) setActiveTaskId(null);
+  }, [activeSubtaskId, activeTaskId, displaySessions, mode, selectedSessionId]);
+  // Same merge for tasks (rename/done/pin overlays) and workspaces
+  // (rename/pin overlays + the whole-list reorder overlay).
+  const displayTasks = useStoreTasksWithOverlays(operationStore, tasks);
+  const displayWorkspaces = useStoreWorkspacesWithOverlays(operationStore, workspaces);
+  // Rendered settings = canonical + settings.save overlays (Phase 3b):
+  // SettingsBody, the appearance side-effect, and the Sheet's editor/app
+  // lists all read the merged config so optimistic writes apply in the same
+  // task they dispatch.
+  const displayConfig = useStoreSettingsWithOverlays(operationStore, systemConfig);
+  const systemDark = useSystemDark();
+  const assignTaskSession = assignTaskSessionId
+    ? displaySessions.find(session => session.id === assignTaskSessionId) ?? null
+    : null;
+  const canonicalAssignTaskSession = assignTaskSessionId
+    ? sessions.find(session => session.id === assignTaskSessionId) ?? null
+    : null;
+  useEffect(() => {
+    if (assignTaskSessionId === null) return;
+    // Host broadcasts canonical state before operation:result. Close on that
+    // durable state as well as on confirmation so a dropped result cannot
+    // leave a successfully-filed Session in a misleading retry dialog.
+    const reachedSelectedTask = assignTaskTargetId !== null
+      && canonicalAssignTaskSession?.type === 'subtask'
+      && canonicalAssignTaskSession.task_id === assignTaskTargetId;
+    const noLongerAssignable = canonicalAssignTaskSession === null
+      || canonicalAssignTaskSession.archived !== 0
+      || canonicalAssignTaskSession.type !== 'coding'
+      || canonicalAssignTaskSession.task_id !== null;
+    if (assignTaskRun?.phase !== 'confirmed' && !reachedSelectedTask && !noLongerAssignable) return;
+    setAssignTaskSessionId(null);
+    setAssignTaskTargetId(null);
+    setAssignTaskRunId(undefined);
+  }, [
+    assignTaskRun?.phase,
+    assignTaskSessionId,
+    assignTaskTargetId,
+    canonicalAssignTaskSession,
+  ]);
+
+  // Appearance side-effect reads the RENDERED config (canonical +
+  // settings.save overlays) so an optimistic theme switch applies in the
+  // same task it dispatches, and a rollback visibly reverts it. The 'system'
+  // theme resolves against the live OS preference here, not at write time.
+  useEffect(() => {
+    if (!displayConfig) return;
+    const resolvedTheme = resolveTheme(
+      displayConfig.theme,
+      systemDark,
+      displayConfig.system_light_theme ?? 'warm',
+    );
+    document.body.setAttribute('data-theme', resolvedTheme);
+    document.body.setAttribute('data-accent', displayConfig.accent);
+    document.body.setAttribute('data-density', 'cozy');
+    document.body.setAttribute('data-scale-chrome', 'md');
+    document.body.setAttribute('data-scale-code', 'md');
+    // Chat typography is concrete: a px size drives --zone-scale directly
+    // (base chat font is 14px) and the family fills --chat-font-family.
+    const chatScale = displayConfig.chat_font_size / DEFAULT_CHAT_FONT_SIZE;
+    document.body.style.setProperty('--chat-zone-scale', String(chatScale));
+    document.body.style.setProperty(
+      '--chat-font-family',
+      CHAT_FONT_FAMILY_STACKS[displayConfig.chat_font_family],
+    );
+    // Frame glass transparency (percent); the tokens mix --bg against
+    // transparent at this ratio (default 100 = fully opaque).
+    document.body.style.setProperty(
+      '--frame-opacity',
+      String(displayConfig.frame_opacity ?? 100),
+    );
+    document.documentElement.setAttribute('lang', 'en');
+    // The brand mark is theme-adjusted but accent-fixed (Plum gradient,
+    // 2026-09-08 owner call) — accent changes no longer repaint the logo.
+    applyGianIconAppearance(resolvedTheme);
+    // macOS glass: the vibrancy material follows the resolved theme (dark
+    // needs the deep 'sidebar' material; frost can only wash grey). A System
+    // theme must leave themeSource on 'system' or the pinned appearance
+    // freezes prefers-color-scheme and OS switching stops working.
+    void desktopBridge()?.setFrameVibrancy?.(resolvedTheme, displayConfig.theme === 'system');
+    // Keep the remappable-shortcut store aligned with the rendered config
+    // (optimistic overlay applies in the same task; rollback reverts it).
+    setKeymapPreferences(displayConfig.keymap);
+  }, [displayConfig?.theme, displayConfig?.system_light_theme, systemDark,
+      displayConfig?.accent, displayConfig?.frame_opacity,
+      displayConfig?.chat_font_size, displayConfig?.chat_font_family,
+      displayConfig?.keymap]);
+
+  useEffect(() => {
+    const browserPreferences = displayConfig?.tools?.browser;
+    if (!browserPreferences) return;
+    void desktopBridge()?.browser?.configure(browserPreferences);
+  }, [
+    displayConfig?.tools?.browser.home_page,
+    displayConfig?.tools?.browser.restore_last_page,
+    displayConfig?.tools?.browser.external_links,
+  ]);
+  // Latest active session id for stable event and unread handlers.
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
+  useEffect(() => {
+    const notifications = desktopBridge()?.notifications;
+    if (!notifications?.native) return;
+    // Run migration on App startup, not only when the user happens to open
+    // Settings, so existing explicitly-authorized 0.4.2 users do not lose
+    // alerts during the manual 0.4.3 bridge installation.
+    void notifications.updatePreferences(
+      nativeNotificationPreferencesForMigration(),
+    ).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (runtimeAuthStatus !== 'authenticated') return;
+    ws.send({ type: 'events:subscribe', session_id: activeSessionId });
+  }, [activeSessionId, runtimeAuthStatus, ws]);
+
+  // Active-session transcript hydration effect. (The returned hydrate
+  // callback was only consumed by the retired per-Task Manager mount.)
+  const {
+    historyBySession,
+    loadOlder,
+    retry: retryHistory,
+    markLive: markSessionHistoryLive,
+    rebuild: rebuildSessionHistory,
+    loadContextWindow,
+    returnToLatest,
+  } = useTranscriptHydration({
+    activeSessionId,
+    connectionReady: wsState === 'open' && authed,
+    // The archived read-only row is explicit hydrator input — its real
+    // executor resolves hydration/context loads, never a 'claude' guess.
+    sessions: readOnlySession && !sessions.some(s => s.id === readOnlySession.id)
+      ? [readOnlySession, ...sessions]
+      : sessions,
+    itemsBySession,
+    setItemsBySession,
+    setPlanStateBySession,
+  });
+
+  const activeSession =
+    displaySessions.find(s => s.id === activeSessionId)
+    ?? (readOnlySession && readOnlySession.id === activeSessionId ? readOnlySession : null);
+  const historyBySessionRef = useRef(historyBySession);
+  useEffect(() => { historyBySessionRef.current = historyBySession; }, [historyBySession]);
+  // Exact message navigation (Issue #168): bounded context window load around
+  // a find/search target. The executor comes from the session row (the
+  // archived read-only row carries it too).
+  const loadMessageContext = useCallback((sessionId: string, focus: {
+    turnId?: string;
+    turn?: number;
+    documentId?: string;
+    textRevision?: string;
+  }) => {
+    const executor = sessionsRef.current.find(session => session.id === sessionId)?.executor
+      ?? (readOnlySession?.id === sessionId ? readOnlySession.executor : 'claude');
+    return loadContextWindow(sessionId, executor, focus);
+  }, [loadContextWindow, readOnlySession]);
+  const returnSessionToLatest = useCallback((sessionId: string) => {
+    const executor = sessionsRef.current.find(session => session.id === sessionId)?.executor
+      ?? (readOnlySession?.id === sessionId ? readOnlySession.executor : 'claude');
+    returnToLatest(sessionId, executor);
+  }, [returnToLatest, readOnlySession]);
+  const activeWorkspace = activeSession
+    ? displayWorkspaces.find(w => w.id === activeSession.workspace_id) ?? null
+    : null;
+
+  // Side Chat surface (proposal §10.5): the read-model records bound to the
+  // active session, the standard control's two-layer gating (catalog §9.4 +
+  // the session's dynamic available_actions §10.3), and the authoritative
+  // local removal for a confirmed close.
+  const activeSideChats = useMemo(
+    () => activeSessionId
+      ? sideChats.filter(entry => entry.parent_session_id === activeSessionId)
+      : [],
+    [sideChats, activeSessionId],
+  );
+  const catalogActions = useCatalogActions(activeSession?.executor ?? null, activeSession?.agent_id ?? null);
+  const sideChatControl = useMemo(
+    () => activeSession
+      ? actionControlState(catalogActions, activeSession.available_actions, 'sidechat.create')
+      : null,
+    [catalogActions, activeSession],
+  );
+  // Session Fork standard controls (proposal §10.6): head fork and the
+  // per-turn affordance are gated independently — atTurn additionally
+  // requires plain fork at both layers (handled inside actionControlState).
+  const forkControl = useMemo(
+    () => activeSession
+      ? actionControlState(catalogActions, activeSession.available_actions, 'session.fork')
+      : null,
+    [catalogActions, activeSession],
+  );
+  const forkAtTurnControl = useMemo(
+    () => activeSession
+      ? actionControlState(catalogActions, activeSession.available_actions, 'session.fork.atTurn')
+      : null,
+    [catalogActions, activeSession],
+  );
+  const handleSideChatClosed = useCallback((sidechatId: string) => {
+    // A confirmed sidechat.close means the Host permanently deleted the
+    // temporary record (§10.5.4) — drop it and its transient transcript state
+    // locally. The next state_sync no longer carries the record either.
+    setSideChats(previous => previous.filter(entry => entry.id !== sidechatId));
+    setItemsBySidechat(previous => {
+      if (!(sidechatId in previous)) return previous;
+      const next = { ...previous };
+      delete next[sidechatId];
+      return next;
+    });
+    setPendingBySidechat(previous => {
+      if (!(sidechatId in previous)) return previous;
+      const next = { ...previous };
+      delete next[sidechatId];
+      return next;
+    });
+  }, []);
+
+  // Refresh working trees whenever the workspace or session set changes —
+  // a new session with a worktree, or a merged/dropped one, changes the list.
+  const workingTreeShape = useMemo(() => JSON.stringify({
+    workspaces: workspaces.map(workspace => [workspace.id, workspace.name, workspace.path]),
+    sessions: sessions
+      .filter(session => session.worktree_path)
+      .map(session => [
+        session.id,
+        session.name,
+        session.workspace_id,
+        session.worktree_path,
+        session.branch,
+        session.archived,
+      ]),
+  }), [workspaces, sessions]);
+  useEffect(() => {
+    if (runtimeAuthStatus !== 'authenticated' || workspaces.length === 0) return;
+    reloadWorkingTrees({ force: false });
+  }, [reloadWorkingTrees, runtimeAuthStatus, workingTreeShape, workspaces.length]);
+
+  // Tracks the last auto-applied worktree detection — see the auto-switch
+  // effect next to appT below (appT is declared late in this component).
+  const wtAutoAppliedRef = useRef<{
+    sessionId: string;
+    path: string;
+    revision: number;
+  } | null>(null);
+
+  // Default working tree for the Files view: follow the focused session.
+  // If a session has a live worktree, use it; otherwise use that session's
+  // workspace primary tree; otherwise the first workspace.
+  const locale = 'en' as const;
+  const appT = useCallback((key: string) => EN[key] ?? key, []);
+
+  // Protocol head Fork (proposal §10.6): the session dropdown menu's entry.
+  // Wired with the store-explicit hooks because this component mounts ABOVE
+  // the operation providers; failure surfacing shares the per-turn control's
+  // settled-toast helper. One fork at a time; dispatch mints a target id and
+  // the originating tab follows its canonical session:created/state_sync.
+  const [forkHeadRunId, setForkHeadRunId] = useState<string>();
+  const forkHeadRun = useStoreOperationRun(operationStore, forkHeadRunId);
+  useForkRunSettledToast(forkHeadRun, appT);
+  const forkHeadForking = pendingRuns.some(run => run.name === 'session.forkSession');
+  const handleForkHead = useCallback(() => {
+    if (!activeSessionId || forkControl?.enabled !== true || forkHeadForking) return;
+    const run = dispatchHeadFork(ops.dispatch, activeSessionId);
+    setForkHeadRunId(run.id);
+  }, [activeSessionId, forkControl, forkHeadForking, ops]);
+
+  // Unresolved-reload wiring (Phase 3a, proposal §4.3): a timed-out run
+  // (timeout expiry or socket close — fired by the dispatcher's onUnresolved)
+  // triggers a targeted canonical reload of the affected entity, causally
+  // after the command, then reconciles the run's unresolved overlays against
+  // the fresh values: matches absorb silently, mismatches drop with a
+  // "change may not have been applied" warning. Covers the session (incl.
+  // queue), task, and workspace entity prefixes plus the drag-reorder
+  // whole-list keys (`task:list`, `session-order:*`); `pending:` create keys
+  // and `approval:` runs have no overlays to reconcile.
+  const reloadUnresolvedEntity = useCallback(async (entityKey: string) => {
+    // Drag-reorder overlays (2026-08-29): the overlay value is the scope's
+    // ordered id array; the fresh canonical order columns reproduce it when
+    // the command landed (the deep-compare in reconcileUnresolvedEntity
+    // absorbs a matching array silently).
+    if (entityKey === TASK_LIST_ENTITY_KEY) {
+      const fresh = await loadTasks();
+      reconcileUnresolvedEntity(operationStore, entityKey,
+        () => fresh.filter(task => task.status === 'open').map(task => task.id), appT);
+      setTasks(fresh);
+      return;
+    }
+    if (entityKey.startsWith('session-order:')) {
+      const [, scope, rawParent] = entityKey.split(':');
+      const parentId = !rawParent || rawParent === '$' ? null : rawParent;
+      const fresh = await loadSessions();
+      const ids = scope === 'task'
+        ? reorderableSubtasks(fresh, parentId ?? '').map(s => s.id)
+        : sortSessionsForRail(fresh.filter(s => s.pinned_at == null
+            && (parentId === null ? s.workspace_id == null : s.workspace_id === parentId)))
+          .map(s => s.id);
+      reconcileUnresolvedEntity(operationStore, entityKey, () => ids, appT);
+      setSessions(fresh);
+      return;
+    }
+    if (entityKey.startsWith('session:')) {
+      const sessionId = entityKey.slice('session:'.length).split(':')[0]!;
+      const fresh = await loadSessions();
+      const session = fresh.find(s => s.id === sessionId);
+      reconcileUnresolvedEntity(operationStore, entityKey, field =>
+        // Canonical queues live outside Session (no targeted queue loader —
+        // read the latest canonical queue state).
+        field === QUEUE_OVERLAY_FIELD
+          ? queueBySessionRef.current[sessionId] ?? []
+          : session?.[field as keyof Session], appT);
+      setSessions(fresh);
+      return;
+    }
+    if (entityKey.startsWith('task:')) {
+      const taskId = entityKey.slice('task:'.length);
+      const fresh = await loadTasks();
+      const task = fresh.find(t => t.id === taskId);
+      reconcileUnresolvedEntity(operationStore, entityKey,
+        field => task?.[field as keyof Task], appT);
+      setTasks(fresh);
+      return;
+    }
+    if (entityKey === WORKSPACE_LIST_ENTITY_KEY || entityKey.startsWith('workspace:')) {
+      const fresh = await loadWorkspaces();
+      if (entityKey === WORKSPACE_LIST_ENTITY_KEY) {
+        reconcileUnresolvedEntity(operationStore, entityKey, () => fresh.map(w => w.id), appT);
+      } else {
+        const workspaceId = entityKey.slice('workspace:'.length).split(':')[0];
+        const workspace = fresh.find(w => w.id === workspaceId);
+        reconcileUnresolvedEntity(operationStore, entityKey,
+          field => workspace?.[field as keyof Workspace], appT);
+      }
+      setWorkspaces(fresh);
+    }
+  }, [operationStore, appT]);
+  useEffect(() => {
+    unresolvedReloadRef.current = entityKey => { void reloadUnresolvedEntity(entityKey); };
+  }, [reloadUnresolvedEntity]);
+
+  const {
+    wtView,
+    setWtView,
+    apps,
+    wbTabs,
+    setWbTabs,
+    activeTabByGroup,
+    viewState,
+    setViewState,
+    activeRail,
+    setActiveRail,
+    p3Collapsed,
+    setP3Collapsed,
+    filesInspectorSuppressed,
+    fileReveal,
+    chatPanel,
+    setChatPanel,
+    restoreChatPanelForSession,
+    fileRehype,
+    sheetActions,
+    GROUP_OF_RAIL,
+    viewedWorkingTreeId,
+    handleOpenWith,
+    activateRail,
+    toggleRail,
+    openFileInSheet,
+    openWorkspaceInSheet,
+    openRelativeFileHref,
+    openUrlInBrowser,
+    showChangesDiff,
+    openTranscriptDiffInSheet,
+    openCommitInSheet,
+    revalidateHistoryTabs,
+    openChatPanel,
+    addTerminalTab,
+    addBrowserTab,
+  } = useWorkbench({
+    authStatus: runtimeAuthStatus,
+    dispatch: ops.dispatch,
+    sessions,
+    activeSessionId,
+    activeSession,
+    activeWorkspace,
+    workspaces,
+    workingTrees,
+    terminalPreferences: displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES,
+    terminalSystemShell: terminalOptions?.system_shell ?? '',
+    mode,
+    activeSubtaskId,
+    t: appT,
+    onSurfaceCommand: () => { retireSettingsScrollRef.current(); },
+  });
+
+  // ─── System notifications (renderer fallback) ────────────────────────────
+  // The Host's `attention` message is the single signal source; this client
+  // is only a delivery end. Desktop-navigation handling is defined further
+  // down (it needs selectSession); the socket layer reaches the latest
+  // handler through this ref, and suppression reads the latest view context
+  // through the other — both assigned during render like the sibling refs.
+  const desktopNavigationRef = useRef<(target: GianDesktopNavigationTarget) => void>(() => {});
+  const handleDesktopNavigationRef = useRef<
+    (
+      target: GianDesktopNavigationTarget,
+      isCurrent?: () => boolean,
+    ) => DesktopNavigationDelivery | Promise<DesktopNavigationDelivery>
+  >(() => 'pending');
+  const sessionSnapshotReadyRef = useRef(false);
+  const navigationRetryRef = useRef<DesktopNavigationRetry>({ retry: null });
+  const navigationGenerationRef = useRef(0);
+  const userIntentSequenceRef = useRef(0);
+  const sessionCanonRef = useRef(createSessionCanon());
+  const pendingNavigationRef = useRef<PendingSessionNavigation | null>(null);
+  const navigationBusyGenerationRef = useRef<number | null>(null);
+  const desktopResumeRef = useRef(false);
+  const resumeNavigationRef = useRef<(request: PendingSessionNavigation) => void>(() => {});
+  const recoveredForkRef = useRef<(sessionId: string) => void>(() => {});
+  const onSessionSnapshot = useCallback((): void => {
+    sessionSnapshotReadyRef.current = true;
+    // Subscribe retries only its own deferred desktop target. An in-app
+    // request stays here, with its list mode and run id intact.
+    desktopResumeRef.current = true;
+    try {
+      navigationRetryRef.current.retry?.();
+    } finally {
+      desktopResumeRef.current = false;
+    }
+    const still = pendingNavigationRef.current;
+    if (
+      still
+      && still.generation === navigationGenerationRef.current
+      && navigationBusyGenerationRef.current !== still.generation
+    ) {
+      resumeNavigationRef.current(still);
+    }
+  }, []);
+  const notificationContextRef = useRef({ mode, viewState, activeSessionId, activeSubtaskId });
+  notificationContextRef.current = { mode, viewState, activeSessionId, activeSubtaskId };
+  const handleAttentionMessage = useCallback((message: AttentionMessage) => {
+    const context = notificationContextRef.current;
+    maybeNotifyForAttention(message, {
+      visibleSessionId: visibleSessionForNativeNotification({
+        mode: context.mode,
+        viewState: context.viewState,
+        activeSessionId: context.activeSessionId,
+        activeSubtaskId: context.activeSubtaskId,
+      }),
+      // Renderer fallback localizes the semantic event in the UI language;
+      // legacy title/body messages pass through untouched.
+      localizeEvent: event => appT(`attention.event.${event}`),
+      untitledLabel: appT('attention.untitledConversation'),
+      onClick: () => {
+        // Renderer-fallback click (native path is read by main with the
+        // desktop token): read exactly the notified generation, then navigate.
+        if (isScheduleConfirmationAttentionMessage(message)) {
+          void markInboxRefRead(message.inbox_ref);
+          desktopNavigationRef.current({
+            type: 'schedule_confirmation',
+            confirmationId: message.target.confirmation_id,
+            controlSessionId: message.session_id,
+            ...(message.session_name ? { sessionName: message.session_name } : {}),
+            inboxRef: message.inbox_ref,
+          });
+          return;
+        }
+        if (message.inbox_ref) {
+          void markInboxRefRead(message.inbox_ref);
+        }
+        desktopNavigationRef.current(
+          message.schedule
+            ? {
+                type: 'schedule',
+                scheduleId: message.schedule.schedule_id,
+                runId: message.schedule.run_id,
+              }
+            : {
+                type: 'session',
+                sessionId: message.session_id,
+                turn: message.turn,
+                kind: message.kind,
+                ...(message.inbox_ref ? { inboxRef: message.inbox_ref } : {}),
+              },
+        );
+      },
+    });
+  }, [appT]);
+
+  // A file selected from the transcript underbar's Diff panel opens the
+  // Diffs rail on that exact turn's scope and jumps panel 2's multi-diff
+  // view to the file's block. It intentionally steals the view.
+  const showLastTurnChanges = (session: Session, turn: number, path: string) => {
+    const wtId = viewedWorkingTreeId(session);
+    if (wtId) {
+      applyChangesScopeRequest(
+        wtId,
+        'lastturn',
+        { sessionId: session.id, turn },
+        session.id,
+      );
+      requestChangesDiffAnchor(wtId, path, session.id);
+    }
+    showChangesDiff();
+  };
+
+  // Git History (Issue #3): when a fetch reports refsChanged for the viewed
+  // tree, the use-history store raises `moved` — revalidate every open commit
+  // tab of that tree against the host so a commit that became unreachable
+  // gets the ORPHANED tag + snapshot banner instead of silently closing.
+  const historyWtId = viewedWorkingTreeId(activeSession);
+  const historyMovementRevision = useHistoryMovementRevision(historyWtId, activeSessionId);
+  useEffect(() => {
+    if (historyMovementRevision === 0 || !historyWtId) return;
+    const tabs = wbTabs.filter(t =>
+      t.group === 'history' && t.kind === 'commit' && t.workingTreeId === historyWtId && t.commitSha);
+    if (tabs.length === 0) return;
+    let cancelled = false;
+    void Promise.all(tabs.map(async tab => {
+      try {
+        const result = await loadGitHistoryCommitReachability(historyWtId, tab.commitSha!);
+        return { sha: tab.commitSha!, unreachable: !result.reachable };
+      } catch (err) {
+        return {
+          sha: tab.commitSha!,
+          // A missing object is conclusively orphaned. Transport/Host errors
+          // are inconclusive and must not clear an existing ORPHANED marker.
+          unreachable: err instanceof GitHistoryRequestError && err.code === 'history_commit_not_found'
+            ? true
+            : undefined,
+        };
+      }
+    })).then(results => {
+      if (cancelled) return;
+      const bySha = new Map(results.map(result => [result.sha, result.unreachable]));
+      revalidateHistoryTabs(historyWtId, sha => bySha.get(sha));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyMovementRevision, historyWtId, activeSessionId]);
+
+  useAppSocket({
+    authStatus: runtimeAuthStatus,
+    ws,
+    sessionsRef,
+    sessionCanonRef,
+    itemsBySessionRef,
+    activeSessionIdRef,
+    pendingFirstMessageRef,
+    setWsState,
+    setWsAttempt,
+    setAuthed,
+    setWorkspaces,
+    refreshWorkingTrees,
+    setSessions,
+    setSideChats,
+    sideChatsRef,
+    setItemsBySidechat,
+    setPendingBySidechat,
+    setTasks,
+    setSystemConfig,
+    setRunner,
+    setActiveSessionId,
+    setActiveTaskId,
+    setActiveSubtaskId,
+    setItemsBySession,
+    setPendingBySession,
+    setQueueBySession,
+    setPlanStateBySession,
+    markSessionHistoryLive,
+    rebuildSessionHistory,
+    operationStore,
+    ops,
+    translate: appT,
+    onAttention: handleAttentionMessage,
+    onSessionSnapshot,
+    onRecoveredForkSession: sessionId => { recoveredForkRef.current(sessionId); },
+    isTranscriptDetached: sessionId => historyBySessionRef.current[sessionId]?.detachedFromLatest === true,
+  });
+
+  const selectSession = useSessionSelection({
+    mode,
+    activeSubtaskId,
+    activeSessionId: selectedSessionId,
+    sessionsRef,
+    effectiveSessionsRef: displaySessionsRef,
+    activeSessionIdRef,
+    setActiveSessionId,
+    restoreChatPanelForSession,
+    ops,
+  });
+
+  // Timer deep links (Issue #51): the transcript's schedule provenance tag
+  // opens the Timer detail; a bound-session Run opens its control
+  // conversation with the transcript focused on the scheduled Turn.
+  const cancelNavigationIntent = useCallback(() => {
+    userIntentSequenceRef.current = noteUserNavigationIntent();
+    // The ref above dies on reload. Drop the stored fork open now so a later
+    // fork arrival cannot treat this leave as if it never happened.
+    retireForkNavigationIntent();
+    navigationGenerationRef.current += 1;
+    pendingNavigationRef.current = null;
+    retireSettingsScrollRef.current();
+    retireSessionReveal();
+  }, []);
+  cancelNavigationIntentRef.current = cancelNavigationIntent;
+  const claimNavigationIntent = useCallback((
+    request: Omit<PendingSessionNavigation, 'generation'>,
+  ): PendingSessionNavigation => {
+    userIntentSequenceRef.current = noteUserNavigationIntent();
+    retireForkNavigationIntent();
+    retireSettingsScrollRef.current();
+    // The previous navigation's reveal intent dies here; the rail reveal for
+    // THIS target is posted by commitSessionNavigation once the surface is
+    // resolved, so a superseded intent can never scroll the rail later.
+    retireSessionReveal();
+    const generation = navigationGenerationRef.current + 1;
+    navigationGenerationRef.current = generation;
+    const next: PendingSessionNavigation = { ...request, generation };
+    pendingNavigationRef.current = next;
+    // A read-only archived view is dropped by any newer explicit navigation.
+    setReadOnlySession(previous => previous && previous.id !== request.sessionId ? null : previous);
+    // A pending exact-message focus is one-shot navigation state: any newer
+    // intent retires it (search/Inbox set theirs right after this claim).
+    setMessageFocus(null);
+    return next;
+  }, []);
+  const navigationStillCurrent = useCallback((
+    generation: number,
+    subscribeIsCurrent?: () => boolean,
+  ) => navigationGenerationRef.current === generation && (subscribeIsCurrent?.() ?? true), []);
+  const clearNavigationRequest = useCallback((generation: number) => {
+    if (pendingNavigationRef.current?.generation === generation) pendingNavigationRef.current = null;
+  }, []);
+  // A newer in-app choice acknowledges the desktop target it replaced so the
+  // main process does not deliver it again. A newer desktop click must not
+  // be acknowledged by the older delivery.
+  const supersededDelivery = useCallback((
+    request: PendingSessionNavigation,
+    subscribeIsCurrent?: () => boolean,
+  ): DesktopNavigationDelivery => {
+    if (subscribeIsCurrent && !subscribeIsCurrent()) return 'dropped';
+    return request.desktopTarget ? 'settled' : 'dropped';
+  }, []);
+  const trackNavigationDelivery = useCallback((
+    request: PendingSessionNavigation,
+    delivery: DesktopNavigationDelivery,
+  ) => {
+    if (
+      delivery === 'pending'
+      && navigationGenerationRef.current === request.generation
+      && pendingNavigationRef.current == null
+    ) {
+      pendingNavigationRef.current = request;
+    }
+  }, []);
+
+  const openSchedule = useCallback((scheduleId: string) => {
+    cancelNavigationIntent();
+    setTimerScheduleId(scheduleId);
+    startTransition(() => setMode('timer'));
+  }, [cancelNavigationIntent]);
+
+  const commitSessionNavigation = useCallback((
+    action: Exclude<SessionNavigationAction, { kind: 'unavailable' }>,
+    focusRunId?: string,
+  ) => {
+    // Every explicit session selection (rail row, search, Inbox, desktop
+    // notification) also reveals the row in the owning rail. The request is
+    // consumed by the mounted rail once the row renders; a newer navigation
+    // supersedes an unconsumed one.
+    requestSessionReveal({
+      sessionId: action.sessionId,
+      surface: action.kind === 'select-subtask-in-tasks' || action.kind === 'select-standalone-in-tasks'
+        ? 'tasks'
+        : 'sessions',
+      taskId: action.kind === 'select-subtask-in-tasks' ? action.taskId : null,
+    });
+    startTransition(() => {
+      if (action.kind === 'select-subtask-in-tasks') {
+        setMode('tasks');
+        setActiveTaskId(action.taskId);
+        setActiveSubtaskId(action.sessionId);
+      } else if (action.kind === 'select-standalone-in-tasks') {
+        setMode('tasks');
+        setActiveTaskId(null);
+        setActiveSubtaskId(null);
+      } else {
+        setMode('sessions');
+        setActiveTaskId(null);
+        setActiveSubtaskId(null);
+      }
+      // Same transition as the task row. A separate update is snapped back
+      // to the previous subtask while mode is still Tasks.
+      selectSession(action.sessionId);
+      setActiveRail(null);
+      setViewState('main');
+      if (focusRunId) setFocusScheduleRun({ sessionId: action.sessionId, runId: focusRunId });
+    });
+  }, [selectSession, setActiveRail, setViewState]);
+
+  const applySessionTarget = useCallback((
+    sessionId: string,
+    session: Pick<Session, 'task_id' | 'archived'> | null,
+    requestedListMode: ConversationListMode | null,
+    focusRunId?: string,
+    allowArchivedReadOnly?: boolean,
+  ): boolean => {
+    const action = resolveSessionNavigation(
+      { sessionId },
+      {
+        mode: modeRef.current,
+        explicitListMode: explicitListModeRef.current,
+        requestedListMode,
+        session: session ? { task_id: session.task_id, archived: session.archived } : null,
+        allowArchivedReadOnly,
+      },
+    );
+    if (action.kind === 'unavailable') {
+      toast({
+        kind: 'warning',
+        message: appT(action.reason === 'archived'
+          ? 'navigation.sessionArchived'
+          : 'navigation.sessionMissing'),
+      });
+      return false;
+    }
+    commitSessionNavigation(action, focusRunId);
+    return true;
+  }, [appT, commitSessionNavigation]);
+
+  const loadMissingSession = useCallback(async (
+    request: PendingSessionNavigation,
+    subscribeIsCurrent?: () => boolean,
+  ): Promise<DesktopNavigationDelivery> => {
+    const alive = () => navigationStillCurrent(request.generation, subscribeIsCurrent);
+    if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+    navigationBusyGenerationRef.current = request.generation;
+    const baselineSnapshot = sessionCanonRef.current.snapshot;
+    const baselineRevision = sessionCanonRef.current.facts.get(request.sessionId)?.revision ?? 0;
+    const canonMoved = () => {
+      const canon = sessionCanonRef.current;
+      const fact = canon.facts.get(request.sessionId);
+      return canon.snapshot !== baselineSnapshot || (fact?.revision ?? 0) !== baselineRevision;
+    };
+    // A snapshot or lifecycle write that landed after this request started is
+    // newer than the list body, even when the body arrives later.
+    const settleFromNewerCanon = (
+      listBody: Session | null,
+      archivedRow?: Session | null,
+    ): DesktopNavigationDelivery => {
+      if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+      const fact = sessionCanonRef.current.facts.get(request.sessionId);
+      if (fact?.disposition === 'archived') {
+        if (request.allowArchivedReadOnly && archivedRow) {
+          setReadOnlySession(archivedRow);
+          applySessionTarget(
+            request.sessionId,
+            archivedRow,
+            request.requestedListMode,
+            request.focusRunId,
+            true,
+          );
+        } else {
+          applySessionTarget(
+            request.sessionId,
+            { task_id: fact.task_id, archived: 1 },
+            request.requestedListMode,
+            request.focusRunId,
+          );
+        }
+      } else if (fact?.disposition === 'active') {
+        const canonical = sessionsRef.current.find(session =>
+          session.id === request.sessionId && session.archived !== 1) ?? null;
+        if (canonical) {
+          applySessionTarget(
+            request.sessionId,
+            canonical,
+            request.requestedListMode,
+            request.focusRunId,
+          );
+        } else if (listBody && listBody.archived !== 1) {
+          const adopted = sessionWithCanonicalMembership(listBody, fact.task_id);
+          if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+          sessionsRef.current = [
+            adopted,
+            ...sessionsRef.current.filter(session => session.id !== adopted.id),
+          ];
+          setSessions(previous => [
+            adopted,
+            ...previous.filter(session => session.id !== adopted.id),
+          ]);
+          if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+          applySessionTarget(
+            request.sessionId,
+            adopted,
+            request.requestedListMode,
+            request.focusRunId,
+          );
+        } else {
+          applySessionTarget(request.sessionId, null, request.requestedListMode, request.focusRunId);
+        }
+      } else {
+        applySessionTarget(request.sessionId, null, request.requestedListMode, request.focusRunId);
+      }
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    };
+    try {
+      let active: Session[];
+      try {
+        active = await loadSessions();
+      } catch {
+        if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+        return 'pending';
+      }
+      if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+      const found = active.find(session => session.id === request.sessionId) ?? null;
+      // A read-only archived target never settles from canon alone — it needs
+      // the full archived row, so it always proceeds to the archive list.
+      const archivedReadOnlyPath = request.allowArchivedReadOnly === true
+        && sessionCanonRef.current.facts.get(request.sessionId)?.disposition === 'archived';
+      if (canonMoved() && !archivedReadOnlyPath) return settleFromNewerCanon(found);
+      if (found && found.archived !== 1 && !archivedReadOnlyPath) {
+        if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+        sessionsRef.current = [
+          found,
+          ...sessionsRef.current.filter(session => session.id !== found.id),
+        ];
+        setSessions(previous => [
+          found,
+          ...previous.filter(session => session.id !== found.id),
+        ]);
+        if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+        applySessionTarget(
+          request.sessionId,
+          found,
+          request.requestedListMode,
+          request.focusRunId,
+        );
+        clearNavigationRequest(request.generation);
+        return 'settled';
+      }
+      let archivedFound: Session | null = found?.archived === 1 ? { ...found, archived: 1 } : null;
+      if (!archivedFound) {
+        try {
+          const hit = (await loadArchivedSessions()).find(session => session.id === request.sessionId) ?? null;
+          archivedFound = hit ? { ...hit, archived: 1 as const } : null;
+        } catch {
+          // The archive query failed. Absence is not confirmed, so the
+          // desktop target stays unacknowledged and can be retried.
+          if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+          return 'pending';
+        }
+      }
+      if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+      if (canonMoved()) return settleFromNewerCanon(found, archivedFound);
+      if (archivedFound && request.allowArchivedReadOnly) {
+        setReadOnlySession(archivedFound);
+      }
+      applySessionTarget(
+        request.sessionId,
+        archivedFound,
+        request.requestedListMode,
+        request.focusRunId,
+        request.allowArchivedReadOnly,
+      );
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    } finally {
+      if (navigationBusyGenerationRef.current === request.generation) {
+        navigationBusyGenerationRef.current = null;
+      }
+    }
+  }, [applySessionTarget, clearNavigationRequest, navigationStillCurrent, supersededDelivery]);
+
+  // Latest canonical row, then the live assign overlay. A previous render's
+  // display list must not outrank a lifecycle update from this turn.
+  const navigationSession = useCallback((sessionId: string): Session | null => {
+    const fact = sessionCanonRef.current.facts.get(sessionId);
+    if (fact?.disposition === 'deleted' || fact?.disposition === 'archived') return null;
+    const canonical = sessionsRef.current.find(session => session.id === sessionId) ?? null;
+    if (!canonical || canonical.archived === 1) return null;
+    return applySessionOverlays(
+      canonical,
+      operationStore.getEntityOverlays(sessionEntityKey(canonical.id)),
+    );
+  }, [operationStore]);
+
+  const continueSessionRequest = useCallback((
+    request: PendingSessionNavigation,
+    subscribeIsCurrent?: () => boolean,
+  ): DesktopNavigationDelivery | Promise<DesktopNavigationDelivery> => {
+    if (!navigationStillCurrent(request.generation, subscribeIsCurrent)) {
+      return supersededDelivery(request, subscribeIsCurrent);
+    }
+    const fact = sessionCanonRef.current.facts.get(request.sessionId);
+    if (fact?.disposition === 'deleted' || (fact?.disposition === 'archived' && !request.allowArchivedReadOnly)) {
+      applySessionTarget(
+        request.sessionId,
+        fact.disposition === 'archived'
+          ? { task_id: fact.task_id, archived: 1 }
+          : null,
+        request.requestedListMode,
+        request.focusRunId,
+      );
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    }
+    // A desktop delivery parks until the first session snapshot: the REST
+    // session list can predate the snapshot's task ownership, so a local hit
+    // must not settle it early (and must not be acknowledged). In-app
+    // requests may still settle from local knowledge.
+    if (request.desktopTarget && !sessionSnapshotReadyRef.current) return 'pending';
+    const local = navigationSession(request.sessionId);
+    if (local) {
+      applySessionTarget(
+        request.sessionId,
+        local,
+        request.requestedListMode,
+        request.focusRunId,
+      );
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    }
+    if (!sessionSnapshotReadyRef.current) return 'pending';
+    return loadMissingSession(request, subscribeIsCurrent);
+  }, [applySessionTarget, clearNavigationRequest, loadMissingSession, navigationSession, navigationStillCurrent, supersededDelivery]);
+
+  const openExistingSession = useCallback((request: {
+    sessionId: string;
+    requestedListMode?: ConversationListMode | null;
+    focusRunId?: string;
+    allowArchivedReadOnly?: boolean;
+  }) => {
+    const requestedListMode = request.requestedListMode ?? null;
+    if (requestedListMode === 'sessions' || requestedListMode === 'tasks') {
+      rememberExplicitListMode(requestedListMode);
+    }
+    const pending = claimNavigationIntent({
+      sessionId: request.sessionId,
+      requestedListMode,
+      focusRunId: request.focusRunId,
+      ...(request.allowArchivedReadOnly ? { allowArchivedReadOnly: true } : {}),
+    });
+    void Promise.resolve(continueSessionRequest(pending)).then(delivery => {
+      trackNavigationDelivery(pending, delivery);
+    });
+  }, [claimNavigationIntent, continueSessionRequest, rememberExplicitListMode, trackNavigationDelivery]);
+
+  const openScheduledTurn = useCallback((sessionId: string, runId: string) => {
+    openExistingSession({ sessionId, focusRunId: runId });
+  }, [openExistingSession]);
+
+  const openTimerConversation = useCallback((sessionId: string) => {
+    openExistingSession({ sessionId });
+  }, [openExistingSession]);
+
+  useEffect(() => {
+    const screenshot = desktopBridge()?.screenshot;
+    if (!screenshot) return;
+    const offCaptured = screenshot.onCaptured(capture => {
+      void routeScreenshotCapture(capture, {
+        findSession: sessionId =>
+          sessionsRef.current.find(session => session.id === sessionId) ?? null,
+        upload: (sessionId, blob, filename) =>
+          dispatchAttachmentUpload(ops.dispatch, { sessionId, blob, filename }),
+        onSelectSession: session => {
+          openExistingSession({ sessionId: session.id });
+        },
+      }).then(result => {
+        if (result.ok) return;
+        toast({
+          kind: 'error',
+          message: appT(result.reason === 'missing-target'
+            ? 'screenshot.targetMissing'
+            : 'screenshot.uploadFailed'),
+        });
+      }).catch(() => {
+        toast({ kind: 'error', message: appT('screenshot.restoreFailed') });
+      });
+    });
+    const offError = screenshot.onError(error => {
+      const key = error === 'permission-denied'
+        ? 'screenshot.permissionDenied'
+        : error === 'shortcut-unavailable'
+          ? 'screenshot.shortcutUnavailable'
+          : error === 'busy'
+            ? 'screenshot.busy'
+            : error === 'no-target'
+              ? 'screenshot.noTarget'
+              : 'screenshot.captureFailed';
+      toast({ kind: 'error', message: appT(key) });
+    });
+    return () => {
+      offCaptured();
+      offError();
+    };
+  }, [appT, openExistingSession, ops.dispatch]);
+
+  const handleDesktopNavigation = useCallback((
+    target: GianDesktopNavigationTarget,
+    isCurrent?: () => boolean,
+  ): DesktopNavigationDelivery | Promise<DesktopNavigationDelivery> => {
+    if (isCurrent && !isCurrent()) return 'dropped';
+    if (target.type === 'settings') {
+      cancelNavigationIntent();
+      setSettingsSection(target.section);
+      activateRail('settings');
+      return 'settled';
+    }
+    if (target.type === 'schedule') {
+      cancelNavigationIntent();
+      openSchedule(target.scheduleId);
+      return 'settled';
+    }
+    if (target.type === 'schedule_confirmation') {
+      // Same arbitration as session targets: a newer user choice (or a newer
+      // notification) supersedes this delivery before and after the hydrate.
+      const request = claimNavigationIntent({
+        sessionId: target.controlSessionId,
+        requestedListMode: null,
+      });
+      return resolveScheduleConfirmationNavigation(
+        {
+          confirmationId: target.confirmationId,
+          controlSessionId: target.controlSessionId,
+          inboxRef: target.inboxRef,
+        },
+        {
+          hydrate: hydrateScheduleConfirmations,
+          findConfirmation: confirmationId =>
+            getScheduleConfirmationsSnapshot()
+              .confirmations.find(entry => entry.id === confirmationId),
+          focus: focusScheduleConfirmation,
+          openControlSession: sessionId =>
+            openExistingSession({ sessionId, allowArchivedReadOnly: true }),
+          unavailable: () => {
+            toast({ kind: 'warning', message: appT('navigation.confirmationUnavailable') });
+          },
+          isCurrent: () => navigationStillCurrent(request.generation, isCurrent),
+        },
+      ).then(outcome => {
+        if (outcome === 'superseded') return supersededDelivery(request, isCurrent);
+        clearNavigationRequest(request.generation);
+        return outcome === 'pending' ? 'pending' as const : 'settled' as const;
+      });
+    }
+    if (desktopResumeRef.current) {
+      const pending = pendingNavigationRef.current;
+      if (
+        pending?.desktopTarget
+        && pending.generation === navigationGenerationRef.current
+        && sameDesktopSessionTarget(pending.desktopTarget, target)
+      ) {
+        return continueSessionRequest(pending, isCurrent);
+      }
+      // This desktop delivery is still the subscribe-current one, but a newer
+      // in-app choice owns the view. Acknowledge it without opening it.
+      return 'settled';
+    }
+    const request = claimNavigationIntent({
+      sessionId: target.sessionId,
+      requestedListMode: null,
+      desktopTarget: target,
+      // A notification may outlive its session's archive — open read-only.
+      allowArchivedReadOnly: true,
+    });
+    return continueSessionRequest(request, isCurrent);
+  }, [
+    activateRail, appT, cancelNavigationIntent, claimNavigationIntent,
+    continueSessionRequest, openExistingSession, openSchedule,
+  ]);
+  handleDesktopNavigationRef.current = handleDesktopNavigation;
+
+  // Inbox → precise navigation (Issue #53): session targets reuse the
+  // navigation-generation arbitration (a newer user choice wins); repair /
+  // pairing / update targets open the owning Settings section or page, the
+  // same surfaces a desktop notification click resolves to. The panel has
+  // already marked the exact generation read before this runs.
+  const openInboxItemTarget = useCallback((item: InboxItemPublic) => {
+    const target = item.target;
+    setInboxOpen(false);
+    switch (target.type) {
+      case 'session': {
+        // The navigation claim retires any older focus; the exact
+        // turn/interaction focus is set after the claim so it survives it.
+        openExistingSession({ sessionId: target.session_id, allowArchivedReadOnly: true });
+        if (target.interaction_id || target.turn !== null) {
+          setMessageFocus({
+            sessionId: target.session_id,
+            nonce: Date.now(),
+            ...(target.interaction_id ? { interactionId: target.interaction_id } : {}),
+            ...(target.turn !== null ? { turn: target.turn } : {}),
+          });
+        }
+        return;
+      }
+      case 'system_repair':
+        cancelNavigationIntent();
+        if (target.repair === 'schedule') {
+          startTransition(() => setMode('timer'));
+        } else if (target.repair === 'account') {
+          setSettingsSection('account');
+          activateRail('settings');
+        } else {
+          startTransition(() => setMode('agents'));
+        }
+        return;
+      case 'schedule_confirmation': {
+        // The exact confirmation card is the actionable detail (focused so
+        // it surfaces over older pending cards with the observed Inbox ref);
+        // the control conversation opens read-only-aware for context.
+        const controlSessionId = item.display.kind === 'schedule.confirmation'
+          ? item.display.control_session_id
+          : null;
+        if (item.display.kind === 'schedule.confirmation') {
+          focusScheduleConfirmation(item.display.confirmation_id, {
+            id: item.id,
+            generation: item.generation,
+          });
+        }
+        if (controlSessionId) {
+          openExistingSession({ sessionId: controlSessionId, allowArchivedReadOnly: true });
+        }
+        return;
+      }
+      case 'pairing':
+        cancelNavigationIntent();
+        setSettingsSection('remote');
+        activateRail('settings');
+        return;
+      case 'update':
+        cancelNavigationIntent();
+        if (target.product === 'gian') {
+          setSettingsSection('updates');
+          activateRail('settings');
+        } else {
+          startTransition(() => setMode('agents'));
+        }
+        return;
+      case 'unavailable':
+        toast({ kind: 'warning', message: appT('navigation.sessionMissing') });
+        return;
+    }
+  }, [activateRail, appT, cancelNavigationIntent, openExistingSession]);
+
+  // Global search targets (Issue #168): every kind routes through the same
+  // navigation arbitration as Inbox/notification clicks and lands on the
+  // EXACT object — a workspace/worktree opens its Workbench detail tab, an
+  // agent selects on the Agents page, an Inbox hit opens that item's detail,
+  // a message hit focuses its transcript identity (bounded context window
+  // via the Host context route when unloaded; the short document id rides
+  // along, the long message identity never enters a URL).
+  // Search targets that live in the workbench sheet (workspace, worktree,
+  // settings) are invisible on Agents, Timer, and Custom. Switch to the
+  // current or last explicit Tasks/Repos list — Repos when that choice was
+  // never recorded — without treating the startup Tasks default as a choice.
+  const revealConversationWorkbench = useCallback(() => {
+    const current = modeRef.current;
+    if (current === 'sessions' || current === 'tasks') return;
+    const next = workbenchListMode({
+      mode: current,
+      explicitListMode: explicitListModeRef.current,
+    });
+    cancelNavigationIntent();
+    startTransition(() => setMode(next));
+  }, [cancelNavigationIntent]);
+  const [messageFocus, setMessageFocus] = useState<{
+    sessionId: string;
+    messageId?: string;
+    interactionId?: string;
+    turn?: number;
+    nonce: number;
+    turnId?: string;
+    documentId?: string;
+    textRevision?: string;
+  } | null>(null);
+  const [agentFocus, setAgentFocus] = useState<{ id: string; nonce: number } | null>(null);
+  const [inboxFocus, setInboxFocus] = useState<{ id: string; generation: number; nonce: number } | null>(null);
+  const openSearchTarget = useCallback((result: SearchResult) => {
+    const target = result.target;
+    setPaletteOpen(false);
+    switch (target.type) {
+      case 'session':
+        // The navigation claim retires any older focus; the exact target
+        // focus is set after the claim so it survives it.
+        openExistingSession({ sessionId: target.session_id, allowArchivedReadOnly: target.archived });
+        if (target.message_id) {
+          setMessageFocus({
+            sessionId: target.session_id,
+            messageId: target.message_id,
+            nonce: Date.now(),
+            ...(target.turn_id ? { turnId: target.turn_id } : {}),
+            ...(target.turn !== undefined ? { turn: target.turn } : {}),
+            ...(target.text_revision ? { textRevision: target.text_revision } : {}),
+            documentId: result.id,
+          });
+        }
+        return;
+      case 'workspace':
+        cancelNavigationIntent();
+        revealConversationWorkbench();
+        openWorkspaceInSheet(target.workspace_id);
+        return;
+      case 'worktree': {
+        // Resolve through the real working-tree inventory — never decode an
+        // ext: path here. wt: rows open their owning session; ws:/ext: rows
+        // open the owning workspace's detail. Unknown id → explicit
+        // unavailable, never a wrong page.
+        const tree = workingTrees.find(entry => entry.id === target.working_tree_id);
+        if (target.session_id) {
+          openExistingSession({ sessionId: target.session_id, allowArchivedReadOnly: target.archived });
+          return;
+        }
+        if (tree) {
+          cancelNavigationIntent();
+          revealConversationWorkbench();
+          // Exact tree focus in the Git pane; the inventory id is recomputed
+          // for each row (ext paths are encoded from the row, never decoded).
+          openWorkspaceInSheet(tree.workspace_id, target.working_tree_id);
+        } else {
+          toast({ kind: 'warning', message: appT('navigation.sessionMissing') });
+        }
+        return;
+      }
+      case 'task':
+        cancelNavigationIntent();
+        startTransition(() => {
+          setMode('tasks');
+          setActiveTaskId(target.task_id);
+          setActiveSubtaskId(null);
+        });
+        return;
+      case 'agent':
+        cancelNavigationIntent();
+        setAgentFocus({ id: target.agent_id, nonce: Date.now() });
+        startTransition(() => setMode('agents'));
+        return;
+      case 'schedule':
+        openSchedule(target.schedule_id);
+        return;
+      case 'inbox':
+        setInboxFocus({ id: target.inbox_id, generation: target.generation, nonce: Date.now() });
+        setInboxOpen(true);
+        return;
+    }
+  }, [appT, cancelNavigationIntent, openExistingSession, openSchedule, openWorkspaceInSheet, revealConversationWorkbench, workingTrees]);
+
+  // Settings deep link from search: same rail activation as the desktop
+  // settings target, then scroll the real anchor — a control anchor when the
+  // hit is control-level, else the section anchor. Standalone sections
+  // (archive/adopt) render their own page: select, never scroll-spin.
+  const settingsScrollTimerRef = useRef<number | null>(null);
+  const settingsScrollRequestRef = useRef(0);
+  const settingsSectionRef = useRef(settingsSection);
+  settingsSectionRef.current = settingsSection;
+  const retireSettingsScroll = () => {
+    settingsScrollRequestRef.current += 1;
+    if (settingsScrollTimerRef.current !== null) {
+      window.clearTimeout(settingsScrollTimerRef.current);
+      settingsScrollTimerRef.current = null;
+    }
+  };
+  retireSettingsScrollRef.current = retireSettingsScroll;
+  const openSettingsSection = useCallback((key: NavKey, anchorId?: string | null) => {
+    // Drop any previous scroll before this command's own reveal. Archive and
+    // Adopt have no anchor; they must still clear a font-size timer.
+    retireSettingsScrollRef.current();
+    setPaletteOpen(false);
+    revealConversationWorkbench();
+    setSettingsSection(key);
+    activateRail('settings');
+    // Rail activation and a mode hop both retire surface/navigation commands.
+    // Arm only after those calls so this request is not cancelled by the
+    // reveal that belongs to it.
+    if (!settingsSectionHasAnchor(key)) return;
+    const request = settingsScrollRequestRef.current + 1;
+    settingsScrollRequestRef.current = request;
+    const targetId = anchorId ?? `settings-section-${key}`;
+    const ownerMode = modeRef.current === 'sessions' || modeRef.current === 'tasks'
+      ? modeRef.current
+      : workbenchListMode({
+          mode: modeRef.current,
+          explicitListMode: explicitListModeRef.current,
+        });
+    let attempts = 0;
+    let arrived = modeRef.current === ownerMode;
+    const tryScroll = () => {
+      if (settingsScrollRequestRef.current !== request) return;
+      if (settingsSectionRef.current !== key) {
+        if (settingsScrollTimerRef.current !== null) {
+          window.clearTimeout(settingsScrollTimerRef.current);
+          settingsScrollTimerRef.current = null;
+        }
+        return;
+      }
+      const mode = modeRef.current;
+      if (mode === ownerMode) arrived = true;
+      else if (arrived) {
+        // The user left the page this request belongs to. Do not scroll when
+        // they come back.
+        settingsScrollRequestRef.current += 1;
+        if (settingsScrollTimerRef.current !== null) {
+          window.clearTimeout(settingsScrollTimerRef.current);
+          settingsScrollTimerRef.current = null;
+        }
+        return;
+      }
+      const anchor = document.getElementById(targetId);
+      // The settings body stays mounted on Timer/Agents. The sheet hides with
+      // inline display:none, so a [hidden] check still scrolls the concealed
+      // control and consumes the request before the page switch.
+      if (anchor && !elementIsLayoutHidden(anchor)) {
+        anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        settingsScrollTimerRef.current = null;
+        return;
+      }
+      attempts += 1;
+      if (attempts < 40 && settingsScrollRequestRef.current === request) {
+        settingsScrollTimerRef.current = window.setTimeout(tryScroll, 50);
+      } else settingsScrollTimerRef.current = null;
+    };
+    settingsScrollTimerRef.current = window.setTimeout(tryScroll, 0);
+  }, [activateRail, revealConversationWorkbench]);
+  useEffect(() => () => {
+    retireSettingsScrollRef.current();
+  }, []);
+
+  // Inbox item actions (Issue #53): open/answer navigate; decisions reuse the
+  // EXISTING domain commands — approval.resolve for session approvals and
+  // questions (cancel = decline; plan keeps accept_with_ask/accept_with_auto/
+  // keep_planning via the panel's explicit decision), schedule.resolveConfirmation
+  // for schedule confirmations, the pairing claim API for device pairing, the
+  // update owners for retry. The Inbox adds no parallel approve path.
+  //
+  // Before a decision dispatches, the item is re-read (GET /api/inbox/:id):
+  // a stale generation or non-pending status aborts locally with a canonical
+  // refresh. This is a client-side fence, NOT the atomic guard — the
+  // server-side expected-inbox-occurrence precondition rides the domain
+  // contract A is adding; until it lands, the Host's own pending-occurrence
+  // recheck remains the last line (an already-resolved approval rejects).
+  const decideInboxItem = useCallback(async (
+    item: InboxItemPublic,
+    action: InboxAction,
+    decision?: ApprovalDecision,
+  ) => {
+    try {
+      const epoch = inboxWriteEpoch();
+      const fresh = await loadInboxItem(item.id);
+      if (applyInboxItemIfCurrent(fresh, epoch) !== 'applied') {
+        // The re-read was superseded by a canonical write or rejected by the
+        // per-item fence — never act on a stale detail read.
+        toast({ kind: 'warning', message: appT('inbox.staleRefresh') });
+        return;
+      }
+      if (fresh.status !== 'pending' || fresh.generation !== item.generation) {
+        toast({ kind: 'warning', message: appT('inbox.staleRefresh') });
+        return;
+      }
+    } catch {
+      toast({ kind: 'error', message: appT('inbox.actionFailed') });
+      return;
+    }
+    const target = item.target;
+    if (target.type === 'pairing') {
+      if (!remoteController) {
+        toast({ kind: 'error', message: appT('inbox.actionFailed') });
+        return;
+      }
+      void remoteController.confirmPairingClaim(action === 'approve' ? 'allow' : 'reject', target.request_id)
+        .catch(() => toast({ kind: 'error', message: appT('inbox.actionFailed') }));
+      return;
+    }
+    if (item.display.kind === 'session.approval' && item.display.category === 'schedule') {
+      if (action === 'cancel') return;
+      ops.dispatch('schedule.resolveConfirmation', {
+        confirmationId: item.display.interaction_id,
+        decision: action === 'approve' ? 'approve' : 'reject',
+      });
+      return;
+    }
+    // Canonical schedule-confirmation item (0.6.7): resolve through the
+    // existing REST domain route with the exact seen occurrence; a
+    // PRECONDITION_FAILED never re-dispatches with a different generation.
+    if (item.display.kind === 'schedule.confirmation') {
+      if (action === 'cancel') return;
+      const run = ops.dispatch('schedule.resolveConfirmation', {
+        confirmationId: item.display.confirmation_id,
+        decision: action === 'approve' ? 'approve' : 'reject',
+        expectedInbox: { id: item.id, generation: item.generation },
+      });
+      const settled = await waitForRunSettle(operationStore, run.id);
+      if (settled.phase === 'failed' && settled.error?.includes('PRECONDITION_FAILED')) {
+        invalidateInbox();
+        toast({ kind: 'warning', message: appT('inbox.staleRefresh') });
+      }
+      return;
+    }
+    const sessionId = target.type === 'session' ? target.session_id : null;
+    const interactionId = item.display.kind === 'session.approval' || item.display.kind === 'session.question'
+      ? item.display.interaction_id
+      : null;
+    if (!sessionId || !interactionId || !decision) return;
+    const isPlan = item.display.kind === 'session.approval' && item.display.category === 'plan';
+    // ACP-native approvals bind the exact executor option id — the Host
+    // validates it against the pending native_options. approve maps to the
+    // allow_once option, reject/cancel to reject_once; opaque ids are never
+    // guessed and nothing widens to allow_always. An approval whose canonical
+    // record is NOT SYNCED (or whose options have no honest mapping) opens
+    // the canonical card instead of dispatching a guaranteed failure.
+    let nativeOptionId: string | undefined;
+    if (!isPlan) {
+      const record = peekPendingApproval(sessionId, interactionId);
+      if (!record) {
+        openInboxItemTarget(item);
+        toast({ kind: 'info', message: appT('inbox.action.openCard') });
+        return;
+      }
+      if (record.native_options && record.native_options.length > 0) {
+        const option = nativeOptionForDecision(record.native_options, decision);
+        if (!option) {
+          openInboxItemTarget(item);
+          toast({ kind: 'info', message: appT('inbox.action.openCard') });
+          return;
+        }
+        nativeOptionId = option.optionId;
+      }
+      // A known record without native options resolves by plain decision
+      // (Gian-native approval) — that is a real distinction, not a guess.
+    }
+    // The decision binds the exact occurrence the user saw (Host rechecks
+    // row/session/interaction/turn before resolving). PRECONDITION_FAILED
+    // means the occurrence moved: refresh canonical state — never retry with
+    // a different generation.
+    const run = ops.dispatch('approval.resolve', {
+      sessionId,
+      approvalId: interactionId,
+      decision,
+      expectedInbox: { id: item.id, generation: item.generation },
+      ...(nativeOptionId ? { nativeOptionId } : {}),
+    });
+    const settled = await waitForRunSettle(operationStore, run.id);
+    if (settled.phase === 'failed' && settled.error?.includes('PRECONDITION_FAILED')) {
+      invalidateInbox();
+      toast({ kind: 'warning', message: appT('inbox.staleRefresh') });
+    }
+  }, [appT, ops, remoteController, operationStore, openInboxItemTarget]);
+
+  const handleInboxAction = useCallback((item: InboxItemPublic, action: InboxAction, decision?: ApprovalDecision) => {
+    const target = item.target;
+    if (action === 'open' || action === 'answer') {
+      openInboxItemTarget(item);
+      return;
+    }
+    if (action === 'skip_version') {
+      void skipInboxItemVersion(item).then(result => {
+        if (result === 'stale') toast({ kind: 'warning', message: appT('inbox.staleRefresh') });
+        else if (result === 'error') toast({ kind: 'error', message: appT('inbox.actionFailed') });
+      });
+      return;
+    }
+    if (action === 'retry') {
+      // Only update items advertise retry (Host actionsFor). Route to the
+      // owning updater; when the bridge is absent, say so — never a dead button.
+      if (target.type !== 'update') {
+        toast({ kind: 'error', message: appT('inbox.actionFailed') });
+        return;
+      }
+      const retry = target.product === 'integration'
+        ? updateCatalogProxy(target.target_id)
+        : desktopBridge()?.updater?.check();
+      if (!retry) {
+        toast({ kind: 'error', message: appT('inbox.actionFailed') });
+        return;
+      }
+      void retry.catch(() => toast({ kind: 'error', message: appT('inbox.actionFailed') }));
+      return;
+    }
+    // approve / reject / cancel — freshness-fenced domain decisions.
+    void decideInboxItem(item, action, decision);
+  }, [appT, decideInboxItem, openInboxItemTarget]);
+  desktopNavigationRef.current = target => {
+    void handleDesktopNavigation(target);
+  };
+  resumeNavigationRef.current = request => {
+    void Promise.resolve(continueSessionRequest(request)).then(delivery => {
+      trackNavigationDelivery(request, delivery);
+    });
+  };
+  recoveredForkRef.current = sessionId => {
+    const sequence = peekForkNavigationSequence(sessionId);
+    if (sequence == null) return;
+    // A newer open or page leave already deleted this record. What remains
+    // is a fork the reloaded document has not superseded.
+    if (!forkBeatsUserIntent(sequence, userIntentSequenceRef.current)) {
+      consumeForkNavigation(sessionId);
+      return;
+    }
+    const local = sessionsRef.current.find(session => session.id === sessionId) ?? null;
+    if (!local || local.archived === 1) {
+      consumeForkNavigation(sessionId);
+      return;
+    }
+    userIntentSequenceRef.current = sequence;
+    navigationGenerationRef.current += 1;
+    pendingNavigationRef.current = null;
+    retireSettingsScrollRef.current();
+    consumeForkNavigation(sessionId);
+    applySessionTarget(sessionId, local, null);
+  };
+
+  useEffect(() => {
+    const navigation = desktopBridge()?.navigation;
+    if (!navigation) return;
+    // Read the handler through the ref. Resubscribing on every mode change
+    // would drop a cold-start target before it is acknowledged.
+    return subscribeDesktopNavigation(
+      navigation,
+      (target, isCurrent) => handleDesktopNavigationRef.current(target, isCurrent),
+      navigationRetryRef.current,
+    );
+  }, []);
+
+  const openAdoptedSession = useCallback((session: Session) => {
+    // Make the HTTP result available synchronously for selection and unread
+    // handling. The Host marks the independent WS broadcast with
+    // origin=native-adopt, so either network delivery order is safe.
+    sessionsRef.current = [
+      session,
+      ...sessionsRef.current.filter(candidate => candidate.id !== session.id),
+    ];
+    setSessions(previous => [
+      session,
+      ...previous.filter(candidate => candidate.id !== session.id),
+    ]);
+    openExistingSession({ sessionId: session.id });
+  }, [openExistingSession]);
+
+  // A Gian Tool request is an intentional view change and opens immediately.
+  // Direct git worktree evidence is weaker: wait for the Turn to finish, then
+  // ask once before changing the view-level checkout. Neither path changes
+  // Agent/Proxy/Terminal cwd or sends a continuation Turn.
+  useEffect(() => {
+    const detected = activeSession?.detected_worktree_path;
+    if (!activeSession || !detected) return;
+    const source = activeSession.detected_worktree_source ?? 'agent';
+    const revision = activeSession.detected_worktree_revision ?? 0;
+    const appliedMarker = source === 'gian_tool' ? `${detected}#${revision}` : detected;
+    const last = wtAutoAppliedRef.current;
+    if (last
+      && last.sessionId === activeSession.id
+      && last.path === detected
+      && last.revision === revision) return;
+    const action = decideWorktreeViewRequest({
+      source,
+      status: activeSession.status,
+      processed: readWtAutoApplied(activeSession.id) === appliedMarker,
+    });
+    if (action === 'wait') return;
+    if (action === 'ignore') {
+      wtAutoAppliedRef.current = { sessionId: activeSession.id, path: detected, revision };
+      return;
+    }
+    const tree = workingTrees.find(t => t.path === detected);
+    if (!tree) return;
+    wtAutoAppliedRef.current = { sessionId: activeSession.id, path: detected, revision };
+    writeWtAutoApplied(activeSession.id, appliedMarker);
+    if (action === 'open') {
+      setWtView({ sessionId: activeSession.id, wtId: tree.id });
+      toast({
+        kind: 'success',
+        message: appT('worktree.autoSwitched').replace('{name}', tree.branch ?? tree.label),
+      });
+      return;
+    }
+    const sessionId = activeSession.id;
+    void confirmDialog({
+      title: appT('worktree.adopt.title'),
+      message: appT('worktree.adopt.message').replace('{name}', tree.branch ?? tree.label),
+      dangerMessage: appT('worktree.adopt.consequence'),
+      confirmLabel: appT('worktree.adopt.confirm'),
+      danger: true,
+    }).then(accepted => {
+      if (!accepted) return;
+      setWtView({ sessionId, wtId: tree.id });
+      toast({
+        kind: 'success',
+        message: appT('worktree.adopted').replace('{name}', tree.branch ?? tree.label),
+      });
+    });
+  }, [
+    activeSession?.id,
+    activeSession?.detected_worktree_path,
+    activeSession?.detected_worktree_source,
+    activeSession?.detected_worktree_revision,
+    activeSession?.status,
+    workingTrees,
+    appT,
+    setWtView,
+  ]);
+
+  useEffect(() => {
+    setWbTabs(prev => prev.map(tab => {
+      if (tab.kind === 'settings') return { ...tab, name: appT('sheet.tab.settings') };
+      if (tab.kind === 'plan') return { ...tab, name: appT('sheet.tab.plan') };
+      if (tab.kind === 'changes') return { ...tab, name: appT('inspector.changes') };
+      return tab;
+    }));
+  }, [appT]);
+
+  // ─── Path breadcrumb (V2 topbar) ─────────────────────────────────────────
+  // The breadcrumb (and the Diffs/Files rails) follow the VIEWED working tree
+  // — the branch picker's override included.
+  const activeWtForSession = activeSession
+    ? workingTrees.find(t => t.id === viewedWorkingTreeId(activeSession))
+    : null;
+  const activeWorktreeName = activeWtForSession
+    ? activeSession?.remote_execution ? (activeSession.remote_execution.worktree_root?.split('/').filter(Boolean).at(-1) ?? activeWtForSession.label)
+      : worktreeDisplayName(activeWtForSession)
+    : null;
+  const {
+    pathSegments,
+    sessionMenu,
+    branchMenu,
+    onRenameSubmit: handleRenameSubmit,
+    onRenameCancel: handleRenameCancel,
+    onRenameStart: handleRenameStart,
+  } = useTopbarModel({
+    mode,
+    activeTaskId,
+    activeSubtaskId,
+    activeSession,
+    activeWorkspace,
+    activeWorktreeName,
+    workingTrees,
+    refreshWorkingTrees,
+    wtView,
+    setWtView,
+    viewedWorkingTreeId,
+    activeSessionRecovering: activeSessionId != null
+      && pendingRuns.some(run => run.name === 'session.recover'
+        && run.entityKey === sessionEntityKey(activeSessionId)),
+    // Side Chats bound to the active session (proposal §10.5.4): the delete
+    // confirm must list them — closing the parent permanently closes them.
+    activeSessionSideChats: activeSideChats,
+    forkHead: {
+      control: forkControl,
+      forking: forkHeadForking,
+      onFork: handleForkHead,
+    },
+    onAssignSessionTask: session => {
+      setAssignTaskRunId(undefined);
+      setAssignTaskTargetId(null);
+      setAssignTaskSessionId(session.id);
+    },
+    ops,
+    t: appT,
+  });
+
+
+  const sessionMainHandlers = useSessionCommands({
+    ops,
+    sessionsRef,
+  });
+
+  const subtaskActive = mode === 'tasks' && !!activeSubtaskId && !!activeSession;
+  const {
+    sessionViewActive,
+    workbenchActive,
+    activeGroup,
+    sheetMounted,
+    sheetVisible,
+    inspectorKind,
+    inspectorAvailable,
+    inspectorVisible,
+  } = useWorkbenchLayout({
+    mode,
+    subtaskActive,
+    activeRail,
+    tabs: wbTabs,
+    activeTabByGroup,
+    viewState,
+    chatPanel,
+    filesInspectorSuppressed,
+    p3Collapsed,
+    groupOfRail: GROUP_OF_RAIL,
+  });
+
+  // Side Chat rail entry (proposal §10.5): the session-scoped Dock button
+  // toggles the panel-2 surface through the ordinary chat-panel mechanism.
+  // Greyed exactly like the other session rails when no session is active,
+  // and by the two-layer sidechat.create gating otherwise (§9.4/§10.3/§15).
+  const handleToggleSideChat = useCallback(() => {
+    if (chatPanel?.kind === 'sidechat') {
+      retireSettingsScrollRef.current();
+      setChatPanel(null);
+      return;
+    }
+    if (!sessionViewActive || sideChatControl?.enabled !== true) return;
+    if (activeSessionId) openChatPanel(activeSessionId, { kind: 'sidechat' });
+  }, [chatPanel, sessionViewActive, sideChatControl, activeSessionId, openChatPanel, setChatPanel]);
+
+  useEffect(() => {
+    const notifications = desktopBridge()?.notifications;
+    if (!notifications?.native) return;
+    const visibleSessionId = visibleSessionForNativeNotification({
+      mode,
+      viewState,
+      activeSessionId,
+      activeSubtaskId,
+    });
+    // Focus is owned by the main process (mainWindow.isFocused()); the
+    // renderer reports which Session is visible and which language the UI
+    // is set to (main localizes semantic attention events with it).
+    void notifications.setContext({ visibleSessionId, locale });
+  }, [activeSessionId, activeSubtaskId, mode, viewState, locale]);
+
+  const panelLayout = usePanelLayout({
+    enabled: authStatus === 'authenticated' && onboarding.status === 'complete',
+    panel1Visible: mode === 'spaces' || mode === 'custom' || mode === 'timer' || viewState !== 'workbench',
+    panel2Visible: (chatPanel !== null && workbenchActive) || sheetVisible,
+    inspectorVisible,
+    p3Collapsed,
+    setP3Collapsed,
+    preferences: displayConfig?.layout,
+  });
+
+  // A manually collapsed rail would hide the reveal target of an explicit
+  // session navigation (search/Inbox/notification deep link), so the pending
+  // reveal intent re-expands it. Background refreshes never post an intent
+  // and therefore never reopen the rail.
+  const expandRailForReveal = panelLayout.railLayout.setCollapsed;
+  useEffect(() => {
+    const expand = () => {
+      if (peekSessionReveal()) expandRailForReveal(false);
+    };
+    expand();
+    return subscribeSessionReveal(expand);
+  }, [expandRailForReveal]);
+
+  // Topbar ‹ › history: sidebar view (mode) + conversation selection only.
+  const { canGoBack, canGoForward, navigate: navGo } = useViewNav({
+    mode,
+    activeSessionId,
+    activeTaskId,
+    activeSubtaskId,
+    setMode,
+    setActiveSessionId,
+    setActiveTaskId,
+    setActiveSubtaskId,
+  });
+  const navigateHistory = useCallback((delta: -1 | 1) => {
+    cancelNavigationIntent();
+    navGo(delta);
+  }, [cancelNavigationIntent, navGo]);
+
+  /** Internal Panel-2 settings navigation. */
+  function onSettingsNavSelect(key: NavKey): void {
+    activateRail('settings');
+    setSettingsSection(key);
+  }
+
+  const handleKeymapCommand = useCallback((command: import('@gian/shared').KeymapCommand) => {
+    if (command === 'app.settings') {
+      activateRail('settings');
+      return;
+    }
+    if (command === 'session.new' || command === 'task.new') {
+      const kind = command === 'session.new' ? 'session' : 'task';
+      chooseMode(kind === 'session' ? 'sessions' : 'tasks');
+      setShortcutCreateRequest({ kind, sequence: Date.now() });
+      return;
+    }
+    if (command === 'layout.toggleSidebar') {
+      panelLayout.toggleSidebar();
+      return;
+    }
+    if (command === 'layout.togglePanel2') {
+      retireSettingsScrollRef.current();
+      if (viewState !== 'main') setViewState('main');
+      else if (activeRail) setViewState('both');
+      else activateRail('terminal');
+      return;
+    }
+    if (command === 'layout.togglePanel3') {
+      if (inspectorAvailable) panelLayout.toggleInspector();
+      return;
+    }
+    const railByCommand = {
+      'tool.files': 'files',
+      'tool.diffs': 'diffs',
+      'tool.history': 'history',
+      'tool.browser': 'browser',
+      'tool.terminal': 'terminal',
+    } as const;
+    if (command in railByCommand) {
+      toggleRail(railByCommand[command as keyof typeof railByCommand]);
+      return;
+    }
+    if (command === 'tool.sideChat') {
+      handleToggleSideChat();
+      return;
+    }
+    // Session lifecycle commands share the keydown path's exact gating
+    // (use-app-shortcuts.ts) so palette rows are never dead buttons.
+    if (command === 'session.sendOrSteer') {
+      const session = activeSessionId
+        ? sessionsRef.current.find(candidate => candidate.id === activeSessionId)
+        : undefined;
+      if (activeSessionId && session && queueSendNowEnabled({
+        executor: session.executor,
+        steerAdvertised: peekSteerCached(session.executor, session.agent_id),
+        completed: session.completed_at != null,
+      })) {
+        ops.dispatch('queue.sendNow', { sessionId: activeSessionId });
+      }
+      return;
+    }
+    if (command === 'session.later') {
+      if (activeSessionId) ops.dispatch('session.setUnread', { sessionId: activeSessionId, unread: true });
+      return;
+    }
+    if (command === 'session.archive') {
+      if (activeSessionId) ops.dispatch('session.archive', { sessionId: activeSessionId, archived: true });
+      return;
+    }
+    if (command === 'session.previous' || command === 'session.next') {
+      if (displaySessions.length === 0) return;
+      const current = displaySessions.findIndex(session => session.id === activeSessionId);
+      const delta = command === 'session.previous' ? -1 : 1;
+      const next = current < 0
+        ? 0
+        : (current + delta + displaySessions.length) % displaySessions.length;
+      openExistingSession({ sessionId: displaySessions[next]!.id });
+      return;
+    }
+    if (command === 'workbench.previousTab' || command === 'workbench.nextTab') {
+      if (!activeGroup) return;
+      const tabs = wbTabs.filter(tab => tab.group === activeGroup);
+      if (tabs.length === 0) return;
+      const activeId = activeTabByGroup[activeGroup];
+      const current = tabs.findIndex(tab => tab.id === activeId);
+      const delta = command === 'workbench.previousTab' ? -1 : 1;
+      sheetActions.activateTab(tabs[(current + delta + tabs.length) % tabs.length]!.id);
+      return;
+    }
+    if (command === 'workbench.closeTab') {
+      if (!activeGroup) return;
+      const activeId = activeTabByGroup[activeGroup];
+      if (activeId) sheetActions.closeTab(activeId);
+      return;
+    }
+    if (command === 'navigation.back' && canGoBack) navigateHistory(-1);
+    if (command === 'navigation.forward' && canGoForward) navigateHistory(1);
+    if (command === 'session.rename') handleRenameStart();
+  }, [
+    activeGroup, activeRail, activeSessionId, activeTabByGroup, canGoBack,
+    canGoForward, displaySessions, handleRenameStart, handleToggleSideChat,
+    chooseMode, inspectorAvailable, navigateHistory, openExistingSession, panelLayout, setViewState,
+    sheetActions, toggleRail, viewState, wbTabs,
+  ]);
+
+  useAppShortcuts({
+    authenticated: runtimeAuthStatus === 'authenticated',
+    activeSessionId,
+    sessionsRef,
+    ops,
+    paletteOpen,
+    disabled: assignTaskSessionId !== null || hasPendingScheduleConfirmation,
+    setPaletteOpen,
+    onCommand: handleKeymapCommand,
+  });
+
+  // The Dock's workbench rails (Settings above all) stay reachable from the
+  // primary pages (Agents/Timer/Custom, 2026-09-06 owner report): hop back
+  // to the current chat list mode first so the workbench surface exists,
+  // then toggle the rail.
+  const toggleRailAnyMode = (rail: Parameters<typeof toggleRail>[0]) => {
+    if (mode === 'agents' || mode === 'timer' || mode === 'custom') {
+      cancelNavigationIntent();
+      startTransition(() => setMode(sidebarListMode));
+    }
+    toggleRail(rail);
+  };
+
+
+  useEffect(() => {
+    if (!shortcutCreateRequest) return;
+    if (shortcutCreateRequest.kind === 'session' && mode === 'sessions') {
+      window.dispatchEvent(new CustomEvent('gian:new-session'));
+      setShortcutCreateRequest(null);
+    }
+    if (shortcutCreateRequest.kind === 'task' && mode === 'tasks') {
+      window.dispatchEvent(new CustomEvent('gian:new-task'));
+      setShortcutCreateRequest(null);
+    }
+  }, [mode, shortcutCreateRequest]);
+
+  // A Subtask IS a Session. When one is selected in Tasks mode we render the
+  // exact same <SessionMain> that CodingView renders in Sessions mode — wired
+  // to the identical App-level handlers (rebound to the subtask's id) and the
+  // same transcript context providers. The activeSessionId-sync effect above
+  // keeps `activeSession`, `itemsBySession`, the Sheet, and the Inspector all
+  // pointed at this subtask. TasksView renders this element where the old
+  // "Open in Sessions" placeholder used to live (inside its own `.main`).
+  const subtask = subtaskActive ? activeSession : null;
+  // A standalone (untasked) Session selected from the Tasks rail's Untasked
+  // group opens inside the Tasks view — the same SessionSurface as a
+  // subtask's, no jump to Project mode (2026-09-06 owner call).
+  const standaloneActive = mode === 'tasks'
+    && !subtask
+    && !activeTaskId
+    && activeSession !== null
+    && activeSession.task_id === null;
+  const surfaceSession = subtask ?? (standaloneActive ? activeSession : null);
+  const surfaceSessionWorkspace = surfaceSession
+    ? displayWorkspaces.find(w => w.id === surfaceSession.workspace_id) ?? null
+    : null;
+  const surfaceSessionMain = surfaceSession ? (
+    <SessionSurface
+      session={surfaceSession}
+      workspace={surfaceSessionWorkspace}
+      items={itemsBySession[surfaceSession.id] ?? []}
+      hydrated={historyBySession[surfaceSession.id]?.phase === 'page'
+        || historyBySession[surfaceSession.id]?.phase === 'complete'}
+      history={historyBySession[surfaceSession.id]}
+      onLoadOlder={() => loadOlder(surfaceSession.id, surfaceSession.executor)}
+      onRetryHistory={() => retryHistory(surfaceSession.id, surfaceSession.executor)}
+      pending={pendingBySession[surfaceSession.id] ?? false}
+      queue={queueBySession[surfaceSession.id] ?? []}
+      planText={planStateBySession[surfaceSession.id]?.text}
+      planCompleted={planStateBySession[surfaceSession.id]?.completed}
+      planStatus={planStateBySession[surfaceSession.id]?.status}
+      planTurn={planStateBySession[surfaceSession.id]?.turn}
+      commands={sessionMainHandlers}
+      onOpenFile={(absolutePath, line) => { void openFileInSheet(absolutePath, false, line); }}
+      onOpenRelativeFile={openRelativeFileHref}
+      onOpenDiff={item => { void openTranscriptDiffInSheet(item); }}
+      onOpenPlan={payload => openChatPanel(surfaceSession.id, { kind: 'plan', id: payload.id })}
+      onOpenChat={request => openChatPanel(surfaceSession.id, request)}
+      fileRehype={fileRehype}
+      onReopen={() => { ops.dispatch('task.reopenSubtask', { sessionId: surfaceSession.id }); }}
+      onOpenAgents={() => { cancelNavigationIntent(); startTransition(() => setMode('agents')); }}
+      onShowLastTurnChanges={(turn, path) => showLastTurnChanges(surfaceSession, turn, path)}
+      forkAtTurnControl={forkAtTurnControl}
+      sideChatControl={sideChatControl}
+      scheduleFocus={focusScheduleRun && focusScheduleRun.sessionId === surfaceSession.id
+        ? { runId: focusScheduleRun.runId }
+        : null}
+      onConsumeScheduleFocus={() => setFocusScheduleRun(null)}
+      messageFocus={messageFocus && messageFocus.sessionId === surfaceSession.id
+        ? {
+            messageId: messageFocus.messageId,
+            interactionId: messageFocus.interactionId,
+            turn: messageFocus.turn,
+            nonce: messageFocus.nonce,
+            turnId: messageFocus.turnId,
+            documentId: messageFocus.documentId,
+            textRevision: messageFocus.textRevision,
+          }
+        : null}
+      onConsumeMessageFocus={() => setMessageFocus(null)}
+      onLoadMessageContext={focus => loadMessageContext(surfaceSession.id, focus)}
+      onReturnToLatest={() => returnSessionToLatest(surfaceSession.id)}
+    />
+  ) : null;
+
+  if (authStatus === 'checking') {
+    return (
+      <LocaleProvider locale={locale}>
+        <div className="app-loading" role="status" data-testid="auth-checking" />
+      </LocaleProvider>
+    );
+  }
+
+  if (authStatus === 'login') {
+    // Login dispatches auth.login / auth.githubLogin operations (Phase 3b),
+    // so it renders inside the operation providers even though the rest of
+    // the app shell is not mounted yet.
+    return (
+      <LocaleProvider locale={locale}>
+      <OperationStoreProvider store={operationStore}>
+      <OperationDispatcherProvider dispatcher={ops}>
+        <Suspense fallback={<div className="app-loading" role="status" />}>
+          <LoginView />
+        </Suspense>
+      </OperationDispatcherProvider>
+      </OperationStoreProvider>
+      </LocaleProvider>
+    );
+  }
+
+  if (onboarding.status === 'checking') {
+    return (
+      <LocaleProvider locale={locale}>
+        <div className="app-loading" role="status" data-testid="onboarding-checking" />
+      </LocaleProvider>
+    );
+  }
+
+  if (onboarding.status === 'required') {
+    // Onboarding dispatches agent.*/onboarding.*/workspace.pickFolder
+    // operations (Phase 3b) — providers for the same reason as login.
+    return (
+      <LocaleProvider locale={locale}>
+      <OperationStoreProvider store={operationStore}>
+      <OperationDispatcherProvider dispatcher={ops}>
+        <Suspense fallback={<div className="app-loading" role="status" />}>
+          <OnboardingView
+            identity={identity}
+            initialState={onboarding.state}
+            initialError={onboarding.error}
+            onComplete={onboarding.complete}
+          />
+        </Suspense>
+      </OperationDispatcherProvider>
+      </OperationStoreProvider>
+      </LocaleProvider>
+    );
+  }
+
+  return (
+    <LocaleProvider locale={locale}>
+    <OperationStoreProvider store={operationStore}>
+    <OperationDispatcherProvider dispatcher={ops}>
+    <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
+    <ScheduleOpenContext.Provider value={openSchedule}>
+    <div
+      className="app"
+      data-testid="app-shell"
+      data-mode={mode}
+      data-session-id={selectedSessionId ?? ''}
+      data-task-id={activeTaskId ?? ''}
+      data-subtask-id={activeSubtaskId ?? ''}
+      data-explicit-list={explicitListMode ?? ''}
+      data-schedule-focus={focusScheduleRun ? `${focusScheduleRun.sessionId}:${focusScheduleRun.runId}` : ''}
+      data-connection={wsState === 'open' && authed ? 'ready' : wsState}
+    >
+      <Topbar
+        pathSegments={pathSegments}
+        sessionMenu={sessionMenu}
+        branchMenu={branchMenu}
+        onRenameSubmit={handleRenameSubmit}
+        onRenameCancel={handleRenameCancel}
+        sidebarCollapsed={panelLayout.railLayout.collapsed}
+        onToggleSidebar={panelLayout.toggleSidebar}
+        p3Available={sheetVisible && inspectorAvailable}
+        p3Visible={inspectorVisible}
+        onToggleP3={panelLayout.toggleInspector}
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        onGoBack={() => navigateHistory(-1)}
+        onGoForward={() => navigateHistory(1)}
+      />
+      <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
+      {wsDialog && (
+        <WorkspaceDialog
+          dialog={wsDialog}
+          onClose={() => setWsDialog(null)}
+          onChanged={handleWorkspaceListChanged}
+        />
+      )}
+      {assignTaskSession && (
+        <AssignSessionTaskDialog
+          sessionName={assignTaskSession.name || appT('coding.session.untitled')}
+          tasks={displayTasks}
+          pending={assignTaskRun?.phase === 'optimistic' || assignTaskRun?.phase === 'pending'}
+          error={assignTaskRun?.phase === 'failed' || assignTaskRun?.phase === 'timed-out'
+            ? (assignTaskRun.error || appT('session.assignTask.failed'))
+            : null}
+          onSelect={taskId => {
+            setAssignTaskTargetId(taskId);
+            const run = ops.dispatch('session.assignTask', {
+              sessionId: assignTaskSession.id,
+              taskId,
+            });
+            setAssignTaskRunId(run.id);
+          }}
+          onCancel={() => {
+            setAssignTaskSessionId(null);
+            setAssignTaskTargetId(null);
+            setAssignTaskRunId(undefined);
+          }}
+        />
+      )}
+      {paletteOpen && <Suspense fallback={null}><CommandPalette
+        open={paletteOpen}
+        onClose={() => { setPaletteOpen(false); setPaletteInitialQuery(undefined); }}
+        sessions={displaySessions}
+        workspaces={displayWorkspaces}
+        context={{
+          hasActiveSession: activeSessionId != null,
+          workbenchActive,
+          canGoBack,
+          canGoForward,
+          inspectorAvailable,
+          browserAvailable: !!window.gianDesktop?.browser,
+        }}
+        onNavigate={openSearchTarget}
+        onOpenSetting={openSettingsSection}
+        onCommand={command => { setPaletteOpen(false); handleKeymapCommand(command); }}
+        initialQuery={paletteInitialQuery}
+      /></Suspense>}
+      {inboxOpen && <Suspense fallback={null}><InboxPanel
+        open={inboxOpen}
+        onClose={() => setInboxOpen(false)}
+        onAction={handleInboxAction}
+        focusItem={inboxFocus}
+      /></Suspense>}
+      <div
+        ref={panelLayout.bodyRef}
+        className={`body ${viewState === 'workbench' ? 'wb-only' : ''}`}
+        style={panelLayout.bodyStyle}
+        data-panel-resizing={panelLayout.resizing ? 'true' : undefined}
+      >
+          {mode === 'sessions' && (
+          <LinkBehaviorProvider openFileInSheet={openFileInSheet} openRelativeFileHref={openRelativeFileHref} openUrlInBrowser={openUrlInBrowser}>
+          <FileRefRehypeContext.Provider value={fileRehype}>
+          <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
+          <PlanOpenContext.Provider value={(payload) => {
+            if (activeSessionId) openChatPanel(activeSessionId, { kind: 'plan', id: payload.id });
+          }}>
+          <ChatPanelOpenContext.Provider value={(request) => {
+            if (activeSessionId) openChatPanel(activeSessionId, request);
+          }}>
+            <CodingView
+              mode={mode}
+              onSetAppMode={chooseMode}
+              workspaces={displayWorkspaces}
+              sessions={displaySessions}
+              activeSession={activeSession}
+              activeWorkspace={activeWorkspace}
+              activeSessionId={activeSessionId}
+              itemsBySession={itemsBySession}
+              pendingBySession={pendingBySession}
+              queueBySession={queueBySession}
+              planStateBySession={planStateBySession}
+              historyBySession={historyBySession}
+              onLoadOlder={(sessionId, executor) => loadOlder(sessionId, executor)}
+              onRetryHistory={(sessionId, executor) => retryHistory(sessionId, executor)}
+              onSelectSession={sessionId => openExistingSession({ sessionId, requestedListMode: 'sessions' })}
+              onNewWorkspace={() => setWsDialog({ kind: 'create' })}
+              onEditWorkspace={workspace => setWsDialog({ kind: 'edit', workspace })}
+              openNewForWorkspace={newSessionForWs}
+              onConsumeOpenNewForWorkspace={() => setNewSessionForWs(null)}
+              openNewWithMessage={newSessionPrefill}
+              onConsumeOpenNewWithMessage={() => setNewSessionPrefill(null)}
+              onCreateSession={(input) => {
+                // First message rides the dormant pendingFirstMessage channel:
+                // the session:created socket handler consumes it and dispatches
+                // the send once the session exists (use-app-socket.ts).
+                pendingFirstMessageRef.current = input.remoteSessionId ? null : {
+                  scope: { kind: 'workspace', id: input.workspaceId,
+                    ...(input.executionEnvironmentId ? { environmentId: input.executionEnvironmentId } : {}) },
+                  text: input.firstMessage,
+                  ...(input.autoTranslate ? { autoTranslate: true } : {}),
+                  attachments: input.firstAttachments ?? [],
+                  ...(input.contextItems && input.contextItems.length > 0
+                    ? { contextItems: input.contextItems }
+                    : {}),
+                  ...(input.composerDocument ? { composerDocument: input.composerDocument } : {}),
+                };
+                const run = ops.dispatch('session.create', {
+                  executionEnvironmentId: input.executionEnvironmentId,
+                  remoteSessionId: input.remoteSessionId,
+                  workspaceId: input.workspaceId,
+                  ...(input.agentId ? { agentId: input.agentId } : {}),
+                  executor: input.executor,
+                  ...(input.name ? { name: input.name } : {}),
+                  ...(input.model ? { model: input.model } : {}),
+                  ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
+                  ...(input.thinkingEffort ? { thinkingEffort: input.thinkingEffort } : {}),
+                  ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+                  ...(input.sessionConfig ? { sessionConfig: input.sessionConfig } : {}),
+                  ...(input.turnConfig ? { turnConfig: input.turnConfig } : {}),
+                });
+                setSessionCreateRunId(run.id);
+                return run;
+              }}
+              sessionCreateRun={sessionCreateRun}
+              creatingSession={creatingSession}
+              onClearSessionCreateRun={() => setSessionCreateRunId(undefined)}
+              onVerifySessionCreate={async () => {
+                const fresh = await loadSessions();
+                setSessions(fresh);
+                setSessionCreateRunId(undefined);
+              }}
+              onReopenSession={sessionId => {
+                ops.dispatch('task.reopenSubtask', { sessionId });
+              }}
+              onPinSession={sessionMainHandlers.onPin}
+              onArchiveSession={sessionId => sessionMainHandlers.onArchive(sessionId, true)}
+              onSend={sessionMainHandlers.onSend}
+              onSendSkill={sessionMainHandlers.onSendSkill}
+              onStop={sessionMainHandlers.onStop}
+              onApprove={sessionMainHandlers.onApprove}
+              onQueueAdd={sessionMainHandlers.onQueueAdd}
+              onQueueRemove={sessionMainHandlers.onQueueRemove}
+              onQueueUpdate={sessionMainHandlers.onQueueUpdate}
+              onQueueClear={sessionMainHandlers.onQueueClear}
+              onQueueSendNow={sessionMainHandlers.onQueueSendNow}
+              onSteer={sessionMainHandlers.onSteer}
+              onSetMode={sessionMainHandlers.onSetMode}
+              onSetModel={sessionMainHandlers.onSetModel}
+              onSetEffort={sessionMainHandlers.onSetEffort}
+              onSetServiceTier={sessionMainHandlers.onSetServiceTier}
+              onSetNativeConfig={sessionMainHandlers.onSetNativeConfig}
+              onSetTurnConfig={(sessionId, optionId, value) =>
+                sessionMainHandlers.onSetTurnConfig(sessionId, optionId, value, {
+                  ...(activeSession?.id === sessionId ? activeSession.turn_config ?? {} : {}),
+                  [optionId]: value,
+                })}
+              onShowLastTurnChanges={showLastTurnChanges}
+              forkAtTurnControl={forkAtTurnControl}
+              sideChatControl={sideChatControl}
+              scheduleFocus={focusScheduleRun}
+              onConsumeScheduleFocus={() => setFocusScheduleRun(null)}
+              messageFocus={messageFocus}
+              onConsumeMessageFocus={() => setMessageFocus(null)}
+              onLoadMessageContext={loadMessageContext}
+              onReturnToLatest={returnSessionToLatest}
+              railLayout={panelLayout.railLayout}
+            />
+          </ChatPanelOpenContext.Provider>
+          </PlanOpenContext.Provider>
+          </DiffOpenContext.Provider>
+          </FileRefRehypeContext.Provider>
+          </LinkBehaviorProvider>
+          )}
+          {mode === 'spaces' && (
+            <Suspense fallback={null}>
+            <SpacesView
+              workspaces={displayWorkspaces}
+              systemConfig={systemConfig}
+              ws={ws}
+              onChange={() => void loadWorkspaces().then(setWorkspaces)}
+              railLayout={panelLayout.railLayout}
+              onSessionAdopted={openAdoptedSession}
+            />
+            </Suspense>
+          )}
+          {mode === 'tasks' && (
+            <TasksView
+              mode={mode}
+              onSetMode={chooseMode}
+              tasks={displayTasks}
+              sessions={displaySessions}
+              workspaces={displayWorkspaces}
+              activeTaskId={activeTaskId}
+              activeSubtaskId={activeSubtaskId}
+              onSelectSubtask={(_taskId, subtaskId) => {
+                openExistingSession({ sessionId: subtaskId, requestedListMode: 'tasks' });
+              }}
+              activeSessionId={activeSessionId}
+              onSelectSession={sessionId => openExistingSession({ sessionId, requestedListMode: 'tasks' })}
+              onPinSession={sessionMainHandlers.onPin}
+              onArchiveSession={(sessionId) => sessionMainHandlers.onArchive(sessionId, true)}
+              onNewWorkspace={() => setWsDialog({ kind: 'create' })}
+              onSetPendingFirstMessage={text => { pendingFirstMessageRef.current = text; }}
+              openNewForTaskId={newSubtaskForTaskId}
+              onConsumeOpenNewForTaskId={() => setNewSubtaskForTaskId(null)}
+              subtaskMain={surfaceSessionMain}
+              railLayout={panelLayout.railLayout}
+            />
+          )}
+          {(mode === 'agents' || mode === 'timer' || mode === 'custom') && (
+            <PageWithSidebar
+              mode={mode}
+              onSetMode={chooseMode}
+              listMode={sidebarListMode}
+              onSetListMode={chooseMode}
+              workspaces={displayWorkspaces}
+              sessions={displaySessions}
+              tasks={displayTasks}
+              activeSessionId={activeSessionId}
+              activeSubtaskId={activeSubtaskId}
+              onNewWorkspace={() => setWsDialog({ kind: 'create' })}
+              onEditWorkspace={workspace => setWsDialog({ kind: 'edit', workspace })}
+              onNewForWorkspace={(workspaceId) => {
+                setNewSessionForWs(workspaceId);
+                chooseMode('sessions');
+              }}
+              onPinSession={sessionMainHandlers.onPin}
+              onArchiveSession={(sessionId) => sessionMainHandlers.onArchive(sessionId, true)}
+              onSelectSession={sessionId => {
+                openExistingSession({ sessionId, requestedListMode: 'sessions' });
+              }}
+              onSelectUnassignedSession={sessionId => {
+                openExistingSession({ sessionId, requestedListMode: 'tasks' });
+              }}
+              onSelectSubtask={(_taskId, subtaskId) => {
+                openExistingSession({ sessionId: subtaskId, requestedListMode: 'tasks' });
+              }}
+              onNewSessionForTask={(taskId) => {
+                setActiveTaskId(taskId);
+                setActiveSubtaskId(null);
+                setNewSubtaskForTaskId(taskId);
+                chooseMode('tasks');
+              }}
+              railLayout={panelLayout.railLayout}
+            >
+              {mode === 'agents' && (
+                <Suspense fallback={null}>
+                  <AgentsView ws={ws} terminalPreferences={displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES} focusAgent={agentFocus} />
+                </Suspense>
+              )}
+              {mode === 'custom' && (
+                <Suspense fallback={null}>
+                  <CustomView
+                    workspaces={displayWorkspaces}
+                    onOpenAgents={() => { cancelNavigationIntent(); startTransition(() => setMode('agents')); }}
+                  />
+                </Suspense>
+              )}
+              {mode === 'timer' && (
+                <Suspense fallback={null}>
+                  <TimerView
+                    sessions={displaySessions}
+                    selectedScheduleId={timerScheduleId}
+                    onSelectSchedule={setTimerScheduleId}
+                    onOpenScheduledTurn={openScheduledTurn}
+                    onOpenConversation={openTimerConversation}
+                    onCreateSchedule={(prompt) => {
+                      // Design 05: creation is prompt-driven — jump to the
+                      // standard new-session page with the guidance prompt
+                      // prefilled; that conversation becomes the owning one.
+                      setNewSessionPrefill(prompt);
+                      chooseMode('sessions');
+                    }}
+                    offline={!(wsState === 'open' && authed)}
+                  />
+                </Suspense>
+              )}
+            </PageWithSidebar>
+          )}
+        {chatPanel && workbenchActive && (
+          <>
+            <Splitter
+              side="right"
+              seam="main-sheet"
+              ariaLabel="Resize conversation and context panels"
+              onMouseDown={panelLayout.onMainSheetMouseDown}
+            />
+            <LinkBehaviorProvider openFileInSheet={openFileInSheet} openRelativeFileHref={openRelativeFileHref} openUrlInBrowser={openUrlInBrowser}>
+            <FileRefRehypeContext.Provider value={fileRehype}>
+            {/* Rows rendered INSIDE the panel (event feed) push their detail
+             *  back into this same panel — same routing as transcript rows. */}
+            <ChatPanelOpenContext.Provider value={(request) => {
+              if (activeSessionId) openChatPanel(activeSessionId, request);
+            }}>
+              <ChatContextPanel
+                target={chatPanel}
+                items={itemsBySession[chatPanel.sessionId] ?? []}
+                planText={planStateBySession[chatPanel.sessionId]?.text}
+                planCompleted={planStateBySession[chatPanel.sessionId]?.completed}
+                planStatus={planStateBySession[chatPanel.sessionId]?.status}
+                planTurn={planStateBySession[chatPanel.sessionId]?.turn}
+                // Side Chat surface (proposal §10.5): the panel-2 bundle is
+                // only valid while the panel's parent session is the ACTIVE
+                // one (the chat panel resets on session switch — Side Chat
+                // visibility stays tied to its parent being active).
+                sideChat={chatPanel.kind === 'sidechat'
+                    && activeSession
+                    && chatPanel.sessionId === activeSession.id
+                  ? {
+                      parent: activeSession,
+                      sideChats: activeSideChats,
+                      items: itemsBySidechat,
+                      control: sideChatControl,
+                      onClosed: handleSideChatClosed,
+                    }
+                  : null}
+                onClose={() => { retireSettingsScrollRef.current(); setChatPanel(null); }}
+              />
+            </ChatPanelOpenContext.Provider>
+            </FileRefRehypeContext.Provider>
+            </LinkBehaviorProvider>
+          </>
+        )}
+        {sheetMounted && (
+          <>
+            {sheetVisible && viewState !== 'workbench' && (
+              <Splitter
+                side="right"
+                seam="main-sheet"
+                ariaLabel="Resize main and workbench panels"
+                onMouseDown={panelLayout.onMainSheetMouseDown}
+              />
+            )}
+            <Suspense fallback={null}>
+            <Sheet
+              tabs={wbTabs}
+              activeByGroup={activeTabByGroup}
+              activeGroup={activeGroup}
+              actions={sheetActions}
+              onAddTab={(g) => {
+                if (g === 'term') addTerminalTab();
+                if (g === 'browser') addBrowserTab();
+              }}
+              hidden={!sheetVisible}
+              externalEditors={displayConfig?.external_editors ?? []}
+              openApps={displayConfig?.open_apps}
+              onOpenWith={handleOpenWith}
+              onConfigureEditors={() => activateRail('settings')}
+              renderTab={(t) => {
+                if (t.kind === 'browser') {
+                  return (
+                    <BrowserPanel
+                      tabId={t.id}
+                      contextTargetSessionId={sessionViewActive ? activeSessionId : null}
+                      onTitleChange={(name) => sheetActions.setTabName(t.id, name)}
+                      visible={sheetVisible
+                        && activeGroup === 'browser'
+                        && activeTabByGroup.browser === t.id
+                        && !paletteOpen
+                        && !inboxOpen
+                        && !zoomImage
+                        && !assignTaskSession
+                        && !hasPendingScheduleConfirmation
+                        && feedbackState.confirms.length === 0}
+                    />
+                  );
+                }
+                if (t.kind === 'settings') {
+                  return (
+                    <SettingsBody
+                      config={displayConfig}
+                      apps={apps}
+                      terminalOptions={terminalOptions}
+                      activeSection={settingsSection}
+                      onSectionChange={onSettingsNavSelect}
+                      workspaces={displayWorkspaces}
+                      onSessionOpened={openAdoptedSession}
+                      identity={identity}
+                      onSignOut={signOut}
+                      onOpenAgentsPage={() => { cancelNavigationIntent(); startTransition(() => setMode('agents')); }}
+                      remoteController={remoteController}
+                    />
+                  );
+                }
+                if (t.kind === 'term') {
+                  return (
+                    <div className="sheet-term">
+                      <Suspense fallback={null}>
+                      <Terminal
+                        instanceKey={`term:${t.id}`}
+                        preferences={displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES}
+                        wire={makeWorkbenchWire(ws, t.id, t.terminalProfile ?? {}, ops.dispatch)}
+                      />
+                      </Suspense>
+                    </div>
+                  );
+                }
+                if (t.kind === 'workspace') {
+                  const wsForTab = displayWorkspaces.find(w => w.id === t.wsId) ?? null;
+                  return (
+                    <Suspense fallback={null}>
+                    <WorkspaceDetailBody
+                      workspace={wsForTab}
+                      ws={ws}
+                      systemConfig={systemConfig}
+                      onChange={() => void loadWorkspaces().then(setWorkspaces)}
+                      onSessionAdopted={openAdoptedSession}
+                      focusTreeId={t.workingTreeId}
+                      focusNonce={t.focusNonce}
+                      focusVisible={sheetVisible
+                        && activeGroup === 'workspaces'
+                        && activeTabByGroup.workspaces === t.id}
+                    />
+                    </Suspense>
+                  );
+                }
+                if (t.kind === 'commit') {
+                  return (
+                    <Suspense fallback={null}>
+                    <HistoryCommitBody tab={t} />
+                    </Suspense>
+                  );
+                }
+                if (t.kind === 'changes') {
+                  return (
+                    <Suspense fallback={null}>
+                    <ChangesDiffBody
+                      workingTreeId={activeWtForSession?.id ?? null}
+                      ownerSessionId={activeSessionId}
+                    />
+                    </Suspense>
+                  );
+                }
+                return null;
+              }}
+            />
+            </Suspense>
+          </>
+        )}
+        {inspectorVisible && inspectorKind !== null && (
+          <>
+            <Splitter
+              side="right"
+              seam="sheet-inspector"
+              ariaLabel="Resize workbench and inspector panels"
+              onMouseDown={panelLayout.onSheetInspectorMouseDown}
+            />
+            {inspectorKind === 'history' ? (
+              <Suspense fallback={null}>
+              <HistoryInspector
+                workingTreeId={historyWtId}
+                ownerSessionId={activeSessionId}
+                selectedSha={(() => {
+                  const tab = wbTabs.find(t => t.id === activeTabByGroup.history);
+                  return tab?.kind === 'commit' && tab.workingTreeId === historyWtId
+                    ? tab.commitSha ?? null
+                    : null;
+                })()}
+                onOpenCommit={(commit) => {
+                  if (historyWtId) openCommitInSheet({ workingTreeId: historyWtId, ...commit });
+                }}
+              />
+              </Suspense>
+            ) : (
+              <Inspector
+                tab={inspectorKind}
+                workingTreeId={viewedWorkingTreeId(activeSession)}
+                workingTrees={workingTrees}
+                revealFile={fileReveal}
+                activeSessionId={activeSessionId}
+                onOpenFile={(rel, perm) => {
+                  const sess = activeSession;
+                  const wtId = sess ? viewedWorkingTreeId(sess) : null;
+                  const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
+                  if (!wt) return;
+                  const abs = `${wt.path}/${rel}`;
+                  void openFileInSheet(abs, perm);
+                }}
+                canCommit={!!activeSession}
+                onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
+              />
+            )}
+          </>
+        )}
+        <Dock
+          activeRail={chatPanel ? null : activeRail}
+          onToggleRail={toggleRailAnyMode}
+          sessionRailsDisabled={!sessionViewActive}
+          onOpenSearch={() => { setInboxOpen(false); setPaletteOpen(true); }}
+          inbox={{
+            pendingCount: inboxState.pendingCount,
+            open: inboxOpen,
+            onToggle: () => { setPaletteOpen(false); setInboxOpen(open => !open); },
+          }}
+          sideChat={{
+            active: chatPanel?.kind === 'sidechat',
+            disabled: !sessionViewActive || sideChatControl?.enabled !== true,
+            title: !sessionViewActive
+              ? appT('sidechat.title')
+              : sideChatControl?.enabled
+                ? appT('sidechat.createTitle')
+                : (sideChatControl?.reason ?? appT('sidechat.unavailable')),
+            count: activeSideChats.length,
+            onToggle: handleToggleSideChat,
+          }}
+          workbenchDisabled={!workbenchActive}
+          browserAvailable={!!window.gianDesktop?.browser}
+          wsState={wsState}
+          wsAttempt={wsAttempt}
+          authed={authed}
+          runner={runner}
+        />
+      </div>
+      {forkingSession && (
+        <div className="fork-toast" role="status" aria-live="polite">
+          <span className="spinner" />
+          <span>{appT('coding.forking')}</span>
+        </div>
+      )}
+      <ScheduleConfirmationHost />
+      <GitHubAuthorizationHost key={identity?.provider === 'github' ? identity.user.id : 'host'}
+        login={identity?.provider === 'github' ? identity.user.login : undefined} />
+      <Toaster />
+    </div>
+    </ScheduleOpenContext.Provider>
+    </ImageZoomContext.Provider>
+    </OperationDispatcherProvider>
+    </OperationStoreProvider>
+    </LocaleProvider>
+  );
+}

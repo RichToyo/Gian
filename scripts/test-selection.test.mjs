@@ -1,0 +1,222 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { publicManifest } from './delivery-certificate.mjs';
+import {
+  buildAffectedPlan,
+  checkSelectionMap,
+  loadSelectionInputs,
+  matchesSelectionPattern,
+  validateSelectionMap,
+} from './test-selection.mjs';
+
+const inputs = loadSelectionInputs();
+
+test('selection map is structurally valid and has no stale mappings', () => {
+  assert.doesNotThrow(() => checkSelectionMap());
+});
+
+test('the real selection map remains valid after public source curation', () => {
+  const tree = execFileSync('git', ['write-tree'], { encoding: 'utf8' }).trim();
+  assert.doesNotThrow(() => validateSelectionMap(inputs.map, {
+    entries: inputs.entries,
+    packageScripts: JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).scripts,
+    specialEntrypoints: inputs.catalog.specialEntrypoints ?? [],
+    repositoryPaths: publicManifest(tree).map(entry => entry.path),
+  }));
+});
+
+test('docs selection patterns must be marked optional so curated public source can omit them', () => {
+  const docsPatterns = inputs.map.rules.flatMap(rule => (
+    rule.patterns.filter(pattern => pattern === 'docs' || pattern.startsWith('docs/'))
+  ));
+  assert.ok(docsPatterns.length > 0);
+  for (const rule of inputs.map.rules) {
+    const optional = new Set(rule.optionalPatterns ?? []);
+    for (const pattern of rule.patterns) {
+      if (pattern === 'docs' || pattern.startsWith('docs/')) {
+        assert.equal(optional.has(pattern), true, `${rule.id} ${pattern}`);
+      }
+    }
+  }
+
+  assert.throws(() => validateSelectionMap({
+    version: 1,
+    stages: {
+      quick: { runScopes: ['unit'] },
+      merge: { runScopes: ['unit', 'system'] },
+    },
+    rules: [{
+      id: 'required-docs',
+      patterns: ['README.md', 'docs/adr/0001.md'],
+      modules: [],
+      scopes: [],
+      checks: [],
+      reason: 'A docs path that is not optional must fail even when the file exists.',
+    }],
+  }, {
+    entries: [],
+    packageScripts: {},
+    specialEntrypoints: [],
+    repositoryPaths: ['README.md', 'docs/adr/0001.md'],
+  }), /must mark docs patterns as optional: docs\/adr\/0001\.md/);
+});
+
+test('selection map permits explicitly optional curated-source patterns to be absent', () => {
+  const rule = {
+    id: 'curated-docs',
+    patterns: ['README.md', 'docs/**/*.md'],
+    optionalPatterns: ['docs/**/*.md'],
+    modules: [],
+    scopes: [],
+    checks: [],
+    reason: 'Internal documentation is omitted from the curated source repository.',
+  };
+  const map = {
+    version: 1,
+    stages: {
+      quick: { runScopes: ['unit'] },
+      merge: { runScopes: ['unit', 'system'] },
+    },
+    rules: [rule],
+  };
+  assert.doesNotThrow(() => validateSelectionMap(map, {
+    entries: [],
+    packageScripts: {},
+    specialEntrypoints: [],
+    repositoryPaths: ['README.md'],
+  }));
+});
+
+test('selection glob supports package trees and root-only wildcards', () => {
+  assert.equal(matchesSelectionPattern('docs/quality/a.md', 'docs/**/*.md'), true);
+  assert.equal(matchesSelectionPattern('docs/a.md', 'docs/**/*.md'), true);
+  assert.equal(matchesSelectionPattern('packages/host/src/index.ts', 'packages/host/**'), true);
+  assert.equal(matchesSelectionPattern('docs/quality/a.txt', 'docs/**/*.md'), false);
+});
+
+test('a directly changed deterministic test selects only itself', () => {
+  const path = 'packages/host/test/auth.test.ts';
+  const plan = buildAffectedPlan([path], 'quick', inputs);
+  assert.deepEqual(plan.runnableTests.map(entry => entry.path), [path]);
+  assert.equal(plan.deferredTests.length, 0);
+});
+
+test('a deployed Remote browser spec stays outside deterministic and local app-shell execution', () => {
+  const plan = buildAffectedPlan(['test/e2e/specs/remote-deployed.spec.ts'], 'quick', inputs);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.deferredEntrypoints.length, 1);
+  assert.equal(plan.deferredEntrypoints[0].id, 'remote-deployed-ui');
+  assert.equal(plan.deferredEntrypoints[0].path, 'playwright.remote-acceptance.config.mjs');
+});
+
+test('shared contract changes expand to dependent modules and defer System in quick', () => {
+  const plan = buildAffectedPlan(['packages/shared/src/model.ts'], 'quick', inputs);
+  const runnableModules = new Set(plan.runnableTests.map(entry => entry.module));
+  assert.equal(runnableModules.has('shared'), true);
+  assert.equal(runnableModules.has('host'), true);
+  assert.equal(runnableModules.has('web'), true);
+  assert.equal(runnableModules.has('cc-proxy'), true);
+  assert.equal(plan.deferredTests.length > 0, true);
+  assert.equal(plan.deferredTests.every(entry => entry.scope === 'system'), true);
+});
+
+test('step/request protocol changes select Trace Host/Web evidence and defer System in quick', () => {
+  const plan = buildAffectedPlan(['packages/proxy-protocol/src/schemas.ts'], 'quick', inputs);
+  const paths = new Set(plan.runnableTests.map(entry => entry.path));
+  assert.equal(paths.has('packages/host/test/trace-step-request.test.ts'), true);
+  assert.equal(paths.has('packages/web/test/trace-step-request.test.tsx'), true);
+  assert.equal(plan.deferredTests.some(entry => entry.scope === 'system'), true);
+  assert.equal(plan.checks.some(check => check.id === 'quality:operations:strict'), true);
+});
+
+test('migration changes require Host System and packaged smoke without running either in quick', () => {
+  const plan = buildAffectedPlan(['packages/host/migrations/043_session_pinned.sql'], 'quick', inputs);
+  assert.equal(plan.deferredTests.some(entry => entry.module === 'host' && entry.scope === 'system'), true);
+  assert.equal(plan.deferredEntrypoints.some(entry => entry.id === 'packaged-app-smoke'), true);
+  assert.equal(plan.runnableTests.some(entry => entry.module === 'host' && entry.scope === 'integration'), true);
+});
+
+test('Desktop changes report the Electron smoke as a deferred entrypoint', () => {
+  const plan = buildAffectedPlan(['packages/desktop/src/main.ts'], 'quick', inputs);
+  assert.equal(plan.deferredEntrypoints.some(entry => entry.id === 'desktop-electron-smoke'), true);
+});
+
+test('merge stage executes selected System tests', () => {
+  const plan = buildAffectedPlan(['packages/host/src/workspace/git.ts'], 'merge', inputs);
+  assert.equal(plan.runnableTests.some(entry => entry.scope === 'system'), true);
+  assert.equal(plan.deferredTests.length, 0);
+});
+
+test('documentation-only changes select quality checks without product tests', () => {
+  const plan = buildAffectedPlan(['docs/quality/test-selection-plan.md'], 'quick', inputs);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
+});
+
+test('design-only changes select quality checks without product tests', () => {
+  const plan = buildAffectedPlan(
+    [
+      'design/2026-09-10-agent-runtime-management/index.html',
+      'design/2026-09-10-agent-runtime-management/01-agents.png',
+    ],
+    'quick',
+    inputs,
+  );
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.equal(plan.deferredTests.length, 0);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
+});
+
+test('root Markdown notes and README do not trigger deterministic fallback', () => {
+  const plan = buildAffectedPlan(['README.md', 'PLAN-local-task.md', 'PROMPT-review.md'], 'quick', inputs);
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.equal(plan.deferredTests.length, 0);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
+});
+
+test('root documentation cannot hide a new unmapped source file in the same diff', () => {
+  const plan = buildAffectedPlan(['PLAN-local-task.md', 'new-runtime.mjs'], 'quick', inputs);
+  assert.equal(plan.fallbackFull, true);
+  assert.ok(plan.runnableTests.length > 0);
+});
+
+test('archived matrix and checker snapshots never become runnable tests', () => {
+  const plan = buildAffectedPlan([
+    'docs/archive/quality/traceability-2026-09-19.md.txt',
+    'docs/archive/quality/check-traceability-2026-09-19.test.mjs.txt',
+  ], 'quick', inputs);
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
+});
+
+test('Web changes include the strict UI operation gate', () => {
+  const plan = buildAffectedPlan(['packages/web/src/App.tsx'], 'quick', inputs);
+  assert.equal(plan.checks.some(check => check.id === 'quality:operations:strict'), true);
+});
+
+test('unknown paths fail closed to every deterministic catalog entry', () => {
+  const plan = buildAffectedPlan(['unmapped/new-boundary.conf'], 'quick', inputs);
+  const deterministicCount = inputs.entries.filter(entry => entry.scope !== 'e2e').length;
+  assert.equal(plan.fallbackFull, true);
+  assert.equal(plan.runnableTests.length + plan.deferredTests.length, deterministicCount);
+  assert.equal(plan.checks.some(check => check.id === 'quality:test-catalog'), true);
+});
+
+test('a directly changed E2E spec is reported or safely falls back when curated out', () => {
+  const path = 'test/e2e/specs/01-app-loads.spec.ts';
+  const plan = buildAffectedPlan([path], 'quick', inputs);
+  if (!inputs.entries.some(entry => entry.path === path)) {
+    assert.equal(plan.fallbackFull, true);
+    assert.equal(plan.deferredEntrypoints.length, 0);
+    assert.equal(plan.runnableTests.length > 0, true);
+    return;
+  }
+  assert.equal(plan.runnableTests.length, 0);
+  assert.equal(plan.deferredEntrypoints[0].id, 'test:e2e');
+});

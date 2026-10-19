@@ -1,0 +1,481 @@
+import { createHash } from 'node:crypto';
+import { constants as fsConstants, type Stats } from 'node:fs';
+import { lstat, open, readdir, realpath } from 'node:fs/promises';
+import { dirname, relative, resolve, sep } from 'node:path';
+
+import { isCanonicalAbsolutePath } from '@gian/shared';
+
+import { readRuntimeArtifactReceipt } from './artifact-reuse.js';
+import {
+  assertAuthorizedFilesystemIdentity,
+  authorizedConfigHomeDir,
+  ConfigHomeIdentityError,
+  isAuthorizedConfigHome,
+} from './config-home.js';
+
+const MANAGED_COMPONENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const MANAGED_SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const MANAGED_SHA256 = /^[0-9a-f]{64}$/;
+
+export const MAX_RUNTIME_FINGERPRINT_FILES = 4_096;
+export const MAX_RUNTIME_FINGERPRINT_BYTES = 64 * 1024 * 1024;
+// A user-selected standalone CLI (e.g. Claude/Kimi) can embed its runtime.
+// Give that one file its own bounded streaming budget; directory/content
+// traversal still shares the smaller aggregate budget below.
+export const MAX_RUNTIME_LAUNCHER_BYTES = 512 * 1024 * 1024;
+export const MAX_RUNTIME_FINGERPRINT_ENTRIES = 8_192;
+export const MAX_RUNTIME_FINGERPRINT_DEPTH = 8;
+// Host-owned managed archives are already bounded and inventoried at install.
+// Their complete execution closure can exceed the smaller external-CLI guard.
+// A receipt for runtimes/<id>/<version>/<sha256> may name several regular
+// files. Those files share one managed aggregate budget. Anything else keeps
+// the external limit, including a path that merely contains "runtimes".
+export const MAX_MANAGED_RUNTIME_FINGERPRINT_FILES = 65_536;
+export const MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES = 768 * 1024 * 1024;
+export const MAX_MANAGED_RUNTIME_FINGERPRINT_ENTRIES = 100_000;
+export const MAX_MANAGED_RUNTIME_FINGERPRINT_DEPTH = 64;
+
+type FingerprintBudget = {
+  files: number;
+  bytes: number;
+  entries: number;
+  maxBytes?: number;
+  maxFiles?: number;
+  maxEntries?: number;
+  maxDepth?: number;
+};
+
+export type RuntimeContentRoot = {
+  path: string;
+  mode: 'file' | 'directory';
+};
+
+export class RuntimeFingerprintError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'RuntimeFingerprintError';
+    this.code = code;
+  }
+}
+
+function assertCanonicalPath(path: string, label: string): void {
+  if (!isCanonicalAbsolutePath(path)) {
+    throw new RuntimeFingerprintError(
+      'RUNTIME_ROOT_INVALID',
+      `${label} must be a canonical absolute path.`,
+    );
+  }
+}
+
+function isContained(root: string, candidate: string): boolean {
+  const relativePath = relative(root, candidate);
+  return relativePath === ''
+    || (!relativePath.startsWith(`..${sep}`) && relativePath !== '..' && !relativePath.startsWith('..'));
+}
+
+function anchorsFor(selectedPath: string, configHome: string | null): string[] {
+  const anchors = [selectedPath, dirname(selectedPath)];
+  if (configHome) anchors.push(configHome);
+  return anchors;
+}
+
+function isAnchored(rootPath: string, selectedPath: string, configHome: string | null): boolean {
+  return anchorsFor(selectedPath, configHome).some((anchor) => (
+    rootPath === anchor || isContained(anchor, rootPath)
+  ));
+}
+
+/** A Proxy may name the enclosing package tree only when Host itself owns the
+ * selected launcher below its managed Runtime store. Never let a Proxy widen
+ * the boundary to the store, staging directory, or another package. */
+function isManagedPackageRoot(rootPath: string, selectedPath: string, managedStoreRoot?: string): boolean {
+  if (!managedStoreRoot || !isCanonicalAbsolutePath(managedStoreRoot)) return false;
+  if (!isContained(managedStoreRoot, rootPath) || !isContained(rootPath, selectedPath)) return false;
+  const segments = relative(managedStoreRoot, rootPath).split(sep).filter(Boolean);
+  if (segments.length < 2) return false;
+  if (segments[0]?.startsWith('.staging-')) {
+    return segments.length >= 2 && rootPath === dirname(dirname(selectedPath));
+  }
+  // A published generation has runtimeId/version/artifactSha256 before its
+  // package root. Its launcher may be one or more directories below it.
+  return segments.length >= 4 && rootPath !== dirname(selectedPath);
+}
+
+function posixRelative(from: string, to: string): string {
+  return relative(from, to).split(sep).join('/');
+}
+
+/** File roots that all belong to one receipt-backed generation directory.
+ * Staging directories, mixed packages, and unlisted paths return null so the
+ * caller keeps the external budget or the existing escape check. */
+async function verifiedManagedFileRoots(input: {
+  selectedPath: string;
+  contentRoots: readonly RuntimeContentRoot[];
+  managedStoreRoot?: string;
+}): Promise<Set<string> | null> {
+  const store = input.managedStoreRoot;
+  if (!store || !isCanonicalAbsolutePath(store)) return null;
+  if (input.contentRoots.length < 2 || input.contentRoots.some(root => root.mode !== 'file')) return null;
+  const selectedSegments = relative(store, input.selectedPath).split(sep).filter(Boolean);
+  if (selectedSegments.length < 4) return null;
+  const [runtimeId, version, sha] = selectedSegments;
+  if (!runtimeId || runtimeId.startsWith('.') || !MANAGED_COMPONENT_ID.test(runtimeId)) return null;
+  if (!version || !MANAGED_SEMVER.test(version) || !sha || !MANAGED_SHA256.test(sha)) return null;
+  const generation = resolve(store, runtimeId, version, sha);
+  if (!isContained(store, generation) || generation === store || !isContained(generation, input.selectedPath)) {
+    return null;
+  }
+  const entryRelative = posixRelative(generation, input.selectedPath);
+  const relatives = new Map<string, string>();
+  for (const root of input.contentRoots) {
+    if (!isContained(generation, root.path)) return null;
+    const rel = posixRelative(generation, root.path);
+    if (!rel || rel.startsWith('..')) return null;
+    relatives.set(root.path, rel);
+  }
+  if (relatives.get(input.selectedPath) !== entryRelative) return null;
+  const receipt = await readRuntimeArtifactReceipt(store, generation);
+  if (!receipt || receipt.artifactSha256 !== sha || receipt.entryRelativePath !== entryRelative) return null;
+  const allowed = new Set(receipt.files.map(file => file.path));
+  for (const rel of relatives.values()) {
+    if (!allowed.has(rel)) return null;
+  }
+  for (const root of input.contentRoots) {
+    let info: Stats;
+    try {
+      info = await lstat(root.path);
+    } catch {
+      return null;
+    }
+    if (!info.isFile() || info.isSymbolicLink()) return null;
+  }
+  return new Set(relatives.keys());
+}
+
+function countEntry(budget: FingerprintBudget): void {
+  budget.entries += 1;
+  const maxEntries = budget.maxEntries ?? MAX_RUNTIME_FINGERPRINT_ENTRIES;
+  if (budget.entries > maxEntries) {
+    throw new RuntimeFingerprintError(
+      'RUNTIME_FINGERPRINT_BUDGET',
+      `Runtime content exceeded the ${maxEntries} entry budget.`,
+    );
+  }
+}
+
+function assertSameIdentity(before: Stats, after: Stats, path: string): void {
+  if (after.ino !== before.ino || after.dev !== before.dev) {
+    throw new RuntimeFingerprintError(
+      'RUNTIME_ROOT_INVALID',
+      `Runtime content was retargeted: ${path}`,
+    );
+  }
+}
+
+async function hashRegularFile(
+  path: string,
+  expected: Stats,
+  budget: FingerprintBudget,
+): Promise<{ digest: string; bytes: number }> {
+  const maxBytes = budget.maxBytes ?? MAX_RUNTIME_FINGERPRINT_BYTES;
+  if (expected.size > maxBytes - budget.bytes) {
+    throw new RuntimeFingerprintError(
+      'RUNTIME_FINGERPRINT_BUDGET',
+      `Runtime content exceeded the ${maxBytes} byte budget.`,
+    );
+  }
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await open(path, flags);
+  try {
+    const after = await handle.stat();
+    if (!after.isFile()) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_INVALID',
+        `Runtime content root is not a regular file: ${path}`,
+      );
+    }
+    assertSameIdentity(expected, after, path);
+    const hash = createHash('sha256');
+    let bytes = 0;
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      const buffer = chunk as Buffer;
+      bytes += buffer.byteLength;
+      if (budget.bytes + bytes > maxBytes) {
+        throw new RuntimeFingerprintError(
+          'RUNTIME_FINGERPRINT_BUDGET',
+          `Runtime content exceeded the ${maxBytes} byte budget.`,
+        );
+      }
+      hash.update(buffer);
+    }
+    const final = await handle.stat();
+    assertSameIdentity(expected, final, path);
+    return { digest: hash.digest('hex'), bytes };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function assertStableDirectory(path: string, expected: Stats): Promise<void> {
+  const flags = fsConstants.O_RDONLY
+    | (fsConstants.O_DIRECTORY ?? 0)
+    | (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await open(path, flags);
+  try {
+    const after = await handle.stat();
+    if (!after.isDirectory()) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_INVALID',
+        `Runtime directory root must be a regular directory: ${path}`,
+      );
+    }
+    assertSameIdentity(expected, after, path);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function walkDirectory(
+  root: string,
+  current: string,
+  depth: number,
+  budget: FingerprintBudget,
+  parts: string[],
+): Promise<void> {
+  const maxDepth = budget.maxDepth ?? MAX_RUNTIME_FINGERPRINT_DEPTH;
+  if (depth > maxDepth) {
+    throw new RuntimeFingerprintError(
+      'RUNTIME_FINGERPRINT_BUDGET',
+      `Runtime content exceeded the depth budget of ${maxDepth}.`,
+    );
+  }
+  const dirInfo = await lstat(current);
+  await assertStableDirectory(current, dirInfo);
+  const entries = (await readdir(current)).sort((left, right) => left.localeCompare(right));
+  const afterList = await lstat(current);
+  assertSameIdentity(dirInfo, afterList, current);
+  for (const name of entries) {
+    const child = resolve(current, name);
+    if (!isContained(root, child) || !isCanonicalAbsolutePath(child)) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_ESCAPE',
+        `Runtime content root escaped its declared directory: ${child}`,
+      );
+    }
+    const info = await lstat(child);
+    if (info.isSymbolicLink() || info.isSocket() || info.isFIFO() || info.isCharacterDevice() || info.isBlockDevice()) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_INVALID',
+        `Runtime content root contains a rejected special path: ${child}`,
+      );
+    }
+    countEntry(budget);
+    if (info.isDirectory()) {
+      parts.push(`dir:${relative(root, child) || '.'}`);
+      await walkDirectory(root, child, depth + 1, budget, parts);
+      continue;
+    }
+    if (!info.isFile()) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_INVALID',
+        `Runtime content root is not a regular file: ${child}`,
+      );
+    }
+    budget.files += 1;
+    const maxFiles = budget.maxFiles ?? MAX_RUNTIME_FINGERPRINT_FILES;
+    if (budget.files > maxFiles) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_FINGERPRINT_BUDGET',
+        `Runtime content exceeded the ${maxFiles} file budget.`,
+      );
+    }
+    const { digest, bytes } = await hashRegularFile(child, info, budget);
+    budget.bytes += bytes;
+    const maxBytes = budget.maxBytes ?? MAX_RUNTIME_FINGERPRINT_BYTES;
+    if (budget.bytes > maxBytes) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_FINGERPRINT_BUDGET',
+        `Runtime content exceeded the ${maxBytes} byte budget.`,
+      );
+    }
+    parts.push(`file:${relative(root, child)}:${info.size}:${digest}`);
+  }
+}
+
+async function fingerprintRoot(
+  root: RuntimeContentRoot,
+  selectedPath: string,
+  allowSelectedLauncherSymlink: boolean,
+  budget: FingerprintBudget,
+): Promise<string[]> {
+  let info: Stats;
+  try {
+    info = await lstat(root.path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_MISSING',
+        `Runtime content root is missing: ${root.path}`,
+      );
+    }
+    throw error;
+  }
+  if (info.isSocket() || info.isFIFO() || info.isCharacterDevice() || info.isBlockDevice()) {
+    throw new RuntimeFingerprintError(
+      'RUNTIME_ROOT_INVALID',
+      `Runtime content root is a special file: ${root.path}`,
+    );
+  }
+  if (root.mode === 'file') {
+    if (info.isSymbolicLink()) {
+      if (!allowSelectedLauncherSymlink || root.path !== selectedPath) {
+        throw new RuntimeFingerprintError(
+          'RUNTIME_ROOT_INVALID',
+          `Runtime content root must not be a symlink: ${root.path}`,
+        );
+      }
+      const resolved = await realpath(root.path);
+      const resolvedInfo = await lstat(resolved);
+      if (!resolvedInfo.isFile() || resolvedInfo.isSymbolicLink()) {
+        throw new RuntimeFingerprintError(
+          'RUNTIME_ROOT_INVALID',
+          `Selected Runtime launcher does not resolve to a regular file: ${root.path}`,
+        );
+      }
+      budget.files += 1;
+      const maxFiles = budget.maxFiles ?? MAX_RUNTIME_FINGERPRINT_FILES;
+      if (budget.files > maxFiles) {
+        throw new RuntimeFingerprintError(
+          'RUNTIME_FINGERPRINT_BUDGET',
+          `Runtime content exceeded the ${maxFiles} file budget.`,
+        );
+      }
+      const { digest, bytes } = await hashRegularFile(resolved, resolvedInfo, budget);
+      budget.bytes += bytes;
+      return [`launcher:${root.path}:${info.mode}:${info.size}:${digest}`];
+    }
+    if (!info.isFile()) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_INVALID',
+        `Runtime file root is not a regular file: ${root.path}`,
+      );
+    }
+    budget.files += 1;
+    const maxFiles = budget.maxFiles ?? MAX_RUNTIME_FINGERPRINT_FILES;
+    if (budget.files > maxFiles) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_FINGERPRINT_BUDGET',
+        `Runtime content exceeded the ${maxFiles} file budget.`,
+      );
+    }
+    countEntry(budget);
+    const { digest, bytes } = await hashRegularFile(root.path, info, budget);
+    budget.bytes += bytes;
+    return [`file:${root.path}:${info.size}:${digest}`];
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new RuntimeFingerprintError(
+      'RUNTIME_ROOT_INVALID',
+      `Runtime directory root must be a regular directory: ${root.path}`,
+    );
+  }
+  countEntry(budget);
+  const parts = [`dir:${root.path}`];
+  await walkDirectory(root.path, root.path, 0, budget, parts);
+  return parts;
+}
+
+export async function hostRuntimeFingerprint(input: {
+  selectedPath: string;
+  configHome: string | null;
+  contentRoots: readonly RuntimeContentRoot[];
+  homeDir?: string;
+  managedStoreRoot?: string;
+}): Promise<string> {
+  assertCanonicalPath(input.selectedPath, 'selected Runtime path');
+  const homeDir = input.homeDir ?? authorizedConfigHomeDir();
+  if (input.configHome !== null) {
+    assertCanonicalPath(input.configHome, 'configHome');
+    if (!isAuthorizedConfigHome(input.configHome, input.selectedPath, homeDir)) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_CONFIG_HOME_INVALID',
+        'configHome must be a Host-authorized user or config location.',
+      );
+    }
+    try {
+      await assertAuthorizedFilesystemIdentity(input.configHome, input.selectedPath, homeDir);
+    } catch (error) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_CONFIG_HOME_INVALID',
+        error instanceof ConfigHomeIdentityError
+          ? error.message
+          : 'configHome escaped its authorized identity roots.',
+      );
+    }
+  }
+  if (input.contentRoots.length === 0) {
+    throw new RuntimeFingerprintError('RUNTIME_ROOT_INVALID', 'Runtime probe must declare at least one content root.');
+  }
+  const seen = new Set<string>();
+  const sorted = [...input.contentRoots].sort((left, right) => left.path.localeCompare(right.path));
+  const parts: string[] = [];
+  const budget = { files: 0, bytes: 0, entries: 0 };
+  const managedFiles = await verifiedManagedFileRoots(input);
+  const managedFileBudget: FingerprintBudget | null = managedFiles
+    ? {
+      files: 0,
+      bytes: 0,
+      entries: 0,
+      maxFiles: MAX_MANAGED_RUNTIME_FINGERPRINT_FILES,
+      maxBytes: MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES,
+      maxEntries: MAX_MANAGED_RUNTIME_FINGERPRINT_ENTRIES,
+      maxDepth: MAX_MANAGED_RUNTIME_FINGERPRINT_DEPTH,
+    }
+    : null;
+  for (const root of sorted) {
+    assertCanonicalPath(root.path, 'content root');
+    if (seen.has(root.path)) {
+      throw new RuntimeFingerprintError('RUNTIME_ROOT_INVALID', `Duplicate Runtime content root: ${root.path}`);
+    }
+    seen.add(root.path);
+    const managedFile = managedFiles?.has(root.path) === true;
+    const managedPackageRoot = !managedFile && sorted.length === 1 && root.mode === 'directory'
+      && isManagedPackageRoot(root.path, input.selectedPath, input.managedStoreRoot);
+    if (!managedPackageRoot && !managedFile && !isAnchored(root.path, input.selectedPath, input.configHome)) {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_ESCAPE',
+        `Runtime content root is not anchored to the selected Runtime or config home: ${root.path}`,
+      );
+    }
+    const isSelectedLauncher = root.path === input.selectedPath && root.mode === 'file';
+    if (!isSelectedLauncher) {
+      try {
+        await assertAuthorizedFilesystemIdentity(root.path, input.selectedPath, homeDir);
+      } catch (error) {
+        throw new RuntimeFingerprintError(
+          'RUNTIME_ROOT_ESCAPE',
+          error instanceof ConfigHomeIdentityError
+            ? error.message
+            : `Runtime content root escaped its authorized identity roots: ${root.path}`,
+        );
+      }
+    }
+    const rootBudget = managedPackageRoot
+      ? {
+        files: 0, bytes: 0, entries: 0,
+        maxFiles: MAX_MANAGED_RUNTIME_FINGERPRINT_FILES,
+        maxBytes: MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES,
+        maxEntries: MAX_MANAGED_RUNTIME_FINGERPRINT_ENTRIES,
+        maxDepth: MAX_MANAGED_RUNTIME_FINGERPRINT_DEPTH,
+      }
+      : managedFile && managedFileBudget
+      ? managedFileBudget
+      : isSelectedLauncher
+      ? { files: 0, bytes: 0, entries: 0, maxBytes: MAX_RUNTIME_LAUNCHER_BYTES }
+      : budget;
+    parts.push(...await fingerprintRoot(root, input.selectedPath, !managedFile, rootBudget));
+  }
+  return createHash('sha256').update(parts.join('\n')).digest('hex');
+}

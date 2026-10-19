@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gian Screenshot</title>
+    <link rel="stylesheet" href="./screenshot.css" />
+  </head>
+  <body>
+    <main id="capture-root" aria-label="Screenshot editor">
+      <canvas id="capture-canvas"></canvas>
+
+      <div id="target-label" class="target-label" aria-live="polite"></div>
+      <div id="selection-size" class="selection-size" hidden></div>
+      <div id="capture-status" class="capture-status" hidden></div>
+
+      <section id="toolbar" class="toolbar" aria-label="Screenshot tools" hidden>
+        <div class="tool-group" role="group" aria-label="Annotation tools">
+          <button class="tool active" type="button" data-tool="cursor" title="Move selection (V)" aria-label="Move selection">
+            <span class="cursor-icon">↖</span>
+          </button>
+          <button class="tool" type="button" data-tool="rect" title="Rectangle (R)" aria-label="Rectangle">
+            <span class="rect-icon"></span>
+          </button>
+          <button class="tool" type="button" data-tool="ellipse" title="Ellipse (O)" aria-label="Ellipse">
+            <span class="ellipse-icon"></span>
+          </button>
+          <button class="tool" type="button" data-tool="line" title="Line (L)" aria-label="Line">
+            <span class="line-icon"></span>
+          </button>
+          <button class="tool" type="button" data-tool="arrow" title="Arrow (A)" aria-label="Arrow">
+            <span class="arrow-icon">↗</span>
+          </button>
+          <button class="tool" type="button" data-tool="pen" title="Pen (P)" aria-label="Pen">
+            <span class="pen-icon">⌁</span>
+          </button>
+          <button class="tool text-tool" type="button" data-tool="text" title="Text (T)" aria-label="Text">T</button>
+          <button class="tool mosaic-tool" type="button" data-tool="mosaic" title="Mosaic (M)" aria-label="Mosaic">
+            <span class="mosaic-grid"><i></i><i></i><i></i><i></i></span>
+          </button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group colors" role="group" aria-label="Color">
+          <button type="button" class="color-swatch active" data-color="#ff4d4f" style="--swatch: #ff4d4f" aria-label="Red"></button>
+          <button type="button" class="color-swatch" data-color="#ffcc00" style="--swatch: #ffcc00" aria-label="Yellow"></button>
+          <button type="button" class="color-swatch" data-color="#35c759" style="--swatch: #35c759" aria-label="Green"></button>
+          <button type="button" class="color-swatch" data-color="#2f80ed" style="--swatch: #2f80ed" aria-label="Blue"></button>
+          <button type="button" class="color-swatch" data-color="#ffffff" style="--swatch: #ffffff" aria-label="White"></button>
+          <label class="custom-color" title="Custom color">
+            <input id="custom-color" type="color" value="#ff4d4f" aria-label="Custom color" />
+          </label>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group widths" role="group" aria-label="Stroke width">
+          <button type="button" class="width-option active" data-width="2" title="Thin" aria-label="Thin line"><i></i></button>
+          <button type="button" class="width-option" data-width="4" title="Medium" aria-label="Medium line"><i></i></button>
+          <button type="button" class="width-option" data-width="8" title="Thick" aria-label="Thick line"><i></i></button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group actions" role="group" aria-label="Actions">
+          <button id="undo-button" class="tool" type="button" title="Undo (⌘Z)" aria-label="Undo" disabled>↶</button>
+          <button id="cancel-button" class="action-button cancel" type="button">Cancel</button>
+          <button id="complete-button" class="action-button complete" type="button">Done</button>
+        </div>
+      </section>
+
+      <textarea id="text-editor" class="text-editor" rows="1" aria-label="Screenshot text" hidden></textarea>
+    </main>
+    <script src="./screenshot.js"></script>
+  </body>
+</html>

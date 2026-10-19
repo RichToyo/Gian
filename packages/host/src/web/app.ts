@@ -1,0 +1,706 @@
+import { Hono } from 'hono';
+import { createNodeWebSocket } from '@hono/node-ws';
+import type { Db } from '../storage/db.js';
+import {
+  sessionAllowsLegacyRuntimeFallback,
+  sessionBoundRuntimeCliPath,
+  type SystemConfig,
+} from '@gian/shared';
+import { WsBroadcaster } from './ws-broadcast.js';
+import { ProxyManager } from '../proxy/manager.js';
+import type { LegacyLaunchResolution } from '../proxy/legacy-launch.js';
+import { CustomizationInventoryService } from '../proxy/customization-inventory.js';
+import { SessionManager } from '../session/manager.js';
+import { SessionBindingPlanner } from '../session/binding-planner.js';
+import { TaskManager } from '../task/manager.js';
+import { ApprovalManager } from '../approval/index.js';
+import { QueueManager } from '../queue/index.js';
+import { NativeJsonlWatcher } from '../native/watcher.js';
+import {
+  AttentionDispatcher,
+  attentionGateForPreferences,
+  publishFreshSessionAttention,
+} from '../session/attention.js';
+import { loadConfig } from '../storage/config.js';
+import { makeWsHandlers } from './ws-handler.js';
+import { RemoteControllerHub } from '../remote/controller-hub.js';
+import { RemoteReadOnlyGit } from '../remote/read-only-git.js';
+import { registerRemoteControllerRoutes } from '../remote/controller-routes.js';
+import { requireAuth, AUTH_REQUIRED } from '../auth/middleware.js';
+import { WorkbenchTerminalManager } from '../term/manager.js';
+import type { RuntimeControlPlane } from '../runtime/control-plane.js';
+import type { RuntimeResolver } from '../runtime/resolver.js';
+import type { ManagedRuntimeInstaller } from '../runtime/installer.js';
+import type { PluginStore } from '../plugin-store/index.js';
+import { ManagedRuntimeActivationService } from '../runtime/activation-service.js';
+import { ManagedRuntimeDeliveryService } from '../runtime/delivery-service.js';
+import type { AgentManager } from '../agents/manager.js';
+import { resolveProxyLogo } from '../agents/proxy-logo.js';
+import { ensureAuthConfigured, registerAuthRoutes } from './routes/auth.js';
+import { registerSettingsRoutes } from './routes/settings.js';
+import { registerTranslationRoutes } from './routes/translation.js';
+import { TranslationService } from '../translation/service.js';
+import { createTranslationModel } from '../translation/model.js';
+import { registerWorkspaceRoutes } from './routes/workspaces.js';
+import { registerTaskRoutes } from './routes/tasks.js';
+import { registerProxyRoutes } from './routes/proxy.js';
+import { registerSessionRoutes } from './routes/sessions.js';
+import { registerReconnectRoutes } from './routes/reconnect.js';
+import { registerNativeSessionRoutes } from './routes/native-sessions.js';
+import { registerWorkspaceFileRoutes } from './routes/workspace-files.js';
+import { registerWorkingTreeRoutes } from './routes/working-trees.js';
+import { registerAbsoluteFileRoutes } from './routes/absolute-files.js';
+import { registerLinkPreviewRoutes, type LinkPreviewRouteOptions } from './routes/link-preview.js';
+import { registerAgentRoutes } from './routes/agents.js';
+import type { CatalogService } from '../catalog/service.js';
+import { registerCustomizationRoutes } from './routes/customizations.js';
+import { registerOnboardingRoutes } from './routes/onboarding.js';
+import { bootJsonlWatchers } from './watcher-bootstrap.js';
+import { resolveWebDistDir, staticFiles } from './static-files.js';
+import { buildHealthPayload } from './health.js';
+import { requireDesktopClient } from './desktop-boundary.js';
+import { bindRuntimeOwnerCloser, RuntimeGuardian } from '../runtime/guardian.js';
+import type { ApplicationRouteOptions } from './routes/applications.js';
+import { GianToolService } from '../tool/service.js';
+import { GianToolCredentialManager } from '../tool/credentials.js';
+import { GianToolAccessController } from '../tool/access.js';
+import { gianToolMcpUrl, isLoopbackMcpHost, registerGianToolMcpRoute } from '../tool/mcp-http.js';
+import { GianSessionHostServiceIssuer } from '../tool/session-host-services.js';
+import {
+  RemoteRuntime,
+  createRemoteIdentityFromEnv,
+  registerRemoteSettingsRoutes,
+  type RemoteIdentityMaterial,
+} from '../remote/index.js';
+import { ScheduleService } from '../schedule/service.js';
+import { ScheduleCommandLedger } from '../schedule/command-ledger.js';
+import { ScheduleRunDispatcher } from '../schedule/dispatcher.js';
+import { ScheduleOrchestrator } from '../schedule/orchestrator.js';
+import { registerScheduleRoutes } from './routes/schedules.js';
+import { InboxService } from '../inbox/service.js';
+import { accountRepairInboxObserver } from '../inbox/account-repair-producer.js';
+import { catalogUpdateInboxObserver } from '../inbox/catalog-update-producer.js';
+import { pairingInboxObserver } from '../inbox/pairing-producer.js';
+import { scheduleConfirmationInboxObserver } from '../inbox/schedule-confirmation-producer.js';
+import { publishFreshScheduleConfirmationAttention } from '../schedule/confirmation-attention.js';
+import { SessionInboxAdapter } from '../inbox/session-adapter.js';
+import { registerInboxRoutes } from './routes/inbox.js';
+import { createSearchModule, type SearchModule } from '../search/index.js';
+import type { BrowserToolClient } from '../tool/browser-broker.js';
+
+export interface AppContext {
+  db: Db;
+  config: SystemConfig;
+  dataDir: string;
+  hostVersion?: string;
+  resolveLegacyLaunch?: (
+    executor: import('@gian/shared').Executor,
+    options: { cliPath: string | null; proxyVersion: string | null },
+  ) => Promise<LegacyLaunchResolution>;
+  runtimeResolver?: RuntimeResolver;
+  runtimeControl?: RuntimeControlPlane;
+  runtimeInstaller?: ManagedRuntimeInstaller;
+  pluginStore?: PluginStore;
+  readinessCache?: import('../runtime/readiness-cache.js').RuntimeReadinessCache;
+  agentManager?: AgentManager;
+  catalogService?: CatalogService;
+  /** Test seam; production uses the guardian's five-minute cadence. */
+  runtimeGuardianIntervalMs?: number;
+  /** Test seam; production uses real operating-system application launchers. */
+  applicationRouteOptions?: ApplicationRouteOptions;
+  /** Test seam for the link-preview fetchers/caches/rate limiter. */
+  linkPreviewOptions?: LinkPreviewRouteOptions;
+  /** Test seam for the authenticated MCP request/wait bounds. */
+  toolMcpLimits?: { requests?: number; waits?: number };
+  /** Test seam for holding a Tool call while asserting concurrency bounds. */
+  toolMcpBeforeCall?: (method: import('@gian/shared').GianToolMethod) => Promise<void>;
+  remoteIdentity?: RemoteIdentityMaterial;
+  /** Desktop-owned Browser bridge. Browser WebContents never enter Host. */
+  browser?: BrowserToolClient;
+  /** Test seam; production uses the schedule orchestrator's one-second pulse. */
+  schedulePulseMs?: number;
+  /** Test seam: skip schedule boot recovery when a test exercises it directly. */
+  scheduleSkipBootRecovery?: boolean;
+}
+
+export interface AppHandle {
+  app: Hono;
+  injectWebSocket: ReturnType<typeof createNodeWebSocket>['injectWebSocket'];
+  shutdown: () => Promise<void>;
+  toolService: GianToolService;
+  toolCredentials: GianToolCredentialManager;
+  remote: RemoteRuntime;
+  scheduleService: ScheduleService;
+  scheduleOrchestrator: ScheduleOrchestrator;
+  inbox: InboxService;
+  search: SearchModule;
+}
+
+export function createApp(ctx: AppContext): AppHandle {
+  const app = new Hono();
+  const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
+
+  const broadcaster = new WsBroadcaster();
+  const inbox = new InboxService(ctx.db, {
+    broadcast: message => broadcaster.broadcast(message),
+    onAttentionControl: message => broadcaster.broadcast(message),
+  });
+  const sessionBindingPlanner = ctx.agentManager
+      ? new SessionBindingPlanner({
+        resolveCurrent: pluginId => ctx.agentManager!.trustedLaunch(pluginId),
+        resolveActiveGeneration: async pluginId => ctx.agentManager!.activeRuntimeGeneration(pluginId),
+        resolveExact: input => ctx.agentManager!.resolveExactTrustedLaunch(input),
+        agentHasCustomRuntime: agentId => {
+          try {
+            return ctx.agentManager!.getAgent(agentId).runtime?.kind === 'custom';
+          } catch {
+            return undefined;
+          }
+        },
+        ...(ctx.runtimeResolver ? { runtimeResolver: ctx.runtimeResolver } : {}),
+      })
+    : undefined;
+  const proxy = new ProxyManager({
+    dataDir: ctx.dataDir,
+    hostVersion: ctx.hostVersion,
+    ...(ctx.resolveLegacyLaunch ? { resolveLegacyLaunch: ctx.resolveLegacyLaunch } : {}),
+    ...(ctx.agentManager && sessionBindingPlanner
+      ? {
+          resolveInspectionLaunch: async (
+            pluginId: string,
+            options: import('../proxy/manager.js').InspectionHostOptions,
+          ) => {
+            if (!options.agentId) throw new Error('Inspection requires a saved Agent.');
+            const agent = ctx.agentManager!.getAgent(options.agentId);
+            if (agent.pluginId !== pluginId) {
+              throw new Error('Inspection Agent does not match the requested pluginId.');
+            }
+            const status = await ctx.agentManager!.agentStatus(agent.id, false);
+            const prepared = await sessionBindingPlanner.prepareCurrent({
+              agent,
+              selectedPath: status.runtimeProfile?.path ?? status.cli.path ?? agent.cliPath,
+              runtimeProfile: status.runtimeProfile,
+            });
+            return {
+              binding: prepared.launchBinding,
+              acquireLease: prepared.acquireLease,
+              releaseUnusedLease: prepared.releaseUnusedLease,
+            };
+          },
+        }
+      : {}),
+  });
+  const runtimeGuardian = ctx.runtimeResolver
+    ? new RuntimeGuardian({
+        resolver: ctx.runtimeResolver,
+        ...(ctx.readinessCache ? { readinessCache: ctx.readinessCache } : {}),
+        closeRuntimeOwner: bindRuntimeOwnerCloser((owner) => proxy.closeByExecutor(owner)),
+        ...(ctx.runtimeGuardianIntervalMs
+          ? { intervalMs: ctx.runtimeGuardianIntervalMs }
+          : {}),
+        log: (message, error) => error === undefined
+          ? console.warn(message)
+          : console.warn(message, error),
+      })
+    : undefined;
+  runtimeGuardian?.start();
+  const approvals = new ApprovalManager(broadcaster);
+  const queue = new QueueManager(ctx.db);
+  // One user-level gate for every `attention` broadcast (session events and
+  // scheduled-run failures alike). It reads the live config so a Settings
+  // change takes effect without a restart.
+  const attentionGate = attentionGateForPreferences(() => loadConfig(ctx.db).notifications);
+  const attention = new AttentionDispatcher(broadcaster, attentionGate, (sessionId) => {
+    const row = ctx.db.prepare('SELECT name FROM sessions WHERE id = ?').get(sessionId) as {
+      name?: unknown;
+    } | undefined;
+    return row?.name;
+  });
+  const watcher = new NativeJsonlWatcher(ctx.db, broadcaster, attention);
+  const toolCredentials = new GianToolCredentialManager(ctx.db);
+  // No raw internal token survives the Host process. A restart invalidates
+  // every prior attach generation before any Session can be rehydrated.
+  toolCredentials.revokeAllInternalSessions();
+  const sessionHostServices = isLoopbackMcpHost(ctx.config.host)
+    ? new GianSessionHostServiceIssuer(
+        toolCredentials,
+        gianToolMcpUrl(ctx.config.host, ctx.config.port),
+      )
+    : undefined;
+  const sessions = new SessionManager(
+    ctx.db,
+    proxy,
+    broadcaster,
+    approvals,
+    queue,
+    ctx.dataDir,
+    watcher,
+    ctx.agentManager ? executor => ctx.agentManager!.legacyProxyDefaults(executor) : undefined,
+    attention,
+    ctx.agentManager
+      ? {
+          cliPathForKind: executor => ctx.agentManager!.firstAgentPath(executor),
+          cliPathForSession: session => {
+            const bound = sessionBoundRuntimeCliPath(session);
+            if (!sessionAllowsLegacyRuntimeFallback(session)) return bound;
+            if (session.agent_id) {
+              try {
+                ctx.agentManager!.getAgent(session.agent_id);
+                return bound ?? ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
+              } catch {
+                return null;
+              }
+            }
+            return bound ?? ctx.agentManager!.firstAgentPath(session.executor);
+          },
+          requireCliPathForSession: session => {
+            const bound = sessionBoundRuntimeCliPath(session);
+            if (!sessionAllowsLegacyRuntimeFallback(session)) return bound;
+            if (session.agent_id) {
+              try {
+                const agent = ctx.agentManager!.getAgent(session.agent_id);
+                if (agent.enabled === false) {
+                  throw Object.assign(
+                    new Error(`Agent is disabled: ${session.agent_name ?? session.agent_id}`),
+                    { code: 'AGENT_DISABLED' },
+                  );
+                }
+                return bound ?? ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
+              } catch (error) {
+                if ((error as { code?: unknown })?.code === 'AGENT_DISABLED') throw error;
+                throw Object.assign(
+                  new Error(`Agent was deleted: ${session.agent_name ?? session.agent_id}`),
+                  { code: 'AGENT_DELETED' },
+                );
+              }
+            }
+            return bound ?? ctx.agentManager!.firstAgentPath(session.executor);
+          },
+          agentRuntime: agentId => {
+            const agent = ctx.agentManager!.getAgent(agentId);
+            // Identity is pluginId; a null legacy proxy alias still resolves
+            // the managed runtime path (never the deprecated cliPath).
+            void agent.proxy;
+            return {
+              agent,
+              cliPath: ctx.agentManager!.agentRuntimePath(agentId).cliPath,
+            };
+          },
+          agentRuntimeProfile: async agentId => {
+            const status = await ctx.agentManager!.agentStatus(agentId, true);
+            if (!status.ready) throw new Error(`agent is not ready: ${status.name}`);
+            return status.runtimeProfile;
+          },
+          agentsForKind: executor => (
+            ctx.agentManager!.listAgents().filter(agent => (
+              agent.pluginId === executor || agent.proxy === executor
+            ))
+          ),
+        }
+      : undefined,
+    sessionHostServices,
+    sessionBindingPlanner,
+  );
+  const accountRepair = accountRepairInboxObserver(ctx.db, inbox);
+  accountRepair.reconcile();
+  sessions.onEvent(event => accountRepair.observe(event));
+  const tasks = new TaskManager(ctx.db);
+  const translations = new TranslationService(ctx.db, createTranslationModel(ctx.dataDir, async (id, preferences) => {
+    if (!ctx.agentManager || !sessionBindingPlanner) throw new Error('Translation Agent management is unavailable.');
+    const agent = ctx.agentManager.getAgent(preferences.agent_id);
+    if (agent.enabled === false) throw new Error('The translation Agent is disabled.');
+    const status = await ctx.agentManager.agentStatus(agent.id, false);
+    if (!status.ready) throw new Error('The translation Agent is not ready.');
+    const prepared = await sessionBindingPlanner.prepareCurrent({
+      agent, selectedPath: status.runtimeProfile?.path ?? status.cli.path ?? agent.cliPath,
+      runtimeProfile: status.runtimeProfile,
+    });
+    try {
+      const client = await proxy.acquireWithBinding(id, prepared.launchBinding, { acquireLease: prepared.acquireLease });
+      return { client, dispose: () => proxy.dispose(id) };
+    } finally { await prepared.releaseUnusedLease(); }
+  }));
+  sessions.setTranslationService(translations);
+  const scheduleService = new ScheduleService({
+    db: ctx.db,
+    broadcaster,
+    assertControlSessionReady: sessionId => sessions.assertReadyForScheduledTurn(sessionId),
+  });
+  const scheduleLedger = new ScheduleCommandLedger(ctx.db);
+  const scheduleDispatcher = new ScheduleRunDispatcher(scheduleService, sessions, ctx.db, {});
+  const scheduleOrchestrator = new ScheduleOrchestrator(
+    { service: scheduleService, dispatcher: scheduleDispatcher, broadcaster, db: ctx.db, sessions },
+    {
+      ...(ctx.schedulePulseMs !== undefined ? { pulseMs: ctx.schedulePulseMs } : {}),
+      ...(ctx.scheduleSkipBootRecovery ? { skipBootRecovery: true } : {}),
+    },
+  );
+  scheduleService.setWake(() => scheduleOrchestrator.wake());
+  scheduleService.setConfirmationInbox(scheduleConfirmationInboxObserver(ctx.db, inbox));
+  scheduleService.setConfirmationAttention((confirmation, inboxRef) => {
+    publishFreshScheduleConfirmationAttention({
+      db: ctx.db,
+      claim: (id, generation) => inbox.claimNotification(id, generation),
+      broadcast: message => broadcaster.broadcast(message),
+      gate: attentionGate,
+      confirmation,
+      inbox: inboxRef,
+    });
+  });
+  scheduleService.reconcileConfirmationInbox();
+  const toolService = new GianToolService({
+    db: ctx.db,
+    tasks,
+    sessions,
+    approvals,
+    broadcaster,
+    ...(ctx.agentManager ? { agents: ctx.agentManager } : {}),
+    schedule: scheduleService,
+    ...(ctx.browser ? { browser: ctx.browser } : {}),
+  });
+  const toolAccess = new GianToolAccessController(toolService, ctx.db);
+  const remoteGit = new RemoteReadOnlyGit(ctx.db, broadcaster);
+  const remote = new RemoteRuntime({
+    gitRead: params => remoteGit.read(params),
+    db: ctx.db,
+    sessions,
+    tasks,
+    access: toolAccess,
+    tool: toolService,
+    identity: ctx.remoteIdentity ?? createRemoteIdentityFromEnv(),
+    dataDir: ctx.dataDir,
+    hostVersion: ctx.hostVersion ?? '0.0.0',
+    // Read live so a Settings locale change reaches the next Remote
+    // snapshot without a Host restart.
+    locale: () => loadConfig(ctx.db).locale,
+    listAgents: ctx.agentManager
+      ? () => ctx.agentManager!.listAgents().map(agent => ({
+          id: agent.id,
+          name: agent.name,
+          proxy: agent.pluginId,
+          pluginId: agent.pluginId,
+          defaults: agent.defaults,
+        }))
+      : undefined,
+    hostEvents: broadcaster,
+    proxyLogo: ctx.agentManager
+      ? (proxy, variant) => resolveProxyLogo(
+          { agents: ctx.agentManager!, ...(ctx.catalogService ? { catalogService: ctx.catalogService } : {}) },
+          proxy,
+          variant,
+        )
+      : undefined,
+  });
+  remote.pairings.setInboxObserver(pairingInboxObserver(ctx.db, inbox));
+  remote.pairings.reconcileInbox();
+  if (ctx.catalogService) {
+    ctx.catalogService.setInboxObserver(catalogUpdateInboxObserver(ctx.db, inbox));
+    ctx.catalogService.reconcileInbox();
+  }
+  void remote.start().catch((error) => {
+    console.error('[remote] outbound connector failed to start', error);
+  });
+  const remoteController = new RemoteControllerHub(ctx.db, broadcaster,
+    ctx.remoteIdentity ?? createRemoteIdentityFromEnv());
+  sessions.setRemoteController(remoteController);
+
+  // Workbench terminal manager — standalone shell PTYs, independent of
+  // any Gian session. The xterm tabs in the workbench pane are bound to
+  // client-minted `term_id`s and routed through `term:*` WS messages.
+  const term = new WorkbenchTerminalManager(
+    broadcaster,
+    undefined,
+    ctx.agentManager
+      ? target => {
+        if (target.kind !== 'agent_cli') throw new Error('Unsupported terminal target.');
+        return ctx.agentManager!.prepareAgentCliTerminal(target.agentId, target.action);
+      }
+      : undefined,
+  );
+  const runtimeDelivery = ctx.agentManager
+    && ctx.catalogService
+    && ctx.runtimeResolver
+    && ctx.runtimeControl
+    && ctx.runtimeInstaller
+    ? new ManagedRuntimeDeliveryService({
+        agents: ctx.agentManager,
+        catalog: ctx.catalogService,
+        installer: ctx.runtimeInstaller,
+        runtimeControl: ctx.runtimeControl,
+        resolver: ctx.runtimeResolver,
+        activation: new ManagedRuntimeActivationService({
+          store: ctx.agentManager.managedRuntimeGenerationStore(),
+          lockDataDir: ctx.agentManager.updateLockDataDir(),
+          blockers: async pluginId => sessions.runtimeActivationBlockers(pluginId),
+          closeProxy: pluginId => proxy.closeByExecutor(pluginId),
+          drainRuntime: pluginId => ctx.runtimeResolver!.drain(pluginId),
+          // Fresh installation has no prior active generation. DeliveryService
+          // rejects updates before activation; staging and advancing a complete
+          // replacement generation remains a separate atomic update flow.
+          advanceSessions: async () => undefined,
+          onActivated: pluginId => ctx.agentManager!.managedRuntimeActivated(pluginId),
+        }),
+      })
+    : undefined;
+
+  // Live Sync v2: on host boot, attach a watcher to every active session so
+  // we resume picking up external CLI appends after a host restart. New
+  // sessions get watched lazily inside SessionManager.bringUpProxySession.
+  bootJsonlWatchers(ctx.db, watcher, {
+    executors: [],
+  });
+
+  // Break the circular dependency: ApprovalManager needs to call back into
+  // SessionManager to forward auto-approve decisions to the proxy, but we
+  // can't import SessionManager from ApprovalManager. Inject the callbacks
+  // here after both objects exist.
+  approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
+  approvals.setGetModeFn(sid => sessions.getApprovalModeForActiveTurn(sid));
+  sessions.setSessionInbox(new SessionInboxAdapter(ctx.db, inbox, undefined, (fresh) => {
+    publishFreshSessionAttention({
+      db: ctx.db,
+      claim: (id, generation) => inbox.claimNotification(id, generation),
+      broadcast: message => broadcaster.broadcast(message),
+      gate: attentionGate,
+      fresh,
+    });
+  }));
+
+  // Pre-warm proxy capabilities so model controls are ready before the first
+  // session opens. Async, non-blocking; failures are tolerated.
+  //
+  // Only saved Agents' (kind, path) pairs warm: the catalog itself never
+  // spawns at boot, and an Agent whose CLI/Proxy is not ready is skipped.
+  // `GIAN_SKIP_PROXY_WARMUP=1` lets tests `createApp` an in-memory Hono
+  // harness without spawning a real cc-proxy / codex-proxy child.
+  if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1' && ctx.agentManager) {
+    const agentManager = ctx.agentManager;
+    const warm = (agentId: string, proxy: 'claude' | 'codex', configHome: string | null) => {
+      const cliPath = agentManager.agentRuntimePath(agentId).cliPath;
+      const run = () => sessions.warmCapabilities(proxy, cliPath, configHome).catch(err => {
+        console.warn(`[proxy] warmCapabilities(${proxy}) failed:`, err instanceof Error ? err.message : err);
+      });
+      return agentManager.agentStatus(agentId).then(status => (
+        status.ready ? run() : undefined
+      ));
+    };
+    void Promise.all(
+      agentManager.listAgents()
+        .filter(agent => agent.proxy === 'claude' || agent.proxy === 'codex')
+        .map(agent => warm(
+          agent.id,
+          agent.proxy as 'claude' | 'codex',
+          agent.home?.path ?? null,
+        )),
+    );
+  }
+
+  const handlers = makeWsHandlers({
+    sessions,
+    tasks,
+    broadcaster,
+    approvals,
+    term,
+    db: ctx.db,
+    remoteController,
+    inbox,
+  });
+
+  // The MCP capability token is its own local credential boundary. Register
+  // this endpoint before Desktop/Web auth middleware so Provider runtimes do
+  // not need or inherit the Desktop token.
+  registerGianToolMcpRoute(app, {
+    dataDir: ctx.dataDir,
+    host: ctx.config.host,
+    port: ctx.config.port,
+    credentials: toolCredentials,
+    access: toolAccess,
+    ...(ctx.toolMcpLimits ? { limits: ctx.toolMcpLimits } : {}),
+    ...(ctx.toolMcpBeforeCall ? { beforeCall: ctx.toolMcpBeforeCall } : {}),
+  });
+
+  const desktopOrigin = `http://${ctx.config.host}:${ctx.config.port}`;
+  app.use('*', requireDesktopClient(
+    process.env['GIAN_DESKTOP_TOKEN']?.trim() ?? '',
+    desktopOrigin,
+  ));
+
+  if (AUTH_REQUIRED) {
+    ensureAuthConfigured(ctx.db);
+  }
+
+  // Static SPA assets are served before requireAuth so the login page itself
+  // can load when AUTH_REQUIRED is true. The handler returns a Response only
+  // when it actually finds a file; otherwise it falls through to requireAuth
+  // and the API routes below.
+  const webDist = resolveWebDistDir();
+  if (webDist) {
+    app.use('*', staticFiles(webDist));
+  }
+
+  app.use('*', requireAuth());
+
+  app.get('/health', c => c.json(buildHealthPayload()));
+  registerAuthRoutes(app, ctx.db);
+  registerSettingsRoutes(app, ctx.db);
+  registerTranslationRoutes(app, ctx.db, translations);
+  registerRemoteSettingsRoutes(app, remote);
+  registerRemoteControllerRoutes(app, remoteController, broadcaster);
+  registerWorkspaceRoutes(app, ctx.db);
+  registerTaskRoutes(app, { tasks, sessions, broadcaster, remoteController });
+  registerProxyRoutes(
+    app,
+    ctx.db,
+    sessions,
+    ctx.agentManager
+      ? agentId => ctx.agentManager!.agentRuntimePath(agentId)
+      : undefined,
+  );
+  registerSessionRoutes(app, ctx.db, sessions);
+  registerScheduleRoutes(app, { service: scheduleService, ledger: scheduleLedger });
+  registerInboxRoutes(app, inbox);
+  registerNativeSessionRoutes(app, {
+    db: ctx.db,
+    sessions,
+    broadcaster,
+    catalogPluginIds: async () => {
+      if (!ctx.catalogService) return [];
+      const list = await ctx.catalogService.list();
+      return list.items.map(item => item.pluginId);
+    },
+  });
+  registerWorkspaceFileRoutes(app, ctx.db);
+  const { listWorkingTrees } = registerWorkingTreeRoutes(app, ctx.db, broadcaster, {
+    applicationRoutes: ctx.applicationRouteOptions,
+  });
+  const search = createSearchModule({
+    db: ctx.db,
+    dataDir: ctx.dataDir,
+    listWorkingTrees,
+  });
+  search.register(app);
+  registerAbsoluteFileRoutes(app, ctx.db, {
+    dataDir: ctx.dataDir,
+    ...ctx.applicationRouteOptions,
+  });
+  registerLinkPreviewRoutes(app, ctx.linkPreviewOptions ?? {});
+  registerReconnectRoutes(app, proxy);
+  if (ctx.agentManager) {
+    registerOnboardingRoutes(app, {
+      db: ctx.db,
+      agents: ctx.agentManager,
+    });
+    registerAgentRoutes(app, {
+      agents: ctx.agentManager,
+      ...(ctx.runtimeResolver ? { resolver: ctx.runtimeResolver } : {}),
+      ...(ctx.runtimeControl ? { runtimeControl: ctx.runtimeControl } : {}),
+      ...(runtimeDelivery ? { runtimeDelivery } : {}),
+      closeProxy: executor => proxy.closeByExecutor(executor),
+      ...(ctx.catalogService ? { catalogService: ctx.catalogService } : {}),
+      ...(ctx.pluginStore ? { pluginStore: ctx.pluginStore } : {}),
+      ...(ctx.runtimeInstaller ? { runtimeInstaller: ctx.runtimeInstaller } : {}),
+      hasRunningSessionsForAgent: agentId => sessions.listSessions()
+        .filter(session => session.agent_id === agentId
+          && (session.status === 'running' || session.status === 'pending'))
+        .length,
+      capabilities: async (executor, agentId) => agentId
+        ? (await sessions.agentCapabilities(executor, agentId)).catalog
+        : sessions.warmCapabilities(executor),
+      resolveDefaultsCatalog: async (executor, catalog, config, agentId) => {
+        if (agentId) {
+          const scoped = await sessions.agentCapabilities(executor, agentId);
+          if (scoped.capabilities['catalog.resolve'] === undefined) return scoped.catalog;
+          return sessions.resolveAgentCatalog(executor, agentId, {
+            catalogRevision: scoped.catalog.catalogRevision, ...config,
+          });
+        }
+        if (sessions.getProtocolCapabilities(executor)?.['catalog.resolve'] === undefined) {
+          return catalog;
+        }
+        return sessions.resolveCatalog(executor, {
+          catalogRevision: catalog.catalogRevision,
+          ...config,
+        });
+      },
+    });
+    registerCustomizationRoutes(
+      app,
+      new CustomizationInventoryService({
+        manager: proxy,
+        resolveAgent: async agentId => {
+          // A missing saved Agent surfaces as a 404 via the service's
+          // resolveFactsOrThrow mapping (Review Round 1/5, finding 9).
+          const status = await ctx.agentManager!.agentStatus(agentId, false);
+          const profile = status.runtimeProfile;
+          return {
+            agentId: status.id,
+            pluginId: status.pluginId,
+            cliPath: profile?.path ?? status.cli.path ?? null,
+            proxyVersion: status.plugin.version ?? null,
+            ready: status.ready,
+            runtimeProfileId: profile?.id ?? null,
+            configHome: profile?.configHome ?? null,
+            cliFingerprint: profile?.contentFingerprint ?? status.cli.contentFingerprint ?? null,
+          };
+        },
+        workspaceLookup: workspaceId => (
+          ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as
+            { path?: string } | undefined
+        ),
+      }),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  app.get(
+    '/ws',
+    upgradeWebSocket(() => ({
+      onOpen: handlers.onOpen,
+      onClose: handlers.onClose,
+      onMessage: handlers.onMessage,
+      onError(err) {
+        console.error('[ws] error', err);
+      },
+    })),
+  );
+
+  // Timer ownership starts only after the app is fully assembled so boot
+  // recovery never races route registration (contract K).
+  search.start();
+  scheduleOrchestrator.start();
+  remoteController.start();
+
+  return {
+    app,
+    injectWebSocket,
+    toolService,
+    toolCredentials,
+    remote,
+    scheduleService,
+    scheduleOrchestrator,
+    inbox,
+    search,
+    shutdown: async () => {
+      await ctx.catalogService?.closeInboxObservation();
+      await search.dispose();
+      sessions.setSessionInbox(null);
+      await translations.shutdown();
+      await scheduleOrchestrator.stop();
+      sessionHostServices?.revokeAll();
+      remote.close();
+      remoteController.close();
+      toolService.close();
+      watcher.stopAll();
+      await term.closeAll();
+      await runtimeGuardian?.stop();
+      try {
+        await proxy.closeAll();
+      } catch (error) {
+        console.error(
+          '[proxy] shutdown closeAll failed:',
+          error instanceof Error ? error.message : error,
+        );
+      }
+    },
+  };
+}

@@ -1,0 +1,140 @@
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { MarkdownText, FileRefRehypeContext, LinkBehaviorContext } from '../src/transcript/items.js';
+import type { LinkBehavior } from '../src/transcript/items.js';
+import { buildFileRefIndex, makeFileLinkifyRehype } from '../src/transcript/linkify-files.js';
+
+const index = buildFileRefIndex(['packages/web/src/App.tsx', 'README.md'], '/repo');
+const rehype = makeFileLinkifyRehype(index, rel => `/repo/${rel}`);
+
+function renderMd(text: string, onOpen = vi.fn(), onOpenRel: ((href: string) => void) | null = null) {
+  const behavior: LinkBehavior = { openFile: onOpen, openRelative: onOpenRel };
+  const r = render(
+    <LinkBehaviorContext.Provider value={behavior}>
+      <FileRefRehypeContext.Provider value={rehype}>
+        <MarkdownText>{text}</MarkdownText>
+      </FileRefRehypeContext.Provider>
+    </LinkBehaviorContext.Provider>,
+  );
+  return Object.assign(onOpen, { container: r.container });
+}
+
+describe('MarkdownText file linkification', () => {
+  it('turns a known file mention into a clickable link and opens it at the line', () => {
+    const onOpen = renderMd('See App.tsx (line 12) and README.md for details.');
+    const link = screen.getByText('App.tsx (line 12)');
+    expect(link.tagName).toBe('A');
+    expect(link.className).toContain('file-link');
+    fireEvent.click(link);
+    expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', 12);
+  });
+
+  it('links a second known file in the same text', () => {
+    const onOpen = renderMd('See App.tsx (line 12) and README.md for details.');
+    fireEvent.click(screen.getByText('README.md'));
+    expect(onOpen).toHaveBeenCalledWith('/repo/README.md', undefined);
+  });
+
+  it('leaves unknown file-like tokens as plain text (no link)', () => {
+    renderMd('The file nope.ts is not in the tree.');
+    expect(screen.queryByText('nope.ts')).toBeNull(); // not its own element → no link
+    // The surrounding paragraph still contains the literal text.
+    expect(screen.getByText(/nope\.ts is not in the tree/)).toBeTruthy();
+  });
+
+  it('renders plain markdown unchanged when no rehype provider is mounted', () => {
+    render(<MarkdownText>{'Just **bold** text, App.tsx here.'}</MarkdownText>);
+    // No linkification without the context → App.tsx stays plain text.
+    expect(screen.queryByText('App.tsx')).toBeNull();
+    expect(screen.getByText(/App\.tsx here/)).toBeTruthy();
+  });
+
+  it('links an absolute path under the working-tree root', () => {
+    const onOpen = renderMd('open /repo/packages/web/src/App.tsx:5 now');
+    fireEvent.click(screen.getByText('/repo/packages/web/src/App.tsx:5'));
+    expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', 5);
+  });
+
+  it('linkifies a file name inside INLINE code (intentional — files are often in backticks)', () => {
+    const onOpen = renderMd('edit `App.tsx` then run');
+    const link = onOpen.container.querySelector('code a');
+    expect(link).toBeTruthy();
+    const filename = link!.cloneNode(true) as HTMLElement;
+    filename.querySelectorAll('[aria-hidden="true"]').forEach(node => node.remove());
+    expect(filename.textContent).toBe('App.tsx');
+    fireEvent.click(link!);
+    expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', undefined);
+  });
+
+  it('does NOT linkify inside a fenced code block (code stays literal)', () => {
+    const onOpen = renderMd('```\nedit App.tsx now\n```');
+    expect(onOpen.container.querySelector('pre a')).toBeNull();
+    expect(onOpen.container.querySelector('a')).toBeNull();
+  });
+
+  it('converts a model-written relative markdown link to a known file into an in-app file link', () => {
+    const onOpen = renderMd('Organized into a plan document: [README.md](./README.md).');
+    const link = screen.getByText('README.md');
+    expect(link.tagName).toBe('A');
+    expect(link.className).toContain('file-link');
+    fireEvent.click(link);
+    expect(onOpen).toHaveBeenCalledWith('/repo/README.md', undefined);
+  });
+
+  it('resolves a markdown link whose href carries a :line suffix', () => {
+    const onOpen = renderMd('[App.tsx](packages/web/src/App.tsx:12)');
+    fireEvent.click(screen.getByText('App.tsx'));
+    expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', 12);
+  });
+
+  it('renders unresolved relative markdown links as inert spans (never a junk SPA navigation) when no fallback handler is mounted', () => {
+    const onOpen = renderMd('[missing.md](./missing.md)');
+    const span = screen.getByText('missing.md');
+    expect(span.tagName).toBe('SPAN');
+    expect(span.className).toContain('link-inert');
+    expect(span.getAttribute('title')).toContain('./missing.md');
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('routes unresolved relative markdown links to the click-time fallback handler', () => {
+    const onOpenRel = vi.fn();
+    const onOpen = renderMd('[missing.md](./missing.md)', vi.fn(), onOpenRel);
+    const link = screen.getByText('missing.md');
+    expect(link.tagName).toBe('A');
+    expect(fireEvent.click(link)).toBe(false); // still no SPA navigation
+    expect(onOpenRel).toHaveBeenCalledWith('./missing.md');
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('leaves scheme URLs (https:, mailto:) as normal anchors; sanitized schemes degrade to text', () => {
+    const onOpen = renderMd('[site](https://example.com) and [mail](mailto:dev@example.com) and [code](vscode://file/x.ts)');
+    const links = onOpen.container.querySelectorAll('a');
+    expect(links).toHaveLength(2);
+    expect(links[0]!.className).not.toContain('file-link');
+    expect(links[1]!.className).not.toContain('file-link');
+    // react-markdown's default urlTransform blanks vscode: hrefs → the
+    // unified classifier treats them as unsafe and renders plain text.
+    expect(onOpen.container.querySelector('[data-link-kind="editor"]')).toBeNull();
+    expect(onOpen.container.textContent).toContain('code');
+  });
+});
+
+describe('MarkdownText fenced code block copy button', () => {
+  it('wraps a fenced block and copies its source (trailing newline trimmed)', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const onOpen = renderMd('```js\nconst x = 1;\nconsole.log(x);\n```');
+    const block = onOpen.container.querySelector('.code-block');
+    expect(block).toBeTruthy();
+    const btn = block!.querySelector('.code-copy');
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn!);
+    expect(writeText).toHaveBeenCalledWith('const x = 1;\nconsole.log(x);');
+  });
+
+  it('does not add the copy button to inline code', () => {
+    const onOpen = renderMd('use `foo()` inline here');
+    expect(onOpen.container.querySelector('.code-block')).toBeNull();
+    expect(onOpen.container.querySelector('.code-copy')).toBeNull();
+  });
+});

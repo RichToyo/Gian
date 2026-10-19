@@ -1,0 +1,60 @@
+name: Tech Debt
+description: Track maintainability, reliability, tooling, or engineering-quality work
+title: "[Tech Debt] "
+labels:
+  - tech-debt
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Current problem
+      description: Describe the concrete facts that are raising cost, risk, or maintenance difficulty.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Explain the effect on development speed, reliability, security, compatibility, or release.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List the boundary of the planned change and what it explicitly excludes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Describe the completion criteria as verifiable outcomes.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk and rollback
+      description: Explain compatibility, data, and release risk, and the rollback that is required.
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Related requirements, ADRs, code, tests, Issues, or PRs.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing Issues and did not find duplicate work.
+          required: true

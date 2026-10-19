@@ -1,0 +1,107 @@
+/* ============================================================
+   Shell — topbar, nav, stage
+   ============================================================ */
+
+.app {
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr;
+  height: 100vh;
+}
+
+/* ---------- Top bar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-6) 0 var(--sp-5);
+  background: transparent;
+}
+
+/* Runner */
+.runner-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px 4px 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--fz-11);
+  color: var(--text-2);
+  transition: background 120ms var(--ease);
+}
+.runner-chip:hover { background: var(--surface-3); }
+/* — ported from design/shell.css — runner chip focus ring */
+.runner-chip:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+.runner-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+
+.topbar-spacer { flex: 1; }
+
+/* ---------- Body ---------- */
+.body {
+  display: grid;
+  grid-template-columns: var(--nav-w) 1fr;
+  min-height: 0;
+  padding: 0 var(--gutter) var(--gutter) 0;
+}
+
+/* View: rail | main | [preview] — gap matches design (var(--gutter)). */
+.view {
+  display: flex;
+  flex: 1;
+  min-width: 0; min-height: 0;
+  gap: var(--gutter);
+  position: relative;
+}
+
+/* Invisible drag handle sitting on the seam between rail and main. Absolute
+ * position so it adds zero width to the flex layout — visual gap stays at
+ * var(--gutter) as the design intends. The 8px hitbox straddles the gap,
+ * extending a few px into each adjacent pane so it's reliably clickable. */
+.view-splitter {
+  position: absolute;
+  top: 0; bottom: 0;
+  left: calc(var(--rail-w, 280px) + var(--gutter) / 2 - 4px);
+  width: 8px;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+/* Main island */
+.main {
+  flex: 1; min-width: 420px;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  min-height: 0;
+}
+.main-head {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px;
+  position: relative;
+}
+.main-head::after {
+  content: "";
+  position: absolute; left: 16px; right: 16px; bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
+}
+.main-head-l { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.main-title {
+  font-size: var(--fz-14); font-weight: 600;
+  letter-spacing: -0.005em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.main-head-r { display: flex; align-items: center; gap: 4px; }
+
+.main-head { flex-wrap: wrap; row-gap: 4px; }
+.main-head-l { flex-wrap: wrap; row-gap: 4px; }

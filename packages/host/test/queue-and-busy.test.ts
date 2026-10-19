@@ -1,0 +1,1179 @@
+// Coverage for traceability rows:
+//   QUEUE-001  — running turn must queue, not start a concurrent turn.
+//   QUEUE-002  — update / remove / clear / sendNow / FIFO semantics.
+//   INV-009    — per-session queue drain takes priority over job continuation.
+//   ERR-005    — startTurn SESSION_BUSY rollback must drop the phantom turn
+//                without flipping the still-running session into 'error'.
+//
+// All scenarios drive a deterministic in-process fake proxy — never the real
+// claude / codex binary. Each assertion is concrete: row counts, status
+// strings, broadcast message types, queue order.
+
+import { test } from 'node:test';
+import { strict as assert } from 'node:assert';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { ProxyNotification, ServerToClientMessage } from '@gian/shared';
+import { openDatabase } from '../src/storage/db.js';
+import { SessionManager } from '../src/session/manager.js';
+import type { ProxyManager } from '../src/proxy/manager.js';
+import type { CreateSessionParams, NotificationHandler, ProxyClient, StartTurnParams } from '../src/proxy/types.js';
+import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
+import { ApprovalManager } from '../src/approval/index.js';
+import { QueueManager } from '../src/queue/index.js';
+import { compileContextIntoInput, decompileContextFromText } from '../src/session/context-items.js';
+import { LEGACY_APPROVAL_CATALOG } from './helpers/protocol-v2-stub.js';
+
+// ---------------------------------------------------------------------------
+// Deterministic fakes — no real proxy spawn, no I/O outside the tmp DB.
+// ---------------------------------------------------------------------------
+
+class FakeProxyClient implements ProxyClient {
+  readonly executor = 'claude' as const;
+  notificationHandlers: NotificationHandler[] = [];
+  /** When set, the NEXT startTurn call rejects with this error. */
+  failNextStartTurn: Error | null = null;
+  /** Records every startTurn invocation (for FIFO assertions). */
+  startTurnCalls: Array<{ input: unknown }> = [];
+  lastCreateParams: CreateSessionParams | null = null;
+
+  isExited() { return false; }
+  async initialize() {
+    return {
+      protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
+      plugin: { id: this.executor, name: this.executor, version: '0.2.0' },
+      process: { scope: this.executor === 'codex' || this.executor === 'kimi' ? 'shared' as const : 'session' as const },
+      capabilities: {},
+    };
+  }
+  async catalog() {
+    return LEGACY_APPROVAL_CATALOG;
+  }
+  async createSession(params: CreateSessionParams) {
+    this.lastCreateParams = params;
+    const nativeSessionId = params.nativeSessionId ?? `cc_${randomUUID()}`;
+    return {
+      session: {
+        id: nativeSessionId,
+        cwd: params.cwd,
+        state: 'idle' as const,
+        createdAt: '2026-05-17T00:00:00.000Z',
+        updatedAt: '2026-05-17T00:00:00.000Z',
+        lastError: null,
+      },
+      nativeSessionId,
+    };
+  }
+  async interruptTurn() { /* no-op */ }
+  async respondInteraction() { /* no-op */ }
+  async startTurn(params: unknown) {
+    this.startTurnCalls.push({ input: params });
+    if (this.failNextStartTurn) {
+      const err = this.failNextStartTurn;
+      this.failNextStartTurn = null;
+      throw err;
+    }
+    return {
+      session: {
+        id: 'proxy_x',
+        cwd: '/tmp',
+        state: 'running' as const,
+        createdAt: '2026-05-17T00:00:00.000Z',
+        updatedAt: '2026-05-17T00:00:00.000Z',
+        lastError: null,
+      },
+      turn: { id: 'proxy_turn' },
+    };
+  }
+  async closeSession() { /* no-op */ }
+  shutdownCalls = 0;
+  async shutdown() { this.shutdownCalls += 1; }
+  forceKill() { /* no-op */ }
+  onNotification(handler: NotificationHandler) {
+    this.notificationHandlers.push(handler);
+    return () => {
+      this.notificationHandlers = this.notificationHandlers.filter(h => h !== handler);
+    };
+  }
+  onExit() {
+    return () => {};
+  }
+  fire(notification: ProxyNotification): void {
+    for (const h of this.notificationHandlers) h(notification);
+  }
+}
+
+class FakeProxyManager {
+  client: FakeProxyClient;
+  acquiredSessionIds: string[] = [];
+  disposeCalls: string[] = [];
+  constructor(client?: FakeProxyClient) {
+    this.client = client ?? new FakeProxyClient();
+  }
+  async getOrCreate(sessionId?: string): Promise<ProxyClient> {
+    if (sessionId !== undefined) this.acquiredSessionIds.push(sessionId);
+    return this.client;
+  }
+  get(): ProxyClient {
+    return this.client;
+  }
+  async dispose(sessionId: string): Promise<void> {
+    this.disposeCalls.push(sessionId);
+    await this.client.shutdown();
+  }
+  async closeAll(): Promise<void> { /* no-op */ }
+}
+
+/** Codex variant: carries the optional `steerTurn` (codex `turn/steer`). */
+class FakeCodexProxyClient extends FakeProxyClient {
+  readonly executor = 'codex' as const;
+  steerCalls: Array<{ sessionId: string; input: unknown[] }> = [];
+  failNextSteer: Error | null = null;
+  async initialize() {
+    const initialized = await super.initialize();
+    return { ...initialized, capabilities: { 'turn.steer': 1 } };
+  }
+  async steerTurn(params: { sessionId: string; input: unknown[] }) {
+    this.steerCalls.push(params);
+    if (this.failNextSteer) {
+      const error = this.failNextSteer;
+      this.failNextSteer = null;
+      throw error;
+    }
+    return { ok: true as const, turnId: 'proxy_turn' };
+  }
+}
+
+/** Kimi-shaped client. `advertiseSteer` defaults on; the method can exist
+ *  without the capability so the host gate is not "has steerTurn". */
+class FakeKimiProxyClient extends FakeProxyClient {
+  readonly executor = 'kimi' as const;
+  steerCalls: Array<{ sessionId: string; input: unknown[] }> = [];
+  failNextSteer: Error | null = null;
+  constructor(private readonly advertiseSteer = true) {
+    super();
+  }
+  async initialize() {
+    const initialized = await super.initialize();
+    return {
+      ...initialized,
+      capabilities: this.advertiseSteer ? { 'turn.steer': 1 } : {},
+    };
+  }
+  async steerTurn(params: { sessionId: string; input: unknown[] }) {
+    this.steerCalls.push(params);
+    if (this.failNextSteer) {
+      const error = this.failNextSteer;
+      this.failNextSteer = null;
+      throw error;
+    }
+    return { ok: true as const, turnId: 'proxy_turn' };
+  }
+}
+
+class CapturingBroadcaster {
+  messages: ServerToClientMessage[] = [];
+  add() {}
+  remove() {}
+  send() {}
+  broadcast(msg: ServerToClientMessage): void {
+    this.messages.push(msg);
+  }
+  get size() {
+    return 0;
+  }
+}
+
+function setup(client?: FakeProxyClient) {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-queue-test-'));
+  const db = openDatabase(dir);
+  const wsId = randomUUID();
+  db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+    .run(wsId, 'test', '/tmp/test-ws');
+
+  const proxyMgr = new FakeProxyManager(client);
+  const broadcaster = new CapturingBroadcaster();
+  const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
+  const queue = new QueueManager(db);
+  const sessions = new SessionManager(
+    db,
+    proxyMgr as unknown as ProxyManager,
+    broadcaster as unknown as WsBroadcaster,
+    approvals,
+    queue,
+    dir,
+  );
+  approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
+  approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
+
+  return { dir, db, wsId, proxyMgr, broadcaster, sessions, queue };
+}
+
+function teardown(ctx: { dir: string; db: ReturnType<typeof openDatabase> }) {
+  ctx.db.close();
+  rmSync(ctx.dir, { recursive: true, force: true });
+}
+
+// Wait one microtask tick so fire-and-forget chains in handleLifecycle settle.
+async function tick() { await new Promise(r => setTimeout(r, 0)); }
+
+test('queue fixture rejects unadvertised modes before create and disposes its acquired client', async () => {
+  const ctx = setup();
+  try {
+    await assert.rejects(ctx.sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'claude',
+      turn_config: { approval_mode: 'not-advertised' },
+    }), (error: unknown) => error instanceof Error && 'code' in error
+      && error.code === 'CONFIG_VALUE_INVALID' && /not advertised/.test(error.message));
+    assert.equal(ctx.proxyMgr.acquiredSessionIds.length, 1);
+    assert.deepEqual(ctx.proxyMgr.disposeCalls, ctx.proxyMgr.acquiredSessionIds);
+    assert.equal(ctx.proxyMgr.client.shutdownCalls, 1);
+    assert.equal(ctx.proxyMgr.client.notificationHandlers.length, 0);
+    assert.equal(ctx.proxyMgr.client.lastCreateParams, null);
+    assert.equal(ctx.proxyMgr.client.startTurnCalls.length, 0);
+    assert.equal((ctx.db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n, 0);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// Only the user-set completion flag closes a session for input. A finalized
+// worktree outcome (merged/discarded) is legacy metadata: the product no
+// longer binds sessions to worktrees, and per ADR-0080 the CLI can resume, so
+// Gian resumes too.
+
+function completeSession(
+  db: ReturnType<typeof openDatabase>,
+  sessionId: string,
+): void {
+  db.prepare('UPDATE sessions SET completed_at = ? WHERE id = ?')
+    .run(new Date().toISOString(), sessionId);
+}
+
+function finalizeWorktree(
+  db: ReturnType<typeof openDatabase>,
+  sessionId: string,
+  outcome: 'merged' | 'discarded',
+): void {
+  db.prepare('UPDATE sessions SET worktree_outcome = ? WHERE id = ?')
+    .run(outcome, sessionId);
+}
+
+const COMPLETED_SESSION_ERROR = /session is completed; reopen it before sending more messages/;
+
+test('remote compiled context keeps references but uses the edited queue text at dispatch', async () => {
+  const ctx = setup();
+  try {
+    const sid = await makeSessionId(ctx);
+    const contextItems = [{ type: 'pastedText' as const, id: 'remote-context', text: 'reference', lineCount: 1, byteSize: 9 }];
+    const compiled = compileContextIntoInput('old request', undefined, contextItems);
+    const entry = ctx.queue.add(sid, 'old request', compiled);
+    ctx.queue.update(sid, entry.id, 'new request');
+    const drained = ctx.queue.popNext(sid)!;
+    assert.equal(drained.text, 'new request');
+    const text = drained.items?.find(item => item.type === 'text');
+    assert.ok(text && text.type === 'text');
+    assert.deepEqual(decompileContextFromText(text.text), { text: 'new request', contextItems });
+  } finally { teardown(ctx); }
+});
+
+// ---------------------------------------------------------------------------
+// QUEUE-001 — concurrent send must enqueue, not start a second turn.
+// ---------------------------------------------------------------------------
+
+test('QUEUE-001: sendMessage during an active turn throws and is routed to enqueueMessage', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, queue } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'first');
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'first turn was started');
+
+    // Second send while activeTurns has session.id must reject with a clear
+    // message; ws-handler reads this and routes the payload to enqueueMessage.
+    await assert.rejects(
+      sessions.sendMessage(session.id, 'second'),
+      /turn already in flight.*enqueue instead/,
+      'second concurrent send must be rejected, not silently start another turn',
+    );
+
+    // No second startTurn was issued — the proxy did NOT see a parallel turn.
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1,
+      'proxy must not see a concurrent startTurn while a prior turn is running');
+
+    // Caller can recover by enqueueing. The queue is the supported "do this next" channel.
+    sessions.enqueueMessage(session.id, 'second');
+    const list = queue.list(session.id);
+    assert.equal(list.length, 1);
+    assert.equal(list[0]!.text, 'second');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-001: queued message is consumed exactly once on turn.completed (serial, FIFO)', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, queue, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'turn-B');
+    sessions.enqueueMessage(session.id, 'turn-C');
+
+    assert.equal(queue.list(session.id).length, 2, 'two messages queued behind active turn');
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'only the first send hit the proxy');
+
+    // Complete turn A. handleLifecycle → maybeAutoSendNext pops head ("turn-B").
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+
+    assert.equal(proxyMgr.client.startTurnCalls.length, 2,
+      'queue drain on turn.completed must trigger exactly one new startTurn');
+    assert.equal(queue.list(session.id).length, 1, 'one message remains queued (turn-C)');
+
+    // Complete turn B → turn-C drains next.
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+    assert.equal(proxyMgr.client.startTurnCalls.length, 3, 'turn-C drained on second completion');
+    assert.equal(queue.list(session.id).length, 0, 'queue empty after all drained');
+
+    // FIFO order: persisted user_message texts in chronological order match send order.
+    const msgs = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+      .all(session.id) as Array<{ data: string }>;
+    const texts = msgs.map(m => JSON.parse(m.data).text);
+    assert.deepEqual(texts, ['turn-A', 'turn-B', 'turn-C'],
+      'persisted user_message events must reflect FIFO send order');
+
+    // A queue:updated broadcast fired on every mutation (add x2 + pop x2).
+    const queueBroadcasts = broadcaster.messages.filter(m => m.type === 'queue:updated');
+    assert.ok(queueBroadcasts.length >= 4, `at least 4 queue:updated broadcasts (got ${queueBroadcasts.length})`);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Completed sessions are closed for all new input. Every path rejects before
+// mutating the queue, transcript, proxy, or broadcast stream.
+// ---------------------------------------------------------------------------
+
+test('sendMessage rejects when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    completeSession(db, session.id);
+
+    await assert.rejects(
+      sessions.sendMessage(session.id, 'hello'),
+      COMPLETED_SESSION_ERROR,
+      'completed session must refuse new turns',
+    );
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0, 'no turn was started');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('enqueueMessage rejects without mutation when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, queue, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    completeSession(db, session.id);
+    const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+
+    assert.throws(
+      () => sessions.enqueueMessage(session.id, 'must-not-enqueue'),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.deepEqual(queue.list(session.id), [], 'completed session queue remains empty');
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+      broadcastsBefore,
+      'rejected enqueue must not broadcast a phantom queue update',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('sendQueuedNow preserves FIFO without side effects when the session is completed', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, broadcaster, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+    sessions.enqueueMessage(session.id, 'queued-first');
+    sessions.enqueueMessage(session.id, 'queued-second');
+    const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+    completeSession(db, session.id);
+
+    await assert.rejects(
+      sessions.sendQueuedNow(session.id),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.deepEqual(
+      queue.list(session.id).map(entry => entry.text),
+      ['queued-first', 'queued-second'],
+      'rejected send-now must preserve queue length and FIFO order',
+    );
+    assert.equal(codexClient.startTurnCalls.length, 0, 'rejected send-now must not start a turn');
+    assert.equal(codexClient.steerCalls.length, 0, 'rejected send-now must not steer a turn');
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+      broadcastsBefore,
+      'rejected send-now must not broadcast a queue pop',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('queue edit, remove, and clear preserve contents when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, queue, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    sessions.enqueueMessage(session.id, 'queued-first');
+    sessions.enqueueMessage(session.id, 'queued-second');
+    const queueBefore = queue.list(session.id);
+    const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+    completeSession(db, session.id);
+
+    assert.throws(
+      () => sessions.updateQueueMessage(session.id, queueBefore[0]!.id, 'must-not-update'),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.throws(
+      () => sessions.removeFromQueue(session.id, queueBefore[0]!.id),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.throws(
+      () => sessions.clearQueue(session.id),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.deepEqual(
+      queue.list(session.id),
+      queueBefore,
+      'rejected queue mutations must preserve entry identity, contents, count, and FIFO order',
+    );
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+      broadcastsBefore,
+      'rejected queue mutations must not broadcast a phantom update',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('queue drain stops without popping when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, queue, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'turn-B');
+    assert.equal(queue.list(session.id).length, 1, 'one message queued behind active turn');
+
+    completeSession(db, session.id);
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1,
+      'drain must not start another turn on a completed session');
+    assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['turn-B'],
+      'drain must not pop the queued message');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0080 — a finalized worktree outcome never closes the session: the CLI
+// can resume, so Gian resumes too. Every input path behaves exactly as it
+// does for an ordinary open session.
+// ---------------------------------------------------------------------------
+
+const FINALIZED_WORKTREE_OUTCOMES = ['merged', 'discarded'] as const;
+
+for (const outcome of FINALIZED_WORKTREE_OUTCOMES) {
+  test(`sendMessage resumes a ${outcome} worktree session with a new turn`, async () => {
+    const ctx = setup();
+    try {
+      const { sessions, proxyMgr, db } = ctx;
+      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+      finalizeWorktree(db, session.id, outcome);
+
+      const sent = await sessions.sendMessage(session.id, 'continue after finalize');
+      assert.ok(sent, `${outcome} session must accept a new turn`);
+      assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'the turn reached the proxy');
+      const messages = db
+        .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+        .all(session.id) as Array<{ data: string }>;
+      assert.deepEqual(
+        messages.map(message => (JSON.parse(message.data) as { text: string }).text),
+        ['continue after finalize'],
+        'the resumed message lands on the transcript',
+      );
+    } finally {
+      teardown(ctx);
+    }
+  });
+
+  test(`queue drain pops and sends after the worktree is ${outcome}`, async () => {
+    const ctx = setup();
+    try {
+      const { sessions, proxyMgr, queue, db } = ctx;
+      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+      await sessions.sendMessage(session.id, 'turn-A');
+      finalizeWorktree(db, session.id, outcome);
+      sessions.enqueueMessage(session.id, 'turn-B');
+      assert.equal(queue.list(session.id).length, 1, 'enqueue stays available after finalize');
+
+      proxyMgr.client.fire({
+        method: 'turn.completed',
+        params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+      });
+      await tick();
+
+      assert.equal(proxyMgr.client.startTurnCalls.length, 2,
+        'drain must start the queued turn on a resumable session');
+      assert.deepEqual(queue.list(session.id), [], 'drain must pop the queued message');
+    } finally {
+      teardown(ctx);
+    }
+  });
+}
+
+test('queue edit, remove, clear, and sendNow stay available on a merged worktree session', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+    sessions.enqueueMessage(session.id, 'queued-first');
+    sessions.enqueueMessage(session.id, 'queued-second');
+    finalizeWorktree(db, session.id, 'merged');
+
+    const [first, second] = queue.list(session.id);
+    sessions.updateQueueMessage(session.id, first!.id, 'queued-first-edited');
+    sessions.removeFromQueue(session.id, second!.id);
+    sessions.enqueueMessage(session.id, 'queued-third');
+    assert.deepEqual(
+      queue.list(session.id).map(entry => entry.text),
+      ['queued-first-edited', 'queued-third'],
+      'queue mutations apply on a finalized session',
+    );
+
+    const receipt = await sessions.sendQueuedNow(session.id);
+    assert.equal(receipt.mode, 'started', 'send-now starts the head entry as a new turn');
+    assert.equal(codexClient.startTurnCalls.length, 1, 'send-now reached the proxy');
+    assert.deepEqual(
+      queue.list(session.id).map(entry => entry.text),
+      ['queued-third'],
+      'send-now popped exactly the head entry',
+    );
+
+    sessions.clearQueue(session.id);
+    assert.deepEqual(queue.list(session.id), [], 'clear empties the queue');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('steerMessage reaches the proxy after the worktree is merged', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+    await sessions.sendMessage(session.id, 'turn-A');
+    finalizeWorktree(db, session.id, 'merged');
+
+    await sessions.steerMessage(session.id, 'steer after finalize');
+    assert.equal(codexClient.steerCalls.length, 1, 'finalized session must reach turn/steer');
+    const messages = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+      .all(session.id) as Array<{ data: string }>;
+    assert.deepEqual(
+      messages.map(message => (JSON.parse(message.data) as { text: string }).text),
+      ['turn-A', 'steer after finalize'],
+      'the steer is recorded on the transcript',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// QUEUE-002 — update / remove / clear / sendNow.
+// ---------------------------------------------------------------------------
+
+// queue_entries.session_id is a FK to sessions(id) (migration 020). The
+// QUEUE-002 unit tests need a real session row to insert against; build one
+// via SessionManager.createSession so the FK is satisfied and we still skip
+// any turn machinery.
+async function makeSessionId(ctx: ReturnType<typeof setup>): Promise<string> {
+  const s = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+  return s.id;
+}
+
+test('QUEUE-002: QueueManager assigns monotonically increasing sort_order and list returns FIFO', async () => {
+  const ctx = setup();
+  try {
+    const { queue } = ctx;
+    const sid = await makeSessionId(ctx);
+    const a = queue.add(sid, 'A');
+    const b = queue.add(sid, 'B');
+    const c = queue.add(sid, 'C');
+
+    const list = queue.list(sid);
+    assert.deepEqual(list.map(e => e.text), ['A', 'B', 'C'], 'insertion order preserved');
+    assert.equal(list[0]!.id, a.id);
+    assert.equal(list[1]!.id, b.id);
+    assert.equal(list[2]!.id, c.id);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-002: QueueManager persists context cards until the entry drains', async () => {
+  const ctx = setup();
+  try {
+    const sid = await makeSessionId(ctx);
+    const contextItems = [{
+      type: 'pastedText' as const,
+      id: 'paste-queued',
+      text: 'queued context',
+      lineCount: 1,
+      byteSize: 14,
+    }];
+    ctx.queue.add(sid, 'later', undefined, { contextItems });
+    assert.deepEqual(ctx.queue.list(sid)[0]?.contextItems, contextItems);
+    assert.deepEqual(ctx.queue.popNext(sid)?.contextItems, contextItems);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-002: QueueManager persists an ordered composer document until drain', async () => {
+  const ctx = setup();
+  try {
+    const sid = await makeSessionId(ctx);
+    const composerDocument = {
+      version: 1 as const,
+      segments: [
+        { type: 'text' as const, text: 'Review ' },
+        { type: 'reference' as const, id: 'file-1', referenceType: 'attachment' as const, label: 'notes.md' },
+        { type: 'text' as const, text: ' now' },
+      ],
+    };
+    ctx.queue.add(sid, 'Review  now', [{ type: 'localFile', path: '/tmp/notes.md' }], {
+      composerDocument,
+    });
+    assert.deepEqual(ctx.queue.list(sid)[0]?.composerDocument, composerDocument);
+    assert.deepEqual(ctx.queue.popNext(sid)?.composerDocument, composerDocument);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-002: update rewrites the text in place and keeps the position', async () => {
+  const ctx = setup();
+  try {
+    const { queue } = ctx;
+    const sid = await makeSessionId(ctx);
+    queue.add(sid, 'A');
+    const b = queue.add(sid, 'B');
+    queue.add(sid, 'C');
+
+    queue.update(sid, b.id, 'B edited');
+    assert.deepEqual(queue.list(sid).map(e => e.text), ['A', 'B edited', 'C'],
+      'update keeps the entry at its position');
+
+    // Attachments survive a text-only edit.
+    assert.deepEqual(queue.list(sid)[1]!.items, b.items);
+
+    const popped1 = queue.popNext(sid);
+    assert.equal(popped1?.text, 'A', 'drain order is unchanged');
+    const popped2 = queue.popNext(sid);
+    assert.equal(popped2?.text, 'B edited');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-002: remove deletes a single entry; clear wipes all; sendNow drains and returns FIFO', async () => {
+  const ctx = setup();
+  try {
+    const { queue } = ctx;
+    const sid = await makeSessionId(ctx);
+    const a = queue.add(sid, 'A');
+    queue.add(sid, 'B');
+    const c = queue.add(sid, 'C');
+
+    queue.remove(sid, a.id);
+    assert.deepEqual(queue.list(sid).map(e => e.text), ['B', 'C']);
+
+    queue.add(sid, 'D');
+    const drained = queue.sendNow(sid);
+    assert.deepEqual(drained.map(e => e.text), ['B', 'C', 'D'],
+      'sendNow drains every queued entry in FIFO order');
+    assert.equal(queue.list(sid).length, 0, 'queue empty after sendNow');
+
+    // clear() is a no-op on an empty queue (no throw, no rows).
+    queue.add(sid, 'E');
+    queue.clear(sid);
+    assert.equal(queue.list(sid).length, 0);
+
+    // Removed id reference is safe.
+    queue.remove(sid, c.id); // already gone
+    assert.equal(queue.list(sid).length, 0);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-002: per-session isolation — adding to session B does not leak into session A', async () => {
+  const ctx = setup();
+  try {
+    const { queue } = ctx;
+    const sidA = await makeSessionId(ctx);
+    const sidB = await makeSessionId(ctx);
+    queue.add(sidA, 'a1');
+    queue.add(sidA, 'a2');
+    queue.add(sidB, 'b1');
+
+    assert.deepEqual(queue.list(sidA).map(e => e.text), ['a1', 'a2']);
+    assert.deepEqual(queue.list(sidB).map(e => e.text), ['b1']);
+
+    queue.clear(sidA);
+    assert.equal(queue.list(sidA).length, 0);
+    assert.equal(queue.list(sidB).length, 1, 'clearing session A must not touch session B');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ERR-005 — startTurn SESSION_BUSY rollback.
+// ---------------------------------------------------------------------------
+
+test('ERR-005: SESSION_BUSY from proxy rolls back the phantom turn without flipping session to error', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    // Make the next startTurn reject with SESSION_BUSY (the cc-proxy error
+    // code from proxies/cc-proxy/src/core/service.ts:207).
+    proxyMgr.client.failNextStartTurn = new Error('[SESSION_BUSY] This session already has an active turn.');
+
+    await assert.rejects(
+      sessions.sendMessage(session.id, 'attempt during busy'),
+      /SESSION_BUSY/,
+      'sendMessage must surface the SESSION_BUSY error to the caller',
+    );
+
+    // Phantom turn row + its user_message event were rolled back.
+    const turnCount = (db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?')
+      .get(session.id) as { c: number }).c;
+    assert.equal(turnCount, 0, 'phantom running turn deleted on SESSION_BUSY');
+
+    const userMsgCount = (db
+      .prepare("SELECT COUNT(*) AS c FROM events WHERE session_id = ? AND type = 'user_message'")
+      .get(session.id) as { c: number }).c;
+    assert.equal(userMsgCount, 0,
+      'optimistic user_message also rolled back so the UI does not display a phantom send');
+
+    // Critically: session.status stays 'running' — the *real* prior turn on the
+    // proxy is still alive; the SESSION_BUSY path must NOT mark it as errored.
+    const sessionRow = db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
+    assert.equal(sessionRow.status, 'running',
+      'session.status preserved as running — SESSION_BUSY must not poison the live session');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('ERR-005: non-busy startTurn failure rolls back AND marks the turn as error', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    proxyMgr.client.failNextStartTurn = new Error('proxy crashed mid-startTurn');
+
+    await assert.rejects(
+      sessions.sendMessage(session.id, 'doomed send'),
+      /proxy crashed/,
+    );
+
+    // For non-busy errors, completeTurn('error') flips status to 'error' (no rollback);
+    // the optimistic turn row stays so the failure is auditable.
+    const turn = db.prepare('SELECT status FROM turns WHERE session_id = ?').get(session.id) as
+      | { status: string } | undefined;
+    assert.ok(turn, 'turn row preserved for audit on non-busy failure');
+    assert.equal(turn!.status, 'error',
+      'non-busy startTurn rejection must mark the turn as error');
+
+    const sessionRow = db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
+    assert.equal(sessionRow.status, 'error',
+      'session.status flipped to error on real startTurn failure (not SESSION_BUSY)');
+
+    const errorEvents = sessions.listEvents(session.id)
+      .filter(event => event.display?.type === 'state.error');
+    assert.equal(errorEvents.length, 1,
+      'non-busy startTurn rejection gets one generic persisted error projection');
+    assert.deepEqual(
+      broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => ({ kind: message.kind, body: message.body, event: message.event })),
+      [{ kind: 'error', body: 'Turn failed', event: 'turn_failed' }],
+      'non-busy startTurn rejection emits one generic error attention',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('ERR-005: queued auto-send start failure emits its own generic error attention', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'turn-B');
+    proxyMgr.client.failNextStartTurn = new Error('secret provider diagnostic');
+    broadcaster.messages.length = 0;
+
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+    await tick();
+
+    const turns = db.prepare(
+      'SELECT status FROM turns WHERE session_id = ? ORDER BY turn_number ASC',
+    ).all(session.id) as Array<{ status: string }>;
+    assert.deepEqual(turns.map(turn => turn.status), ['completed', 'error']);
+    assert.deepEqual(
+      broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['turn-completed', 'error'],
+      'the completed turn and failed queued turn each emit their single actionable boundary',
+    );
+    assert.ok(
+      broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .every(message => !message.body.includes('secret provider diagnostic')),
+      'provider diagnostics never leak into native notification bodies',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// QUEUE-004 — attachments ride the queue; send-now semantics per executor.
+// ---------------------------------------------------------------------------
+
+test('QUEUE-004: queued image attachments drain with the message (not dropped)', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'turn-B with image', [
+      { type: 'text', text: 'turn-B with image' },
+      { type: 'localImage', path: '/tmp/att/abc123.png', name: 'shot.png', mime: 'image/png' },
+    ]);
+
+    // Drain on turn.completed → sendMessage must receive the stored items.
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+
+    assert.equal(proxyMgr.client.startTurnCalls.length, 2, 'queued entry drained');
+    const drainedInput = (proxyMgr.client.startTurnCalls[1]!.input as { input: Array<{ type: string }> }).input;
+    assert.ok(
+      drainedInput.some(it => it.type === 'localImage'),
+      'drained startTurn input must include the queued localImage attachment',
+    );
+
+    // The echoed user_message carries the attachment URL so the UI renders it.
+    const msg = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid DESC LIMIT 1")
+      .get(session.id) as { data: string };
+    const payload = JSON.parse(msg.data) as { attachments?: Array<{ url: string }> };
+    assert.ok(payload.attachments?.[0]?.url.includes('abc123.png'),
+      'persisted user_message must carry the attachment for rendering');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy on claude rejects WITHOUT popping the queue', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, queue } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+
+    await assert.rejects(
+      sessions.sendQueuedNow(session.id),
+      /turn is already running/,
+      'busy send-now on a non-steer executor must refuse',
+    );
+    assert.equal(queue.list(session.id).length, 1,
+      'queue entry preserved — the old pop-then-SESSION_BUSY path lost the message');
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'no second turn started');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy on codex steers every entry into the active turn', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    const created = codexClient.lastCreateParams;
+    assert.ok(created?.workspaceRoots?.some(root => root.endsWith(`/attachments/${session.id}`)),
+      'session.create exposes the session-owned attachment root for later steers');
+    const startParams = codexClient.startTurnCalls[0]!.input as StartTurnParams;
+    assert.deepEqual(startParams.input, [{ type: 'text', text: 'turn-A' }]);
+    sessions.enqueueMessage(session.id, 'later-1');
+    sessions.enqueueMessage(session.id, 'later-2');
+
+    await sessions.sendQueuedNow(session.id);
+
+    assert.equal(codexClient.steerCalls.length, 2, 'both queued entries steered');
+    const firstInput = codexClient.steerCalls[0]!.input as Array<{ type: string; text?: string }>;
+    assert.equal(firstInput[0]?.type, 'text');
+    assert.equal(firstInput[0]?.text, 'later-1', 'FIFO steer order');
+    assert.equal(queue.list(session.id).length, 0, 'queue drained');
+    assert.equal(codexClient.startTurnCalls.length, 1, 'no new turn started');
+
+    // Steered messages are recorded on the SAME active turn, in order.
+    const msgs = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+      .all(session.id) as Array<{ data: string }>;
+    assert.deepEqual(msgs.map(m => (JSON.parse(m.data) as { text: string }).text),
+      ['turn-A', 'later-1', 'later-2']);
+    const turns = db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?').get(session.id) as { c: number };
+    assert.equal(turns.c, 1, 'steered messages must not mint new turns');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: an unreadable capability advertisement preserves the busy queue', async () => {
+  const client = new FakeCodexProxyClient();
+  const ctx = setup(client);
+  try {
+    const { sessions, queue } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'codex' });
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+    client.initialize = async () => { throw new Error('capabilities unavailable'); };
+    await assert.rejects(sessions.sendQueuedNow(session.id), /turn is already running/);
+    assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['later']);
+    assert.equal(client.steerCalls.length, 0);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy on kimi steers when turn.steer is advertised', async () => {
+  const kimiClient = new FakeKimiProxyClient();
+  const ctx = setup(kimiClient);
+  try {
+    const { sessions, queue } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'kimi',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later-1');
+    sessions.enqueueMessage(session.id, 'later-2');
+
+    await sessions.sendQueuedNow(session.id);
+
+    assert.equal(kimiClient.steerCalls.length, 2, 'both queued entries steered');
+    const firstInput = kimiClient.steerCalls[0]!.input as Array<{ type: string; text?: string }>;
+    assert.equal(firstInput[0]?.text, 'later-1', 'FIFO steer order');
+    assert.equal(queue.list(session.id).length, 0, 'queue drained');
+    assert.equal(kimiClient.startTurnCalls.length, 1, 'no new turn started');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy refuses steerTurn when turn.steer is not advertised', async () => {
+  const kimiClient = new FakeKimiProxyClient(false);
+  const ctx = setup(kimiClient);
+  try {
+    const { sessions, queue } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'kimi',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+
+    await assert.rejects(
+      sessions.sendQueuedNow(session.id),
+      /turn is already running/,
+    );
+    assert.equal(queue.list(session.id).length, 1, 'queue entry preserved');
+    assert.equal(kimiClient.steerCalls.length, 0, 'unadvertised steerTurn must not run');
+    assert.equal(kimiClient.startTurnCalls.length, 1, 'no second turn started');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: rejected steer does not persist a user message and restores the queue', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+    codexClient.failNextSteer = new Error('steer rejected');
+
+    await assert.rejects(sessions.sendQueuedNow(session.id), /steer rejected/);
+    assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['later']);
+
+    const messages = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+      .all(session.id) as Array<{ data: string }>;
+    assert.deepEqual(
+      messages.map(message => (JSON.parse(message.data) as { text: string }).text),
+      ['turn-A'],
+      'the rejected steer must not leave a transcript row that looks delivered',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: steerMessage without an active turn rejects; with one it records and steers', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, db, broadcaster } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+
+    await assert.rejects(
+      sessions.steerMessage(session.id, 'too early'),
+      /no active turn/,
+      'steer requires an in-flight turn',
+    );
+    assert.equal(codexClient.steerCalls.length, 0);
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    await sessions.steerMessage(session.id, 'steer this', [
+      { type: 'text', text: 'steer this' },
+      { type: 'localImage', path: '/tmp/att/def456.png', name: 'shot2.png', mime: 'image/png' },
+    ]);
+
+    assert.equal(codexClient.steerCalls.length, 1);
+    const input = codexClient.steerCalls[0]!.input as Array<{ type: string }>;
+    assert.ok(input.some(it => it.type === 'localImage'), 'steer carries attachments');
+    const msg = db
+      .prepare("SELECT call_id, data, created_at FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid DESC LIMIT 1")
+      .get(session.id) as { call_id: string; data: string; created_at: string };
+    const payload = JSON.parse(msg.data) as { text: string; attachments?: unknown[] };
+    assert.equal(payload.text, 'steer this');
+    assert.equal(payload.attachments?.length, 1, 'steered message echo carries the attachment');
+    const broadcastMsg = broadcaster.messages.findLast(message => (
+      message.type === 'event'
+      && message.event === 'user_message'
+      && message.data.text === 'steer this'
+    ));
+    assert.ok(broadcastMsg && broadcastMsg.type === 'event', 'steered user_message is broadcast');
+    assert.equal(
+      broadcastMsg.call_id,
+      msg.call_id,
+      'persisted and broadcast steered user_message must share one stable call_id',
+    );
+    assert.match(msg.created_at, /Z$/, 'new steered user_message timestamps must carry UTC');
+    assert.equal(
+      broadcastMsg.ts,
+      Date.parse(msg.created_at),
+      'persisted and broadcast steered user_message must share one timestamp',
+    );
+    const replayed = sessions.listEvents(session.id)
+      .findLast(event => event.event === 'user_message');
+    assert.equal(replayed?.call_id, broadcastMsg.call_id);
+    assert.equal(replayed?.ts, broadcastMsg.ts);
+  } finally {
+    teardown(ctx);
+  }
+});

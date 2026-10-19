@@ -1,0 +1,123 @@
+import { basename, dirname, isAbsolute, posix, resolve, sep } from 'node:path';
+
+export interface BrowserProjectSite {
+  workingTreeId: string;
+  root: string;
+  entry: string;
+}
+
+export interface BrowserAbsoluteSite {
+  absoluteRoot: string;
+  entry: string;
+}
+
+export type BrowserPreviewSite = BrowserProjectSite | BrowserAbsoluteSite;
+
+export function isAbsoluteBrowserSite(site: BrowserPreviewSite): site is BrowserAbsoluteSite {
+  return 'absoluteRoot' in site;
+}
+
+export function createBrowserProjectSite(
+  workingTreeId: string,
+  inputPath: string,
+): BrowserProjectSite | null {
+  const path = normalizeRelativePath(inputPath);
+  if (!path) return null;
+  // Keep the working tree as the site root and put the file at its real
+  // relative URL. HTML-directory-as-root flattened `../tokens.css` into
+  // `/tokens.css` inside that folder, so shared parent assets 404'd.
+  return {
+    workingTreeId,
+    root: '',
+    entry: path,
+  };
+}
+
+export function browserProjectUrl(siteId: string, entry: string): string {
+  const encoded = entry.split('/').map(encodeURIComponent).join('/');
+  return `gian-browser://${siteId}/${encoded}`;
+}
+
+/** Resolve a custom-origin request inside the working tree. The page URL is
+ * the file's workspace-relative path, so `./style.css` and `../tokens.css`
+ * resolve the same way a repo-root static server would. Traversal still
+ * cannot leave the working tree; the Host repeats that check. */
+export function resolveBrowserProjectPath(root: string, pathname: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.includes('\0') || decoded.includes('\\')) return null;
+
+  const directoryRequest = decoded === '' || decoded.endsWith('/');
+  const relative = decoded.replace(/^\/+/, '') || 'index.html';
+  const normalized = normalizeRelativePath(directoryRequest && relative !== 'index.html'
+    ? `${relative}/index.html`
+    : relative);
+  if (!normalized) return null;
+
+  const full = posix.normalize(root ? `${root}/${normalized}` : normalized);
+  if (!root) return normalizeRelativePath(full);
+  if (full !== root && !full.startsWith(`${root}/`)) return null;
+  return full;
+}
+
+export function createBrowserAbsoluteSite(absolutePath: string): BrowserAbsoluteSite | null {
+  if (!absolutePath || absolutePath.includes('\0') || !isAbsolute(absolutePath)) return null;
+  const resolved = resolve(absolutePath);
+  const entry = basename(resolved);
+  if (!entry || entry === '.' || entry === '..') return null;
+  return { absoluteRoot: dirname(resolved), entry };
+}
+
+/** Resolve a custom-origin request next to an opened absolute file. Traversal
+ *  cannot leave the file's directory; the Host repeats the attachments check
+ *  for OS Open and still applies FILE-012 bounds for raw preview. */
+export function resolveAbsoluteBrowserPath(root: string, pathname: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.includes('\0') || decoded.includes('\\')) return null;
+
+  const directoryRequest = decoded === '' || decoded.endsWith('/');
+  const relative = decoded.replace(/^\/+/, '') || 'index.html';
+  const normalized = normalizeRelativePath(directoryRequest && relative !== 'index.html'
+    ? `${relative}/index.html`
+    : relative);
+  if (!normalized) return null;
+
+  const full = resolve(root, ...normalized.split('/'));
+  const rootResolved = resolve(root);
+  if (full !== rootResolved && !full.startsWith(`${rootResolved}${sep}`)) return null;
+  return full;
+}
+
+function normalizeRelativePath(input: string): string | null {
+  if (!input || input.startsWith('/') || input.includes('\0') || input.includes('\\')) return null;
+  const normalized = posix.normalize(input);
+  if (normalized === '.' || normalized === '..' || normalized.startsWith('../')) return null;
+  return normalized;
+}
+
+/** Baseline for authored project pages. It permits ordinary static-site
+ * resources plus HTTPS and localhost development services, while keeping
+ * plugins, object embeds and arbitrary non-local cleartext origins blocked. */
+export const BROWSER_PROJECT_CSP = [
+  "default-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+  "style-src 'self' 'unsafe-inline' https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+  "img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+  "font-src 'self' data: https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+  "connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:* http://[::1]:* ws://localhost:* ws://127.0.0.1:* ws://[::1]:*",
+  "media-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+  "worker-src 'self' blob:",
+  "frame-src 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*",
+].join('; ');

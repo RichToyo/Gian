@@ -1,0 +1,18 @@
+#!/bin/sh
+# Run gianctl from the installed Gian.app bundle. Does not start or configure Gian.
+set -u
+
+app="${GIAN_APP_PATH:-/Applications/Gian.app}"
+runtime="$app/Contents/Resources/runtime/node"
+entry="$app/Contents/Resources/app.asar.unpacked/node_modules/@gian/tool-cli/dist/cli.js"
+
+if [ ! -f "$runtime" ] || [ ! -x "$runtime" ]; then
+  echo "gianctl: bundled Node runtime is missing: $runtime" >&2
+  exit 1
+fi
+if [ ! -f "$entry" ]; then
+  echo "gianctl: bundled CLI entry is missing: $entry" >&2
+  exit 1
+fi
+
+exec "$runtime" "$entry" "$@"

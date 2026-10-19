@@ -1,0 +1,2369 @@
+import { remoteAgentIdentity, loadRemoteAgentCatalog, optionModels, remoteRequest, RemoteRequestError } from './remote-environments.js';
+import type {
+  AgentInstallResult,
+  AgentProxyDefaults,
+  AgentProxyUpdateCheck,
+  EventEnvelope,
+  Executor,
+  ProductExecutor,
+  ProxyCatalogEntry,
+  ProxyCatalogList,
+  Session,
+  SystemConfig,
+  TerminalOptions,
+  Task,
+  TraceSnapshot,
+  UserAgentStatus,
+  Workspace,
+  OnboardingState,
+  OnboardingProjectRootResult,
+  ProxyCapabilities,
+  RuntimeDiscoverResponse,
+  RuntimeProbeRequest,
+  RuntimeProbeResponse,
+  ManagedRuntimeInstallProgress,
+  ManagedRuntimeInstallStreamFrame,
+  ManagedRuntimeStatus,
+  ManagedRuntimeGeneration,
+} from '@gian/shared';
+import {
+  parseListNativeSessionsResponse,
+  parseSessionList,
+  isInboxItemPublic,
+} from '@gian/shared';
+
+export interface TreeEntry {
+  name: string;
+  type: 'dir' | 'file';
+  path: string;
+}
+
+export async function loadLinkPreviewResponse(url: string, signal?: AbortSignal): Promise<Response> {
+  return fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal });
+}
+
+async function remoteHttp<T>(path: string, body?: unknown, method?: 'DELETE'): Promise<T> {
+  const response = await fetch('/api/remote' + path, { credentials: 'same-origin', cache: 'no-store',
+    ...(method === 'DELETE' ? { method: 'DELETE' } : {}),
+    ...(body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
+  if (!response.ok) throw new RemoteRequestError(response.status);
+  return response.json() as Promise<T>;
+}
+
+export function loadRemoteEnvironmentResponse<T>(path: string, body?: unknown): Promise<T> {
+  if (body !== undefined && !/^\/environments\/[^/]+\/agents\/[^/]+\/catalog$/.test(path)) {
+    throw new Error('Remote query transport does not accept mutations.');
+  }
+  return remoteHttp(path, body);
+}
+
+export function connectRemoteEnvironment(input: { server_url: string; code: string; name: string }, signal?: AbortSignal): Promise<unknown> {
+  signal?.throwIfAborted();
+  return remoteHttp('/environments', input);
+}
+
+export function removeRemoteEnvironment(id: string): Promise<unknown> {
+  return remoteHttp(`/environments/${encodeURIComponent(id)}`, undefined, 'DELETE');
+}
+
+export function makeWsUrl(): string {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${location.host}/ws`;
+}
+
+export async function loadWorkspaces(): Promise<Workspace[]> {
+  const res = await fetch('/api/workspaces');
+  return (await res.json()) as Workspace[];
+}
+
+export async function loadSessions(): Promise<Session[]> {
+  const res = await fetch('/api/sessions');
+  if (!res.ok) throw new Error(`Session list load failed (${res.status})`);
+  return parseSessionList(await res.json());
+}
+
+/** Read Core's persisted Trace projection for one Session. */
+export async function loadSessionTrace(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<TraceSnapshot> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/trace`, { signal });
+  if (!response.ok) throw new Error(`Trace snapshot load failed (${response.status})`);
+  return await response.json() as TraceSnapshot;
+}
+
+export async function loadArchivedSessions(): Promise<Session[]> {
+  const res = await fetch('/api/sessions?archived=true');
+  if (!res.ok) throw new Error(`Archived sessions load failed (${res.status})`);
+  return parseSessionList(await res.json());
+}
+
+export async function rebindDeletedSessionAgent(
+  sessionId: string,
+  agentId: string,
+): Promise<Session> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/rebind-agent`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ agent_id: agentId }),
+  });
+  const body = await response.json() as { session?: Session; error?: string };
+  if (!response.ok || !body.session) {
+    throw new Error(body.error ?? `Session Agent repair failed (${response.status})`);
+  }
+  return body.session;
+}
+
+// NOTE: the REST archive/delete session helpers were removed in Phase 3a of
+// the UI Operation Layer — all archive/delete entry points (including the git
+// pane's session delete, Phase 3b) dispatch the WS-backed session.archive /
+// session.delete operations.
+
+export interface EventHistoryPage {
+  events: EventEnvelope[];
+  nextCursor: number | null;
+  hasMore: boolean;
+}
+
+export type EventHistoryLoadErrorKind = 'http' | 'network' | 'invalid-response';
+
+/** A history request must never be indistinguishable from a genuinely empty
+ * page. Callers use this structured error to retain live transcript state and
+ * offer the right retry path. */
+export class EventHistoryLoadError extends Error {
+  readonly kind: EventHistoryLoadErrorKind;
+  readonly status: number | null;
+  readonly originalError?: unknown;
+
+  constructor(
+    kind: EventHistoryLoadErrorKind,
+    message: string,
+    options: { status?: number; originalError?: unknown } = {},
+  ) {
+    super(message);
+    this.name = 'EventHistoryLoadError';
+    this.kind = kind;
+    this.status = options.status ?? null;
+    this.originalError = options.originalError;
+  }
+}
+
+export async function loadEvents(sessionId: string, beforeTurn?: number | null): Promise<EventHistoryPage> {
+  const query = beforeTurn == null ? '' : `?before=${encodeURIComponent(beforeTurn)}`;
+  let res: Response;
+  try {
+    res = await fetch(`/api/sessions/${sessionId}/events${query}`);
+  } catch (error) {
+    throw new EventHistoryLoadError('network', 'Unable to reach the event history endpoint.', {
+      originalError: error,
+    });
+  }
+  if (!res.ok) {
+    throw new EventHistoryLoadError('http', `Event history request failed with HTTP ${res.status}.`, {
+      status: res.status,
+    });
+  }
+  let body: EventHistoryPage | EventEnvelope[];
+  try {
+    body = (await res.json()) as EventHistoryPage | EventEnvelope[];
+  } catch (error) {
+    throw new EventHistoryLoadError('invalid-response', 'Event history response was not valid JSON.', {
+      status: res.status,
+      originalError: error,
+    });
+  }
+  // Development fixtures and an older Host may still return the pre-pagination
+  // array. Treat it as one complete page during rolling upgrades.
+  if (Array.isArray(body)) return { events: body, nextCursor: null, hasMore: false };
+  if (!body || !Array.isArray(body.events) || typeof body.hasMore !== 'boolean'
+    || (body.nextCursor !== null && typeof body.nextCursor !== 'number')) {
+    throw new EventHistoryLoadError('invalid-response', 'Event history response had an invalid shape.', {
+      status: res.status,
+    });
+  }
+  return body;
+}
+
+export interface WorkingTree {
+  /** `ws:<workspace_id>` for workspace primary, `wt:<session_id>` for linked. */
+  id: string;
+  kind: 'workspace' | 'worktree';
+  /** Display label without branch suffix (the UI appends `(branch)`). */
+  label: string;
+  path: string;
+  branch: string | null;
+  workspace_id: string;
+  workspace_name: string;
+  session_id: string | null;
+  session_name: string | null;
+}
+
+export async function loadWorkingTrees(options: { refresh?: boolean } = {}): Promise<WorkingTree[]> {
+  const res = await fetch(`/api/working_trees${options.refresh ? '?refresh=1' : ''}`);
+  // Keep transport failure distinct from a legitimate empty list. Callers can
+  // then retain the last known-good picker contents instead of flashing empty.
+  if (!res.ok) throw new Error(`working trees request failed (${res.status})`);
+  const local = (await res.json()) as WorkingTree[];
+  const remote = await remoteRequest<WorkingTree[]>('/working-trees').catch(() => []);
+  return [...local, ...(Array.isArray(remote) ? remote : [])];
+}
+
+export async function loadTree(workingTreeId: string, path: string): Promise<TreeEntry[]> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/tree?path=${encodeURIComponent(path)}`);
+  if (!res.ok) return [];
+  return (await res.json()) as TreeEntry[];
+}
+
+export async function loadFile(workingTreeId: string, path: string): Promise<{ content: string; size: number } | null> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/file?path=${encodeURIComponent(path)}`);
+  if (!res.ok) return null;
+  return (await res.json()) as { content: string; size: number };
+}
+
+/** Preview a clicked absolute path that is not inside a registered working tree. */
+export async function loadAbsoluteFile(path: string): Promise<{ content: string; size: number } | null> {
+  const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
+  if (!res.ok) return null;
+  return (await res.json()) as { content: string; size: number };
+}
+
+export interface ChangedEntry {
+  path: string;
+  kind: 'create' | 'update' | 'delete' | 'rename';
+  staged: boolean;
+  added: number;
+  removed: number;
+  /** Last-turn only: absolute root the change was produced under when it is
+   *  not the viewed tree (the turn ran in another worktree). `path` is
+   *  relative to this root; absent for in-tree entries. */
+  root?: string;
+  /** Last-turn only: true when the file lives outside the viewed tree. Its
+   *  patch comes from the persisted turn snapshot, never from viewed-tree
+   *  git or the filesystem. */
+  external?: boolean;
+}
+
+/** Diff comparison scope. Mirrors Codex's picker plus the legacy `all`:
+ *   - `all`      = working tree vs HEAD (staged+unstaged, the historical
+ *                  default; default-omitted from the URL so it stays
+ *                  byte-identical to the pre-scope endpoint — older
+ *                  callers rely on that). Shown in the picker as "Uncommitted".
+ *   - `unstaged` = working tree vs index.
+ *   - `staged`   = index vs HEAD.
+ *   - `commit`   = a single commit's delta (HEAD's by default; `sha` pins
+ *                  any commit — the Committed submenu).
+ *   - `branch`   = the whole branch vs its base (merge-base) + untracked.
+ *   - `lastturn` = persisted files and patches from one exact agent turn;
+ *                  Git fills provider-omitted details when available. */
+export type ChangeScope = 'all' | 'unstaged' | 'staged' | 'commit' | 'branch' | 'lastturn';
+
+/** A commit on the current branch since it diverged from the remote default. */
+export interface BranchCommit {
+  sha: string;
+  subject: string;
+  /** git's relative date (`%cr`), e.g. "19 hours ago". */
+  rel: string;
+}
+
+/** Branch picker data for the Changes inspector's second row: the checked-out
+ *  head, the detected remote-default compare base, and every local + remote
+ *  branch. */
+export interface BranchList {
+  head: string;
+  /** Detected remote-default compare base (with local/session fallback), or
+   *  null when none could be determined. */
+  base: string | null;
+  branches: string[];
+}
+
+// Git History read model. Kept worktree-scoped and distinct from the Changes
+// rail's BranchCommit/ChangedEntry state even though both surfaces reuse the
+// same diff renderer.
+export interface GitHistoryRef {
+  name: string;
+  shortName: string;
+  kind: 'local' | 'remote' | 'tag';
+  target: string;
+}
+
+export interface GitHistoryAuthor {
+  name: string;
+  email: string;
+}
+
+export interface GitHistoryCommit {
+  sha: string;
+  parents: string[];
+  author: GitHistoryAuthor;
+  authoredAt: string;
+  committedAt: string;
+  subject: string;
+  bodyPreview: string;
+  refs: GitHistoryRef[];
+  isMerge: boolean;
+  isRoot: boolean;
+}
+
+export interface GitHistoryPage {
+  items: GitHistoryCommit[];
+  nextCursor: string | null;
+  snapshot: string | null;
+  currentRef: string | null;
+  /** Actual HEAD commit, independent of the selected ref/filter snapshot. */
+  headSha: string | null;
+  selectedRef: string;
+  availableRefs: GitHistoryRef[];
+  /** Returned on the first page; later pages intentionally return []. */
+  availableAuthors: GitHistoryAuthor[];
+}
+
+export interface GitHistoryChangedFile {
+  path: string;
+  oldPath?: string;
+  status: 'added' | 'copied' | 'deleted' | 'modified' | 'renamed' | 'type-changed' | 'unknown';
+  added: number;
+  removed: number;
+  binary: boolean;
+}
+
+export interface GitHistoryCommitDetail extends GitHistoryCommit {
+  body: string;
+  base: string;
+  files: GitHistoryChangedFile[];
+}
+
+export interface GitHistoryFileDiff {
+  sha: string;
+  base: string;
+  path: string;
+  diff: string;
+  truncated: boolean;
+}
+
+export interface GitHistoryReachability {
+  sha: string;
+  reachable: boolean;
+}
+
+export interface GitHistoryFetchResult {
+  ok: true;
+  fetchedAt: string;
+  refsChanged: boolean;
+  coalesced: boolean;
+}
+
+export class GitHistoryRequestError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly unknownOutcome: boolean;
+  readonly refsChanged: boolean;
+  readonly status: number;
+
+  constructor(input: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+    unknownOutcome?: boolean;
+    refsChanged?: boolean;
+    status: number;
+  }) {
+    super(input.message);
+    this.name = 'GitHistoryRequestError';
+    this.code = input.code;
+    this.retryable = input.retryable ?? false;
+    this.unknownOutcome = input.unknownOutcome ?? false;
+    this.refsChanged = input.refsChanged ?? false;
+    this.status = input.status;
+  }
+}
+
+async function gitHistoryResponse<T>(response: Response): Promise<T> {
+  const raw = await response.json().catch(() => null) as {
+    error?: {
+      code?: string;
+      message?: string;
+      retryable?: boolean;
+      unknownOutcome?: boolean;
+      refsChanged?: boolean;
+    };
+  } | null;
+  if (!response.ok) {
+    throw new GitHistoryRequestError({
+      code: raw?.error?.code ?? 'git_history_request_failed',
+      message: raw?.error?.message ?? `Git History request failed (${response.status})`,
+      retryable: raw?.error?.retryable,
+      unknownOutcome: raw?.error?.unknownOutcome,
+      refsChanged: raw?.error?.refsChanged,
+      status: response.status,
+    });
+  }
+  return raw as T;
+}
+
+export async function loadGitHistory(
+  workingTreeId: string,
+  options: {
+    limit?: number;
+    cursor?: string | null;
+    q?: string;
+    ref?: string | null;
+    author?: string | null;
+  } = {},
+): Promise<GitHistoryPage> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.q) params.set('q', options.q);
+  if (options.ref) params.set('ref', options.ref);
+  if (options.author) params.set('author', options.author);
+  const query = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history${query}`,
+  );
+  return gitHistoryResponse<GitHistoryPage>(response);
+}
+
+export async function loadGitHistoryCommit(
+  workingTreeId: string,
+  sha: string,
+): Promise<GitHistoryCommitDetail> {
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history/${encodeURIComponent(sha)}`,
+  );
+  return gitHistoryResponse<GitHistoryCommitDetail>(response);
+}
+
+export async function loadGitHistoryCommitReachability(
+  workingTreeId: string,
+  sha: string,
+): Promise<GitHistoryReachability> {
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history/${encodeURIComponent(sha)}/reachability`,
+  );
+  return gitHistoryResponse<GitHistoryReachability>(response);
+}
+
+export async function loadGitHistoryFileDiff(
+  workingTreeId: string,
+  sha: string,
+  path: string,
+): Promise<GitHistoryFileDiff> {
+  const params = new URLSearchParams({ path });
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history/${encodeURIComponent(sha)}/diff?${params.toString()}`,
+  );
+  return gitHistoryResponse<GitHistoryFileDiff>(response);
+}
+
+/** Mutation transport for the registered History Fetch operation only. */
+export async function fetchGitHistory(workingTreeId: string): Promise<GitHistoryFetchResult> {
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/fetch`,
+    { method: 'POST' },
+  );
+  return gitHistoryResponse<GitHistoryFetchResult>(response);
+}
+
+export async function loadChanged(
+  workingTreeId: string,
+  scope: ChangeScope = 'all',
+  sha?: string | null,
+  base?: string | null,
+  sessionId?: string | null,
+  turn?: number | null,
+): Promise<ChangedEntry[]> {
+  const params = new URLSearchParams();
+  if (scope !== 'all') params.set('scope', scope);
+  if (scope === 'commit' && sha) params.set('sha', sha);
+  if (scope === 'branch' && base) params.set('base', base);
+  // `ws:`/`ext:` trees don't carry a session server-side; the host validates
+  // the id against the tree's workspace before trusting it.
+  if (scope === 'lastturn' && sessionId) params.set('session', sessionId);
+  if (scope === 'lastturn' && turn != null) params.set('turn', String(turn));
+  const q = params.size ? `?${params.toString()}` : '';
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/changed${q}`);
+  // Throws on failure: the changes-diff store's list status must distinguish
+  // a failed load (error state + retry) from a scope with no changes.
+  if (!res.ok) throw new Error(`Changed-files load failed (${res.status})`);
+  return (await res.json()) as ChangedEntry[];
+}
+
+/** Commits on the branch since divergence — the Changes picker's Committed row. */
+export async function loadCommits(workingTreeId: string): Promise<BranchCommit[]> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/commits`);
+  if (!res.ok) return [];
+  return (await res.json()) as BranchCommit[];
+}
+
+/** Branches for the Branch scope's compare-base picker (second row). Named
+ *  distinct from the workspace-scoped `loadBranches` below. */
+export async function loadBranchList(workingTreeId: string): Promise<BranchList | null> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/branches`);
+  if (!res.ok) return null;
+  return (await res.json()) as BranchList;
+}
+
+/** Stage a single file (`git add -- <path>`). Index-only — never touches file
+ *  contents. Returns true on success. */
+export async function stageFile(workingTreeId: string, path: string): Promise<boolean> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/stage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  return res.ok;
+}
+
+/** Unstage a single file (`git reset HEAD -- <path>`). Index-only. */
+export async function unstageFile(workingTreeId: string, path: string): Promise<boolean> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/unstage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  return res.ok;
+}
+
+export async function loadProxyModels(
+  executor: 'claude' | 'codex',
+  agentId?: string | null,
+): Promise<Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities>> {
+  if (remoteAgentIdentity(agentId)) {
+    return optionModels((await loadRemoteAgentCatalog(agentId!)).configOptions) as Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities>;
+  }
+  const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
+  const res = await fetch(`/api/proxy/${executor}/models${query}`);
+  if (!res.ok) return [];
+  const body = (await res.json()) as { models: Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities> };
+  return body.models ?? [];
+}
+
+export async function loadProxyCapabilities(
+  executor: Executor,
+  agentId?: string | null,
+): Promise<ProxyCapabilities> {
+  if (remoteAgentIdentity(agentId)) {
+    const catalog = await loadRemoteAgentCatalog(agentId!);
+    const mode = catalog.configOptions.find(option => option.role === 'approval_mode');
+    return { ...catalog, models: optionModels(catalog.configOptions), slashCommands: [],
+      modes: mode?.choices?.map(choice => ({ id: String(choice.value), label: choice.displayName,
+        description: choice.description ?? '', isDefault: choice.value === mode.defaultValue })) ?? [],
+      capabilities: catalog.resolveSupported ? { 'catalog.resolve': 1 } : {} } as unknown as ProxyCapabilities;
+  }
+  const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
+  const response = await fetch(`/api/proxy/${executor}/capabilities${query}`);
+  return agentResponse<ProxyCapabilities>(response);
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return agentResponse<T>(response);
+}
+
+/** Query helper for `catalog.resolve`. POST only because the config maps
+ *  do not fit a GET query string; the call does not persist Host state. */
+export async function loadResolvedProxyCatalog(
+  executor: Executor,
+  params: {
+    catalogRevision: string;
+    sessionConfig: Record<string, import('@gian/shared').ConfigValue>;
+    turnConfig: Record<string, import('@gian/shared').ConfigValue>;
+    sessionId?: string;
+  },
+  agentId?: string | null,
+): Promise<import('@gian/shared').ResolvedProxyCatalog> {
+  if (remoteAgentIdentity(agentId)) {
+    const catalog = await loadRemoteAgentCatalog(agentId!, params);
+    if (!catalog.resolvedDefaults) throw new Error('Remote catalog resolution unavailable');
+    return { ...catalog, slashCommands: [], resolvedDefaults: catalog.resolvedDefaults };
+  }
+  const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
+  return postJson(`/api/proxy/${executor}/catalog/resolve${query}`, params);
+}
+
+/** Agent API failure carrying the Host's machine-readable `code` when one was
+ *  returned, so views can map errors to the field that caused them. */
+export class AgentApiError extends Error {
+  readonly code?: string;
+  readonly reason?: string;
+
+  constructor(message: string, code?: string, reason?: string) {
+    super(message);
+    this.name = 'AgentApiError';
+    if (code !== undefined) this.code = code;
+    if (reason !== undefined) this.reason = reason;
+  }
+}
+
+async function agentResponse<T>(response: Response): Promise<T> {
+  const body = await response.json() as T & { error?: string; code?: string; reason?: unknown };
+  if (!response.ok) {
+    throw new AgentApiError(
+      body.error ?? `Agent request failed (${response.status})`,
+      body.code,
+      typeof body.reason === 'string' ? body.reason : undefined,
+    );
+  }
+  return body;
+}
+
+const AGENT_CACHE_TTL_MS = 30_000;
+let agentCache: { agents: UserAgentStatus[]; expiresAt: number } | null = null;
+let agentRequest: Promise<UserAgentStatus[]> | null = null;
+
+export function peekAgents(): UserAgentStatus[] | null {
+  return agentCache?.agents ?? null;
+}
+
+function cacheAgent(agent: UserAgentStatus): UserAgentStatus {
+  const current = agentCache?.agents ?? [];
+  agentCache = {
+    agents: [agent, ...current.filter(candidate => candidate.id !== agent.id)],
+    expiresAt: Date.now() + AGENT_CACHE_TTL_MS,
+  };
+  return agent;
+}
+
+/** Saved user Agents with their live path/Proxy probe status. Unsaved
+ *  catalog kinds are never listed (issue #97). */
+export async function loadAgents(options: { refresh?: boolean } = {}): Promise<UserAgentStatus[]> {
+  if (!options.refresh && agentCache && agentCache.expiresAt > Date.now()) return agentCache.agents;
+  if (agentRequest) return agentRequest;
+  const query = options.refresh ? '?refresh=1' : '';
+  agentRequest = fetch(`/api/agents${query}`)
+    .then(response => agentResponse<{ agents: UserAgentStatus[] }>(response))
+    .then(body => {
+      agentCache = { agents: body.agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
+      return body.agents;
+    })
+    .finally(() => { agentRequest = null; });
+  return agentRequest;
+}
+
+/** Static Proxy-kind catalog metadata (no spawn, no probe). */
+export async function loadProxies(): Promise<ProxyCatalogEntry[]> {
+  const response = await fetch('/api/proxies');
+  const body = await agentResponse<{ proxies: ProxyCatalogEntry[] }>(response);
+  return body.proxies;
+}
+
+/** Full `/api/proxies` body: the legacy static kind list plus the
+ *  Host-authoritative Proxy Catalog projection (`catalog.items` drives the
+ *  Agents page marketplace surface; `catalog.source` carries the
+ *  ready/stale/error/empty sync state). */
+export interface ProxyCatalogResponse {
+  proxies: ProxyCatalogEntry[];
+  catalog: ProxyCatalogList;
+}
+
+export async function loadProxyCatalog(): Promise<ProxyCatalogResponse> {
+  const response = await fetch('/api/proxies');
+  return agentResponse<ProxyCatalogResponse>(response);
+}
+
+/** One signed Catalog Markdown document. `url` comes from
+ *  `ProxyCatalogItem.documentation[...]`; 404 means the cached Bundle has no
+ *  such document (offline/stale cache) — the caller renders a placeholder. */
+export async function loadCatalogDocument(url: string): Promise<string | null> {
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Catalog document load failed (${response.status})`);
+  return response.text();
+}
+
+/** Ask the Host to sync the official Catalog (conditional fetch; the
+ *  last-known-good cache survives failures Host-side). Returns the fresh
+ *  projection. */
+export async function syncProxyCatalog(): Promise<ProxyCatalogList> {
+  const response = await fetch('/api/proxies/sync', { method: 'POST' });
+  return agentResponse<ProxyCatalogList>(response);
+}
+
+export interface CatalogMutationReceipt {
+  pluginId: string;
+  pluginVersion: string;
+  [key: string]: unknown;
+}
+
+async function catalogMutation(pluginId: string, action: string): Promise<CatalogMutationReceipt> {
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/${action}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  const body = await agentResponse<{ receipt: CatalogMutationReceipt }>(response);
+  return body.receipt;
+}
+
+export async function installCatalogProxy(pluginId: string): Promise<CatalogMutationReceipt> {
+  return catalogMutation(pluginId, 'install');
+}
+
+export async function updateCatalogProxy(pluginId: string): Promise<CatalogMutationReceipt> {
+  return catalogMutation(pluginId, 'update');
+}
+
+export async function rollbackCatalogProxy(pluginId: string): Promise<CatalogMutationReceipt> {
+  return catalogMutation(pluginId, 'rollback');
+}
+
+export interface IntegrationUninstallReceipt {
+  removedAgents: number;
+  removedRuntime: boolean;
+  removedProxy: boolean;
+}
+
+export interface IntegrationUninstallConflict {
+  agentId: string;
+  name: string;
+  runningSessions: number;
+}
+
+/** Sentinel run-error prefix for the 409 in-flight-Session guard on
+ *  Integration uninstall; the Agents view renders the localized conflict
+ *  notice from the JSON payload in the suffix. */
+export const INTEGRATION_UNINSTALL_BLOCKED_PREFIX = 'INTEGRATION_UNINSTALL_BLOCKED:';
+
+/** Uninstall one Integration: bound Agents, managed Runtime generations and
+ *  the Proxy package go together. Idempotent — an absent Integration returns
+ *  an all-zero receipt. */
+export async function uninstallIntegration(pluginId: string): Promise<IntegrationUninstallReceipt> {
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/uninstall`, {
+    method: 'POST',
+  });
+  const body = await response.json() as {
+    receipt?: IntegrationUninstallReceipt;
+    error?: string;
+    code?: string;
+    conflicts?: IntegrationUninstallConflict[];
+  };
+  if (!response.ok) {
+    if (body.code === 'INTEGRATION_HAS_RUNNING_SESSIONS' && Array.isArray(body.conflicts)) {
+      throw new Error(`${INTEGRATION_UNINSTALL_BLOCKED_PREFIX}${JSON.stringify(body.conflicts)}`);
+    }
+    throw new Error(body.error ?? `Agent request failed (${response.status})`);
+  }
+  return body.receipt!;
+}
+
+/** WP6 Runtime control plane: discover the Runtime one installed Catalog
+ *  Proxy's Manifest declares — kind, display name, candidate paths and the
+ *  Host-projected setup/available actions. The response is authoritative:
+ *  Web renders exactly what the Host returns and never invents actions. */
+export async function discoverProxyRuntime(pluginId: string): Promise<RuntimeDiscoverResponse> {
+  const response = await fetch(
+    `/api/proxies/${encodeURIComponent(pluginId)}/runtime/discover`,
+    { method: 'POST' },
+  );
+  return agentResponse<RuntimeDiscoverResponse>(response);
+}
+
+/** Probe one candidate/manual Runtime path. Web submits the raw path only;
+ *  canonicalization and safety validation stay Host-side. The response
+ *  echoes the selected path, the probed profile, any readinessIssue and the
+ *  refreshed available actions. */
+export async function probeProxyRuntime(
+  pluginId: string,
+  path: string,
+): Promise<RuntimeProbeResponse> {
+  const response = await fetch(
+    `/api/proxies/${encodeURIComponent(pluginId)}/runtime/probe`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path } satisfies RuntimeProbeRequest),
+    },
+  );
+  return agentResponse<RuntimeProbeResponse>(response);
+}
+
+/** Read the exact globally active managed Runtime generation for one Proxy. */
+export async function loadManagedRuntimeStatus(pluginId: string): Promise<ManagedRuntimeStatus> {
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/runtime`);
+  return agentResponse<ManagedRuntimeStatus>(response);
+}
+
+export async function installManagedRuntime(
+  pluginId: string,
+  agentId?: string,
+  onProgress?: (progress: ManagedRuntimeInstallProgress) => void,
+): Promise<ManagedRuntimeGeneration> {
+  const response = await fetch(
+    `/api/proxies/${encodeURIComponent(pluginId)}/runtime/install`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(onProgress ? { accept: 'application/x-ndjson' } : {}),
+      },
+      body: JSON.stringify(agentId ? { agentId } : {}),
+    },
+  );
+  if (!response.ok) return agentResponse<{ generation: ManagedRuntimeGeneration }>(response)
+    .then(body => body.generation);
+  if (onProgress && response.headers.get('content-type')?.includes('application/x-ndjson')) {
+    return readManagedRuntimeInstallStream(response, onProgress);
+  }
+  const body = await agentResponse<{ generation: ManagedRuntimeGeneration }>(response);
+  return body.generation;
+}
+
+const RUNTIME_PROGRESS_STAGES = new Set<ManagedRuntimeInstallProgress['stage']>([
+  'catalog',
+  'proxy',
+  'runtime-discovery',
+  'runtime-plan',
+  'runtime-download',
+  'runtime-verify',
+  'combination-verify',
+  'activation',
+]);
+const RUNTIME_PROGRESS_STATUSES = new Set<ManagedRuntimeInstallProgress['status']>([
+  'started',
+  'progress',
+  'completed',
+]);
+const MAX_RUNTIME_PROGRESS_LINE_BYTES = 64 * 1024;
+const MAX_RUNTIME_PROGRESS_FRAMES = 20_000;
+
+function parsedRuntimeProgress(value: unknown): ManagedRuntimeInstallProgress | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (!RUNTIME_PROGRESS_STAGES.has(input.stage as ManagedRuntimeInstallProgress['stage'])
+    || !RUNTIME_PROGRESS_STATUSES.has(input.status as ManagedRuntimeInstallProgress['status'])) {
+    return null;
+  }
+  for (const key of ['componentId', 'version'] as const) {
+    if (input[key] !== undefined && (typeof input[key] !== 'string' || input[key].length > 256)) return null;
+  }
+  for (const key of ['receivedBytes', 'totalBytes'] as const) {
+    if (input[key] !== undefined
+      && (!Number.isSafeInteger(input[key]) || Number(input[key]) < 0)) return null;
+  }
+  return input as unknown as ManagedRuntimeInstallProgress;
+}
+
+async function readManagedRuntimeInstallStream(
+  response: Response,
+  onProgress: (progress: ManagedRuntimeInstallProgress) => void,
+): Promise<ManagedRuntimeGeneration> {
+  if (!response.body) throw new Error('Runtime install progress stream is unavailable.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let pending = '';
+  let frames = 0;
+  let generation: ManagedRuntimeGeneration | null = null;
+
+  const consume = (line: string): void => {
+    if (line === '') return;
+    if (new TextEncoder().encode(line).length > MAX_RUNTIME_PROGRESS_LINE_BYTES) {
+      throw new Error('Runtime install progress frame is too large.');
+    }
+    frames += 1;
+    if (frames > MAX_RUNTIME_PROGRESS_FRAMES) {
+      throw new Error('Runtime install progress stream exceeded its frame limit.');
+    }
+    let frame: ManagedRuntimeInstallStreamFrame;
+    try {
+      frame = JSON.parse(line) as ManagedRuntimeInstallStreamFrame;
+    } catch {
+      throw new Error('Runtime install progress stream returned invalid JSON.');
+    }
+    if (frame.type === 'progress') {
+      const progress = parsedRuntimeProgress(frame.progress);
+      if (!progress) throw new Error('Runtime install progress stream returned an invalid event.');
+      try { onProgress(progress); } catch { /* presentation callback */ }
+      return;
+    }
+    if (frame.type === 'error') {
+      if (!frame.error || typeof frame.error.message !== 'string' || frame.error.message.length > 2048) {
+        throw new Error('Runtime install progress stream returned an invalid error.');
+      }
+      throw new Error(frame.error.message);
+    }
+    if (frame.type === 'result') {
+      if (!frame.generation || typeof frame.generation !== 'object' || generation) {
+        throw new Error('Runtime install progress stream returned an invalid result.');
+      }
+      generation = frame.generation;
+      return;
+    }
+    throw new Error('Runtime install progress stream returned an unknown frame.');
+  };
+
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    pending += decoder.decode(chunk.value, { stream: true });
+    let newline = pending.indexOf('\n');
+    while (newline >= 0) {
+      consume(pending.slice(0, newline));
+      pending = pending.slice(newline + 1);
+      newline = pending.indexOf('\n');
+    }
+    if (new TextEncoder().encode(pending).length > MAX_RUNTIME_PROGRESS_LINE_BYTES) {
+      throw new Error('Runtime install progress frame is too large.');
+    }
+  }
+  pending += decoder.decode();
+  if (pending !== '') consume(pending);
+  if (!generation) throw new Error('Runtime install progress stream ended without a result.');
+  return generation;
+}
+
+export interface AgentDraftDefaults {
+  name: string;
+  cliPath: string | null;
+  home?: { kind: 'default'; path: string }
+    | { kind: 'unavailable'; reason?: { code: string; message: string } }
+    | null;
+}
+
+/** Prefill for a new draft card: numbered name and the kind's existing path. */
+export async function loadAgentDraftDefaults(
+  pluginId: string,
+): Promise<AgentDraftDefaults> {
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/draft-defaults`);
+  return agentResponse<AgentDraftDefaults>(response);
+}
+
+export interface CreateAgentInput {
+  name: string;
+  pluginId?: string;
+  proxy?: ProductExecutor;
+  home?: { kind: 'managed' } | { kind: 'custom'; path: string } | { kind: 'default'; expectedPath: string };
+  /** ADR-0102: per-Agent Runtime binding; 'custom' pins a user-provided
+   *  Runtime path probed by the Host before the Agent is persisted. */
+  runtime?: { kind: 'managed' } | { kind: 'custom'; path: string };
+  cliPath?: string | null;
+  defaults?: Partial<AgentProxyDefaults>;
+}
+
+export async function createAgent(input: CreateAgentInput): Promise<UserAgentStatus> {
+  const response = await fetch('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = await agentResponse<{ agent: UserAgentStatus }>(response);
+  return cacheAgent(body.agent);
+}
+
+export interface UpdateAgentInput {
+  name?: string;
+  home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+  cliPath?: string | null;
+  proxy?: ProductExecutor;
+  defaults?: Partial<AgentProxyDefaults>;
+  enabled?: boolean;
+}
+
+/** Sentinel run-error prefix for the 409 running-session guard on PATCH
+ *  enabled=false (precedent: SCHEDULE_REVISION_CONFLICT_MESSAGE). The Agents
+ *  view recognizes it and renders the localized conflict notice with the
+ *  count carried in the suffix. */
+export const AGENT_DISABLE_BLOCKED_PREFIX = 'AGENT_DISABLE_BLOCKED:';
+
+/** Open the native folder picker for a draft or saved Agent HOME. */
+export async function pickAgentHome(agentId?: string): Promise<string | null> {
+  const path = agentId
+    ? `/api/agents/${encodeURIComponent(agentId)}/pick-home`
+    : '/api/agents/pick-home';
+  const response = await fetch(path, { method: 'POST' });
+  const body = await agentResponse<{ path?: string; canceled?: boolean }>(response);
+  return body.path ?? null;
+}
+
+/** Open the native file picker for a Custom Agent's Runtime path (ADR-0102).
+ *  Picks a file (executable or launch script), unlike the HOME folder picker. */
+export async function pickAgentRuntime(): Promise<string | null> {
+  const response = await fetch('/api/agents/pick-runtime', { method: 'POST' });
+  const body = await agentResponse<{ path?: string; canceled?: boolean }>(response);
+  return body.path ?? null;
+}
+
+export async function updateAgent(
+  agentId: string,
+  patch: UpdateAgentInput,
+): Promise<UserAgentStatus> {
+  const response = await fetch(`/api/agents/${agentId}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const body = await response.json() as {
+    agent?: UserAgentStatus;
+    error?: string;
+    code?: string;
+    runningSessions?: number;
+  };
+  if (!response.ok) {
+    if (body.code === 'AGENT_HAS_RUNNING_SESSIONS' && typeof body.runningSessions === 'number') {
+      throw new Error(`${AGENT_DISABLE_BLOCKED_PREFIX}${body.runningSessions}`);
+    }
+    throw new Error(body.error ?? `Agent request failed (${response.status})`);
+  }
+  return cacheAgent(body.agent!);
+}
+
+export async function deleteAgent(agentId: string): Promise<void> {
+  const response = await fetch(`/api/agents/${agentId}`, { method: 'DELETE' });
+  await agentResponse<{ ok: boolean }>(response);
+  if (agentCache) {
+    agentCache = {
+      agents: agentCache.agents.filter(candidate => candidate.id !== agentId),
+      expiresAt: agentCache.expiresAt,
+    };
+  }
+}
+
+/** Ask the host to open the native file picker so the user can browse for a
+ *  CLI executable instead of typing the path (macOS only; mirrors
+ *  `pickWorkspaceFolder`). Resolves to the picked absolute path, or null when
+ *  the dialog was canceled. Kind-level: drafts have no Agent id yet. */
+export async function pickAgentCliPath(executor: Executor): Promise<string | null> {
+  const response = await fetch(`/api/agents/${executor}/pick-cli-path`, { method: 'POST' });
+  const body = await response.json().catch(() => ({})) as { path?: string; canceled?: boolean; error?: string };
+  if (!response.ok) throw new Error(body.error ?? `pick-cli-path failed: ${response.status}`);
+  return body.path ?? null;
+}
+
+export async function installAgentCli(executor: Executor): Promise<AgentInstallResult> {
+  const response = await fetch(`/api/agents/${executor}/install-cli`, {
+    method: 'POST',
+  });
+  return agentResponse<AgentInstallResult>(response);
+}
+
+export async function installAgentProxy(executor: Executor): Promise<AgentInstallResult> {
+  const response = await fetch(`/api/agents/${executor}/install-proxy`, {
+    method: 'POST',
+  });
+  return agentResponse<AgentInstallResult>(response);
+}
+
+/** Read-only "newer compatible Proxy release available?" probe (issue #86).
+ *  No agent cache update — nothing about the installed state changes. */
+export async function checkAgentProxyUpdate(
+  executor: Executor,
+): Promise<AgentProxyUpdateCheck> {
+  const response = await fetch(`/api/agents/${executor}/check-proxy-update`, {
+    method: 'POST',
+  });
+  return agentResponse<AgentProxyUpdateCheck>(response);
+}
+
+export async function loadOnboarding(): Promise<OnboardingState> {
+  const response = await fetch('/api/onboarding');
+  return agentResponse<OnboardingState>(response);
+}
+
+export async function saveOnboardingProjectRoot(
+  path: string,
+): Promise<OnboardingProjectRootResult> {
+  const response = await fetch('/api/onboarding/project-root', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  return agentResponse<OnboardingProjectRootResult>(response);
+}
+
+export async function completeOnboarding(): Promise<OnboardingState> {
+  const response = await fetch('/api/onboarding/complete', { method: 'POST' });
+  return agentResponse<OnboardingState>(response);
+}
+
+export async function resetOnboarding(): Promise<void> {
+  const response = await fetch('/api/onboarding/reset', { method: 'POST' });
+  await agentResponse<{ ok: boolean }>(response);
+}
+
+export async function loadSlashCommands(
+  executor: 'claude' | 'codex',
+  workspaceId?: string,
+  agentId?: string | null,
+): Promise<import('@gian/shared').SlashCommand[]> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set('workspace', workspaceId);
+  if (agentId) params.set('agent', agentId);
+  const query = params.size > 0 ? `?${params.toString()}` : '';
+  const url = `/api/proxy/${executor}/slash${query}`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const body = (await res.json()) as { commands?: import('@gian/shared').SlashCommand[] };
+  return body.commands ?? [];
+}
+
+export async function loadSessionSlashCommands(
+  sessionId: string,
+): Promise<import('@gian/shared').SlashCommand[]> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/slash`);
+  if (!res.ok) return [];
+  const body = (await res.json()) as { commands?: import('@gian/shared').SlashCommand[] };
+  return body.commands ?? [];
+}
+
+export async function loadNativeConfig(
+  sessionId: string,
+): Promise<{
+  state: import('@gian/shared').ExecutorConfigState;
+  options: import('@gian/shared').NativeConfigOption[];
+} | null> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/native-config`);
+  if (!res.ok) return null;
+  return (await res.json()) as {
+    state: import('@gian/shared').ExecutorConfigState;
+    options: import('@gian/shared').NativeConfigOption[];
+  };
+}
+
+export interface FileDiffResult {
+  diff: string;
+  /** True when the host capped the patch at its safe-output prefix. The
+   *  working-tree /diff route does not truncate today, but the history route
+   *  does — keep the flag wired so a future cap surfaces instead of silently
+   *  rendering a partial patch. */
+  truncated: boolean;
+}
+
+export async function loadDiff(
+  workingTreeId: string,
+  path: string,
+  scope: ChangeScope = 'all',
+  sha?: string | null,
+  base?: string | null,
+  sessionId?: string | null,
+  turn?: number | null,
+  /** Last-turn only: the producing root of a cross-tree entry, so the host
+   *  can disambiguate same-named paths and skip viewed-tree fallbacks. */
+  root?: string | null,
+): Promise<FileDiffResult> {
+  const params = new URLSearchParams({ path });
+  if (scope !== 'all') params.set('scope', scope);
+  if (scope === 'commit' && sha) params.set('sha', sha);
+  if (scope === 'branch' && base) params.set('base', base);
+  if (scope === 'lastturn' && sessionId) params.set('session', sessionId);
+  if (scope === 'lastturn' && turn != null) params.set('turn', String(turn));
+  if (scope === 'lastturn' && root) params.set('root', root);
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?${params.toString()}`);
+  // Throws on failure (Phase 3b): the diff view's loading→fill-or-fail timing
+  // must distinguish a failed load (error state + retry) from an empty diff.
+  if (!res.ok) throw new Error(`Diff load failed (${res.status})`);
+  const body = (await res.json()) as { diff: string; truncated?: boolean };
+  return { diff: body.diff ?? '', truncated: body.truncated === true };
+}
+
+export interface WorkspacePatch {
+  name?: string;
+  pinned?: boolean;
+}
+
+export interface CreateWorkspaceResult {
+  workspace: Workspace | null;
+  notes: string[];
+  error?: string;
+}
+
+export interface CreateWorkspaceOptions {
+  /** Optional git remote URL to clone — ignored when `path` is set. */
+  gitRemote?: string;
+  /** Absolute path (~ allowed) to adopt as workspace as-is. When set, no
+   *  mkdir/git-init/clone happens; the dir is used verbatim. */
+  path?: string;
+}
+
+export interface PickFolderResult {
+  /** Absolute POSIX path the user selected, or undefined when canceled. */
+  path?: string;
+  /** True when the native dialog was dismissed by the user. */
+  canceled?: boolean;
+  /** Set when the host couldn't run the picker (e.g. non-macOS host). */
+  error?: string;
+}
+
+export async function pickWorkspaceFolder(): Promise<PickFolderResult> {
+  const res = await fetch('/api/workspaces/pick-folder', { method: 'POST' });
+  const body = (await res.json().catch(() => ({}))) as PickFolderResult;
+  if (!res.ok) {
+    return { error: body.error ?? `Picker failed: ${res.status}` };
+  }
+  return body;
+}
+
+export async function createWorkspace(
+  name: string,
+  options: CreateWorkspaceOptions = {},
+): Promise<CreateWorkspaceResult> {
+  const res = await fetch('/api/workspaces', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      ...(options.gitRemote ? { git_remote: options.gitRemote } : {}),
+      ...(options.path ? { path: options.path } : {}),
+    }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { workspace?: Workspace; notes?: string[]; error?: string };
+  if (!res.ok) {
+    return { workspace: null, notes: body.notes ?? [], error: body.error ?? `Create failed: ${res.status}` };
+  }
+  return { workspace: body.workspace ?? null, notes: body.notes ?? [] };
+}
+
+export interface CloneWorkspaceRepoResult {
+  /** Absolute path the repo was cloned into (<workspace_root>/<name>). */
+  path?: string;
+  /** Directory name used for the clone (form name, else URL-derived). */
+  name?: string;
+  error?: string;
+}
+
+/** Clone-only: materialize a git remote under the workspace root WITHOUT
+ *  registering a workspace (issue #57 new-workspace form). The form fills
+ *  its path field from the result; Create then adopts that path. */
+export async function cloneWorkspaceRepo(
+  gitRemote: string,
+  name?: string,
+): Promise<CloneWorkspaceRepoResult> {
+  const res = await fetch('/api/workspaces/clone', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ git_remote: gitRemote, ...(name ? { name } : {}) }),
+  });
+  const body = (await res.json().catch(() => ({}))) as CloneWorkspaceRepoResult;
+  if (!res.ok) {
+    return { error: body.error ?? `Clone failed: ${res.status}` };
+  }
+  return body;
+}
+
+export async function loadClaudeMd(workspaceId: string): Promise<string> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/claude_md`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `CLAUDE.md load failed (${res.status})`);
+  }
+  const body = (await res.json()) as { content: string };
+  return body.content ?? '';
+}
+
+export async function saveClaudeMd(workspaceId: string, content: string): Promise<boolean> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/claude_md`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  return res.ok;
+}
+
+export async function updateWorkspace(id: string, patch: WorkspacePatch): Promise<Workspace | null> {
+  const res = await fetch(`/api/workspaces/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as Workspace;
+}
+
+export async function deleteWorkspace(id: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/workspaces/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: 'Unknown error' }))) as { error?: string };
+    return { ok: false, error: body.error ?? `Delete failed: ${res.status}` };
+  }
+  return { ok: true };
+}
+
+export async function reorderWorkspaces(ids: string[]): Promise<void> {
+  await fetch('/api/workspaces/reorder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+}
+
+/** Sidebar drag reorder (2026-08-29): persist the Tasks rail's manual order.
+ *  Returns false on failure so the operation layer can settle the run as
+ *  failed (same contract as `completeSubtask`). */
+export async function reorderTasks(ids: string[]): Promise<boolean> {
+  try {
+    const res = await fetch('/api/tasks/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Sidebar drag reorder (2026-08-29): persist a session scope's manual order —
+ *  `workspace` = a Sessions rail workspace group (parentId null = unfiled),
+ *  `task` = a Tasks rail subtask list. Same return contract as
+ *  `reorderTasks`. */
+export async function reorderSessions(
+  scope: 'workspace' | 'task',
+  parentId: string | null,
+  ids: string[],
+): Promise<boolean> {
+  try {
+    const res = await fetch('/api/sessions/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, parentId, ids }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (PRD-v3) — Subtasks are just sessions filtered by task_id, so there is
+// no subtask endpoint here. Tasks are primarily seeded from `state_sync` and
+// kept fresh via the WS `task:*` messages; this REST helper mirrors the
+// workspace ones for the initial / fallback fetch. Task creation goes through
+// the WS `task:create` operation (`task.create`) — the REST `createTask`
+// helper was a dead surface and was deleted in Phase 4 of the UI Operation
+// Layer (inventory §5).
+// ---------------------------------------------------------------------------
+
+export async function loadTasks(): Promise<Task[]> {
+  try {
+    const res = await fetch('/api/tasks');
+    if (!res.ok) return [];
+    return (await res.json()) as Task[];
+  } catch {
+    return [];
+  }
+}
+
+/** PRD-v3 P3 A1 — create a Subtask (session with type='subtask' + task_id)
+ *  under a Task. Returns the created session or null. The host broadcasts
+ *  `session:created` so the global session list updates. */
+export async function createSubtask(
+  taskId: string,
+  input: {
+    remote_environment_id?: string;
+    remote_session_id?: string;
+    request_id?: string;
+    session_config?: Record<string, import('@gian/shared').ConfigValue>;
+    turn_config?: Record<string, import('@gian/shared').ConfigValue>;
+    workspace_id: string;
+    agent_id: string;
+    name?: string;
+    model?: string | null;
+    approval_mode?: import('@gian/shared').ApprovalMode;
+    thinking_effort?: import('@gian/shared').ThinkingEffort | null;
+    service_tier?: 'fast' | null;
+  },
+): Promise<Session | null> {
+  try {
+    const res = await fetch(`/api/tasks/${taskId}/subtasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) return null;
+    return ((await res.json()) as { session: Session }).session;
+  } catch {
+    return null;
+  }
+}
+
+/** PRD-v3 P3 — mark a Subtask's session done. The host flips status to 'done'
+ *  (sets `completed_at`, spec §B) and runs the summarizer, then broadcasts
+ *  `session:updated` so the row reflects it. Returns false on failure so the
+ *  operation layer can settle the run as failed. */
+export async function completeSubtask(sessionId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/complete`, { method: 'POST' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Reopen a completed Subtask (spec §B) — clears `completed_at`. Returns
+ *  false on failure (same contract as `completeSubtask`). */
+export async function reopenSubtask(sessionId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/reopen`, { method: 'POST' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function mergeSession(id: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/sessions/${id}/merge`, { method: 'POST' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: body.error ?? `Merge failed: ${res.status}` };
+  }
+  return { ok: true };
+}
+
+export async function dropSession(id: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/sessions/${id}/drop`, { method: 'POST' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: body.error ?? `Drop failed: ${res.status}` };
+  }
+  return { ok: true };
+}
+
+export async function loadSettings(): Promise<SystemConfig | null> {
+  const res = await fetch('/api/settings');
+  if (!res.ok) return null;
+  return (await res.json()) as SystemConfig;
+}
+
+export async function loadTerminalOptions(): Promise<TerminalOptions> {
+  const res = await fetch('/api/settings/terminal-options');
+  if (!res.ok) throw new Error(`Failed to load terminal options (${res.status})`);
+  return (await res.json()) as TerminalOptions;
+}
+
+export async function saveSettings(partial: Partial<SystemConfig>): Promise<SystemConfig | null> {
+  const res = await fetch('/api/settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(partial),
+  });
+  if (!res.ok) return null;
+  if (partial.translation) window.dispatchEvent(new Event('gian:translation-settings'));
+  return (await res.json()) as SystemConfig;
+}
+
+/**
+ * Fetch the WS auth token for the current login. The login cookie is
+ * httpOnly so JS cannot read it directly; this endpoint echoes it back in
+ * the JSON body. Returns null if not authenticated (caller should re-login).
+ */
+export async function fetchWsToken(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/auth/ws-token');
+    if (!res.ok) return null;
+    const body = (await res.json()) as { token?: string };
+    return body.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function whoAmI(): Promise<{ user: string } | null> {
+  try {
+    const res = await fetch('/api/auth/me');
+    if (res.ok) return (await res.json()) as { user: string };
+    if (res.status === 401) return null;
+    return { user: 'dev' };
+  } catch {
+    return { user: 'dev' };
+  }
+}
+
+export async function login(username: string, password: string): Promise<{ user: string } | null> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as { user: string };
+}
+
+export async function logout(): Promise<void> {
+  await fetch('/api/auth/logout', { method: 'POST' });
+}
+
+// ---------------------------------------------------------------------------
+// Native Sessions (Spaces view → Native Sessions tab)
+// ---------------------------------------------------------------------------
+
+export async function loadNativeSessions(
+  workspaceId: string,
+): Promise<import('@gian/shared').NativeSession[]> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/native-sessions`);
+  if (!res.ok) return [];
+  try {
+    return parseListNativeSessionsResponse(await res.json()).sessions;
+  } catch {
+    return [];
+  }
+}
+
+export async function adoptNativeSession(
+  workspaceId: string,
+  body: import('@gian/shared').AdoptNativeSessionRequest,
+): Promise<{ session: Session | null; error?: string }> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/native-sessions/adopt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { session?: Session; error?: string };
+  if (!res.ok) {
+    return { session: null, error: data.error ?? `Adopt failed: ${res.status}` };
+  }
+  return { session: data.session ?? null };
+}
+
+export async function deleteNativeSession(
+  workspaceId: string,
+  executor: import('@gian/shared').Executor,
+  nativeId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(
+    `/api/workspaces/${workspaceId}/native-sessions/${nativeId}?executor=${executor}`,
+    { method: 'DELETE' },
+  );
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) return { ok: false, error: data.error ?? `Delete failed: ${res.status}` };
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Config tab — repository info + worktrees
+// ---------------------------------------------------------------------------
+
+export type PendingGitOp =
+  | { kind: 'merge'; mergeHead: string }
+  | { kind: 'rebase' }
+  | { kind: 'cherry-pick'; head: string }
+  | { kind: 'revert'; head: string };
+
+export interface RepoInfo {
+  git: {
+    isRepo: boolean;
+    remote: string | null;
+    defaultBranch: string | null;
+    currentBranch: string | null;
+    lastCommit: { hash: string; message: string; age: string } | null;
+    modifiedCount: number;
+    /** Set when the workspace tree is mid-merge / mid-rebase / etc. — surfaces
+     *  in the Git tab so the user knows why git operations are stuck. */
+    pendingOp: PendingGitOp | null;
+  };
+  claudeMd: { exists: boolean; lines: number; mtime: string | null };
+}
+
+export interface WorkspaceTree {
+  id: string;
+  kind: 'main' | 'worktree';
+  label: string;
+  path: string;
+  branch: string | null;
+  isDirty: boolean;
+  modifiedCount: number;
+  claudeMd: { exists: boolean; lines: number; mtime: string | null };
+  session?: { id: string; name: string | null };
+}
+
+export async function loadRepoInfo(workspaceId: string): Promise<RepoInfo | null> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/repo-info`);
+  if (!res.ok) return null;
+  return (await res.json()) as RepoInfo;
+}
+
+export async function loadWorkspaceTrees(workspaceId: string): Promise<WorkspaceTree[]> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/trees`);
+  if (!res.ok) return [];
+  return (await res.json()) as WorkspaceTree[];
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Git tab — branches, remote branches, fetch
+// ---------------------------------------------------------------------------
+
+export interface LocalBranch {
+  name: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  gone: boolean;
+  lastCommit: { hash: string; subject: string; age: string } | null;
+  /** Absolute path of the worktree that has this branch checked out, or null. */
+  worktreePath: string | null;
+  /** True for branches auto-created by Gian worktree sessions — currently
+   *  `worktree/*` (and legacy `gian/*` from older sessions). */
+  isWorktreeBranch: boolean;
+  /** Set when worktreePath corresponds to a Gian session's worktree. */
+  session: { id: string; name: string | null } | null;
+}
+
+export interface RemoteBranch {
+  fullName: string;       // e.g. "origin/main"
+  remote: string;         // e.g. "origin"
+  branch: string;         // e.g. "main"
+  lastCommit: { hash: string; subject: string; age: string };
+  hasLocalTracking: boolean;
+}
+
+export async function loadBranches(workspaceId: string): Promise<LocalBranch[]> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/branches`);
+  if (!res.ok) return [];
+  return (await res.json()) as LocalBranch[];
+}
+
+export async function loadRemoteBranches(workspaceId: string, search?: string): Promise<RemoteBranch[]> {
+  const qs = search ? `?search=${encodeURIComponent(search)}` : '';
+  const res = await fetch(`/api/workspaces/${workspaceId}/remote-branches${qs}`);
+  if (!res.ok) return [];
+  return (await res.json()) as RemoteBranch[];
+}
+
+export async function fetchRemotes(workspaceId: string): Promise<{ ok: boolean; fetchedAt?: string; error?: string }> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/fetch`, { method: 'POST' });
+  const body = await res.json().catch(() => ({} as Record<string, unknown>));
+  if (!res.ok) {
+    const err = (body as { error?: string }).error;
+    return { ok: false, error: err ?? `Fetch failed (${res.status})` };
+  }
+  return body as { ok: boolean; fetchedAt: string };
+}
+
+export async function abortPendingGitOp(workspaceId: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/abort-merge`, { method: 'POST' });
+  const body = await res.json().catch(() => ({} as Record<string, unknown>));
+  if (!res.ok) return { ok: false, error: (body as { error?: string }).error ?? `Abort failed (${res.status})` };
+  return { ok: true };
+}
+
+export interface UploadedAttachment {
+  path: string;
+  name: string;
+  size: number;
+  mime: string;
+}
+
+export async function uploadAttachment(
+  sessionId: string,
+  blob: Blob,
+  filename: string,
+): Promise<UploadedAttachment> {
+  const form = new FormData();
+  form.set('file', blob, filename);
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`upload failed (${res.status}): ${detail || res.statusText}`);
+  }
+  return (await res.json()) as UploadedAttachment;
+}
+
+export async function openFileWith(
+  workingTreeId: string,
+  path: string,
+  editorId?: string,
+): Promise<{ ok: true } | { error: string }> {
+  return postOpen(workingTreeId, { path, ...(editorId ? { editor_id: editorId } : {}) });
+}
+
+/** Reveal a working tree in the OS file manager (Finder). Moved here from
+ *  the inline fetch in spaces-git-pane.tsx (Phase 3b, inventory §4.1). */
+export async function revealWorkingTree(
+  workingTreeId: string,
+): Promise<{ ok: true } | { error: string }> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/reveal`, {
+    method: 'POST',
+  });
+  if (res.ok) return { ok: true };
+  const body = (await res.json().catch(() => ({}))) as { error?: string };
+  return { error: body.error ?? `Reveal failed (${res.status})` };
+}
+
+/** Open a file with a named macOS application (from `loadApps`). */
+export async function openFileWithApp(
+  workingTreeId: string,
+  path: string,
+  app: string,
+): Promise<{ ok: true } | { error: string }> {
+  return postOpen(workingTreeId, { path, app });
+}
+
+/** Open a file with a fixed system opener: system default, reveal in Finder,
+ *  or a Terminal at the file's folder. ('browser' is handled client-side.) */
+export async function openFileBuiltin(
+  workingTreeId: string,
+  path: string,
+  builtin: 'default' | 'finder' | 'terminal',
+): Promise<{ ok: true } | { error: string }> {
+  return postOpen(workingTreeId, { path, builtin });
+}
+
+async function postOpen(
+  workingTreeId: string,
+  body: { path: string; editor_id?: string; app?: string; builtin?: string },
+): Promise<{ ok: true } | { error: string }> {
+  return postOpenResponse(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/open`,
+    body,
+  );
+}
+
+/** Open an already-displayed attachment (absolute path under Host attachments). */
+export async function openAbsoluteFile(
+  path: string,
+  body: { editor_id?: string; app?: string; builtin?: string },
+): Promise<{ ok: true } | { error: string }> {
+  return postOpenResponse('/api/files/open', { path, ...body });
+}
+
+async function postOpenResponse(
+  url: string,
+  body: { path: string; editor_id?: string; app?: string; builtin?: string },
+): Promise<{ ok: true } | { error: string }> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) return { ok: true };
+  try {
+    return await res.json() as { error: string };
+  } catch {
+    return { error: `HTTP ${res.status}` };
+  }
+}
+
+/** Installed applications for the "Open with…" menu (macOS; [] elsewhere). */
+export async function loadApps(): Promise<string[]> {
+  try {
+    const res = await fetch('/api/apps');
+    if (!res.ok) return [];
+    const body = (await res.json()) as { apps?: string[] };
+    return body.apps ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Flat, recursive list of every file path in the working tree (for the
+ *  FILES panel search box). Returns [] on error. */
+export async function loadAllFiles(workingTreeId: string): Promise<string[]> {
+  try {
+    const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/files`);
+    if (!res.ok) return [];
+    const body = (await res.json()) as { files?: string[] };
+    return body.files ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ── Conversation-bound Schedules (Issue #51 / ADR-0053, contract M/N/L) ─────
+// Reads are plain GETs; every write carries a stable `Idempotency-Key` header
+// minted once per logical user command (the operation layer mints it at
+// dispatch time) and errors arrive in the closed
+// `{ error: { code, message, retryable } }` envelope.
+
+export class ScheduleApiError extends Error {
+  readonly code: import('@gian/shared').ScheduleErrorCode;
+  readonly status: number;
+  readonly retryable: boolean;
+
+  constructor(input: { code: import('@gian/shared').ScheduleErrorCode; message: string; status: number; retryable?: boolean }) {
+    super(input.message);
+    this.name = 'ScheduleApiError';
+    this.code = input.code;
+    this.status = input.status;
+    this.retryable = input.retryable ?? false;
+  }
+}
+
+async function scheduleResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => null) as
+    | (T & { error?: { code?: import('@gian/shared').ScheduleErrorCode; message?: string; retryable?: boolean } })
+    | null;
+  if (!response.ok) {
+    throw new ScheduleApiError({
+      code: body?.error?.code ?? 'INTERNAL_ERROR',
+      message: body?.error?.message ?? `Schedule request failed (${response.status})`,
+      status: response.status,
+      retryable: body?.error?.retryable,
+    });
+  }
+  return body as T;
+}
+
+export interface ScheduleListQuery {
+  statuses?: import('@gian/shared').ScheduleStatus[];
+  cursor?: string | null;
+  limit?: number;
+}
+
+export async function loadSchedules(query: ScheduleListQuery = {}): Promise<import('@gian/shared').ScheduleListResponse> {
+  const params = new URLSearchParams();
+  if (query.statuses && query.statuses.length > 0) params.set('status', query.statuses.join(','));
+  if (query.cursor) params.set('cursor', query.cursor);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/schedules${suffix}`);
+  return scheduleResponse<import('@gian/shared').ScheduleListResponse>(response);
+}
+
+export async function loadSchedule(scheduleId: string): Promise<import('@gian/shared').Schedule> {
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}`);
+  return scheduleResponse<import('@gian/shared').Schedule>(response);
+}
+
+export async function loadScheduleRuns(
+  scheduleId: string,
+  query: { cursor?: string | null; limit?: number } = {},
+): Promise<import('@gian/shared').ScheduleRunListResponse> {
+  const params = new URLSearchParams();
+  if (query.cursor) params.set('cursor', query.cursor);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/runs${suffix}`);
+  return scheduleResponse<import('@gian/shared').ScheduleRunListResponse>(response);
+}
+
+export interface ScheduleUpdateInput {
+  expectedRevision: number;
+  idempotencyKey: string;
+  name?: string;
+  prompt?: string;
+  trigger?: import('@gian/shared').ScheduleTrigger;
+  timezone?: string;
+  misfirePolicy?: import('@gian/shared').ScheduleMisfirePolicy;
+}
+
+export async function updateSchedule(
+  scheduleId: string,
+  input: ScheduleUpdateInput,
+): Promise<import('@gian/shared').Schedule> {
+  const body: Record<string, unknown> = { expected_revision: input.expectedRevision };
+  if (input.name !== undefined) body.name = input.name;
+  if (input.prompt !== undefined) body.prompt = input.prompt;
+  if (input.trigger !== undefined) body.trigger = input.trigger;
+  if (input.timezone !== undefined) body.timezone = input.timezone;
+  if (input.misfirePolicy !== undefined) body.misfire_policy = input.misfirePolicy;
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', 'Idempotency-Key': input.idempotencyKey },
+    body: JSON.stringify(body),
+  });
+  return scheduleResponse<import('@gian/shared').Schedule>(response);
+}
+
+export type ScheduleActionKind = 'pause' | 'resume' | 'run' | 'archive';
+
+/** pause/resume/archive return the updated Schedule; run returns the created
+ *  (or converged) canonical ScheduleRun. */
+export async function scheduleAction(
+  scheduleId: string,
+  action: ScheduleActionKind,
+  input: { idempotencyKey: string; expectedRevision?: number },
+): Promise<import('@gian/shared').Schedule | import('@gian/shared').ScheduleRun> {
+  const body: Record<string, unknown> = {};
+  if (input.expectedRevision !== undefined) body.expected_revision = input.expectedRevision;
+  const response = await fetch(
+    `/api/schedules/${encodeURIComponent(scheduleId)}/${action}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': input.idempotencyKey },
+      body: JSON.stringify(body),
+    },
+  );
+  return scheduleResponse<import('@gian/shared').Schedule | import('@gian/shared').ScheduleRun>(response);
+}
+
+export async function loadScheduleConfirmations(
+  query: { status?: import('@gian/shared').ScheduleConfirmationStatus; limit?: number } = {},
+): Promise<import('@gian/shared').ScheduleConfirmation[]> {
+  const params = new URLSearchParams();
+  if (query.status) params.set('status', query.status);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/schedule-confirmations${suffix}`);
+  const body = await scheduleResponse<{ confirmations: import('@gian/shared').ScheduleConfirmation[] }>(response);
+  return body.confirmations;
+}
+
+export async function resolveScheduleConfirmation(
+  confirmationId: string,
+  decision: 'approve' | 'reject',
+  expectedInbox?: { id: string; generation: number },
+): Promise<import('@gian/shared').ScheduleConfirmation> {
+  const response = await fetch(
+    `/api/schedule-confirmations/${encodeURIComponent(confirmationId)}/resolve`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision,
+        ...(expectedInbox ? { expected_inbox: expectedInbox } : {}),
+      } satisfies import('@gian/shared').ScheduleConfirmationResolveRequest),
+    },
+  );
+  return scheduleResponse<import('@gian/shared').ScheduleConfirmation>(response);
+}
+
+// ---------------------------------------------------------------------------
+// Customization Inventory (Issue #50) — read-only.
+// Wire shapes mirror `packages/proxy-protocol/src/customization.ts` (the
+// frozen contract); they are re-declared here because the protocol package is
+// Node-only (node:buffer/node:path) and the web bundle must not import it.
+// The Host API is `packages/host/src/web/routes/customizations.ts`.
+// ---------------------------------------------------------------------------
+
+export const CUSTOMIZATION_KINDS = ['skill', 'mcp', 'hook', 'rule'] as const;
+export type CustomizationKind = typeof CUSTOMIZATION_KINDS[number];
+
+export type CustomizationListStatus =
+  'ok' | 'provider_unsupported' | 'proxy_unsupported' | 'unavailable';
+export type InventoryCompleteness = 'effective' | 'configured' | 'partial' | 'none';
+export type CustomizationActivation =
+  'enabled' | 'disabled' | 'shadowed' | 'pending_trust' | 'invalid' | 'unknown';
+export type CustomizationScopeLevel = 'user' | 'workspace' | 'directory' | 'system' | 'unknown';
+export type CustomizationOriginKind =
+  'builtin' | 'user_file' | 'project_file' | 'plugin' | 'managed' | 'unknown';
+export type CustomizationDiscoveryMethod =
+  'provider_api' | 'provider_cli' | 'config_parse' | 'filesystem_scan';
+export type RuleEffectStatus =
+  'effective' | 'imported' | 'subtree' | 'inactive' | 'unreadable' | 'unknown' | 'configured';
+
+export interface CustomizationDiagnostic {
+  code: string;
+  message: string;
+}
+
+interface CustomizationItemBase {
+  id: string;
+  kind: CustomizationKind;
+  name: string;
+  description?: string;
+  nativeType?: string;
+  nativeStatus?: string;
+  activation: CustomizationActivation;
+  scope: { level: CustomizationScopeLevel; root?: string; native?: string };
+  origin: { kind: CustomizationOriginKind; path?: string; label?: string };
+  discovery: { method: CustomizationDiscoveryMethod };
+  warnings?: CustomizationDiagnostic[];
+}
+
+export interface SkillCustomizationItem extends CustomizationItemBase {
+  kind: 'skill';
+  skill: {
+    format: 'agent-skill' | 'legacy-command' | 'provider-builtin' | 'unknown';
+    entryPath?: string;
+    invocation?: string;
+    userInvocable: boolean | null;
+    modelInvocable: boolean | null;
+  };
+}
+
+export interface McpCustomizationItem extends CustomizationItemBase {
+  kind: 'mcp';
+  mcp: {
+    transport: 'stdio' | 'http' | 'sse' | 'websocket' | 'other' | 'unknown';
+    targetSummary?: string;
+    toolCount?: number;
+  };
+}
+
+export interface HookCustomizationItem extends CustomizationItemBase {
+  kind: 'hook';
+  hook: {
+    nativeEvent: string;
+    matcher?: string;
+    handler: { nativeType: string; targetSummary: string };
+    timeoutMs?: number;
+  };
+}
+
+export interface RuleCustomizationItem extends CustomizationItemBase {
+  kind: 'rule';
+  rule: {
+    appliesTo?: string;
+    lineCount?: number;
+    truncated: boolean;
+    status: RuleEffectStatus;
+  };
+}
+
+export type CustomizationItem =
+  SkillCustomizationItem | McpCustomizationItem | HookCustomizationItem | RuleCustomizationItem;
+
+export interface CustomizationListResult {
+  kind: CustomizationKind;
+  status: CustomizationListStatus;
+  completeness: InventoryCompleteness;
+  observedAt: string;
+  items: CustomizationItem[];
+  truncated: boolean;
+  diagnostics: CustomizationDiagnostic[];
+}
+
+export interface CustomizationInventoryResult {
+  agentId: string;
+  workspaceId: string | null;
+  fetchedAt: string;
+  kinds: Partial<Record<CustomizationKind, CustomizationListResult>>;
+}
+
+export interface CustomizationDetailResult {
+  kind: CustomizationKind;
+  id: string;
+  status: 'ok' | 'unavailable';
+  observedAt: string;
+  text: string;
+  truncated: boolean;
+  diagnostics?: CustomizationDiagnostic[];
+}
+
+function customizationQuery(workspaceId: string | null, refresh: boolean): string {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set('workspaceId', workspaceId);
+  if (refresh) params.set('refresh', '1');
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
+/** One-shot aggregate inventory for one Agent + scope. Per-kind failures are
+ *  facts inside each kind's Result — this only rejects on request-level
+ *  (4xx) or transport/502 failures. */
+export async function loadCustomizationInventory(
+  agentId: string,
+  workspaceId: string | null,
+  options: { refresh?: boolean } = {},
+): Promise<CustomizationInventoryResult> {
+  const response = await fetch(
+    `/api/agents/${encodeURIComponent(agentId)}/customizations${customizationQuery(workspaceId, options.refresh ?? false)}`,
+  );
+  return agentResponse<CustomizationInventoryResult>(response);
+}
+
+/** Lazy detail (entry text / sanitized configuration view) for one item. */
+export async function loadCustomizationDetail(
+  agentId: string,
+  workspaceId: string | null,
+  kind: CustomizationKind,
+  itemId: string,
+  options: { refresh?: boolean } = {},
+): Promise<CustomizationDetailResult> {
+  const response = await fetch(
+    `/api/agents/${encodeURIComponent(agentId)}/customizations/${kind}/items/${encodeURIComponent(itemId)}${customizationQuery(workspaceId, options.refresh ?? false)}`,
+  );
+  return agentResponse<CustomizationDetailResult>(response);
+}
+
+/** Same-origin link preview query; Host owns SSRF validation. */
+export function fetchLinkPreviewResponse(url: string, signal?: AbortSignal): Promise<Response> {
+  return fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal });
+}
+
+// ---------------------------------------------------------------------------
+// Inbox (Issue #53 / 0.6.7) — the Inbox's own read-state endpoints. Business
+// decisions (approve/answer/…) stay on their domain operation; they are NOT
+// Inbox endpoints. Errors arrive as `{ error, message }` with 404/409/400.
+// ---------------------------------------------------------------------------
+
+export class InboxApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(input: { code: string; message: string; status: number }) {
+    super(input.message);
+    this.name = 'InboxApiError';
+    this.code = input.code;
+    this.status = input.status;
+  }
+}
+
+async function inboxResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => null) as
+    | (T & { error?: string; message?: string })
+    | null;
+  if (!response.ok) {
+    throw new InboxApiError({
+      code: body?.error ?? 'inbox_request_failed',
+      message: body?.message ?? `Inbox request failed (${response.status})`,
+      status: response.status,
+    });
+  }
+  return body as T;
+}
+
+function isInboxPage(body: unknown): body is import('@gian/shared').InboxPage {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const page = body as Record<string, unknown>;
+  return Array.isArray(page.items)
+    && page.items.every(isInboxItemPublic)
+    && typeof page.pending_count === 'number'
+    && typeof page.inbox_revision === 'number'
+    && (page.next_cursor === null || typeof page.next_cursor === 'string');
+}
+
+function parseInboxPage(body: unknown): import('@gian/shared').InboxPage {
+  if (!isInboxPage(body)) {
+    throw new InboxApiError({
+      code: 'invalid_response',
+      message: 'Inbox list response had an invalid shape.',
+      status: 200,
+    });
+  }
+  return body;
+}
+
+export interface InboxListQuery {
+  status?: 'pending' | 'closed' | 'all';
+  limit?: number;
+  cursor?: string | null;
+}
+
+export async function loadInboxPage(
+  query: InboxListQuery = {},
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').InboxPage> {
+  const params = new URLSearchParams();
+  if (query.status) params.set('status', query.status);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', query.cursor);
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/inbox${suffix}`, { signal });
+  return parseInboxPage(await inboxResponse<unknown>(response));
+}
+
+/** One item's current canonical state — the decision-time freshness re-read. */
+export async function loadInboxItem(
+  id: string,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}`, { signal });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox detail response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+/** Mark exactly the observed generation read. A stale generation is a 409
+ *  `stale` — the caller refreshes canonical state instead of retrying the
+ *  old mutation against the latest item. */
+export async function markInboxRead(
+  id: string,
+  generation: number,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}/read`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ generation }),
+  });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox read response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+export async function markInboxUnread(
+  id: string,
+  generation: number,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}/unread`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ generation }),
+  });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox unread response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+/** Version+channel scoped skip for a product/Integration update item. */
+export async function skipInboxVersion(
+  id: string,
+  generation: number,
+  version: string,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}/skip-version`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ generation, version }),
+  });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox skip-version response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// Search (Issue #168 / 0.6.7, contract: shared/search.ts). The UI never
+// interpolates query text into anything but URL parameters; ranges are
+// UTF-16 offsets into the returned snippet/original text. A stale cursor is
+// 409 `stale_cursor` — the caller restarts the query from the top.
+// ---------------------------------------------------------------------------
+
+export class SearchApiError extends Error {
+  readonly code: import('@gian/shared').SearchFailureCode | 'invalid_response' | 'http';
+  readonly status: number;
+
+  constructor(input: { code: SearchApiError['code']; message: string; status: number }) {
+    super(input.message);
+    this.name = 'SearchApiError';
+    this.code = input.code;
+    this.status = input.status;
+  }
+}
+
+async function searchResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => null) as
+    | (T & { error?: string | { code?: string; message?: string }; message?: string })
+    | null;
+  if (!response.ok) {
+    const raw = body?.error;
+    const code = typeof raw === 'string' ? raw : raw?.code;
+    const message = (typeof raw === 'object' ? raw?.message : undefined) ?? body?.message
+      ?? `Search request failed (${response.status})`;
+    throw new SearchApiError({
+      code: (code as SearchApiError['code']) ?? 'http',
+      message,
+      status: response.status,
+    });
+  }
+  return body as T;
+}
+
+function isSearchCoverage(value: unknown): value is import('@gian/shared').SearchCoverage {
+  if (!value || typeof value !== 'object') return false;
+  const coverage = value as Record<string, unknown>;
+  return ['ready', 'building', 'partial', 'error'].includes(String(coverage.state))
+    && typeof coverage.complete === 'boolean'
+    && typeof coverage.indexed === 'number'
+    && typeof coverage.pending === 'number';
+}
+
+function isSearchResult(value: unknown): value is import('@gian/shared').SearchResult {
+  if (!value || typeof value !== 'object') return false;
+  const result = value as Record<string, unknown>;
+  return typeof result.id === 'string'
+    && typeof result.kind === 'string'
+    && typeof result.title === 'string'
+    && Array.isArray(result.ranges)
+    && !!result.target && typeof result.target === 'object'
+    && typeof result.updated_at === 'string'
+    && typeof result.archived === 'boolean';
+}
+
+export interface GlobalSearchQuery {
+  q: string;
+  types?: import('@gian/shared').SearchBusinessKind[];
+  workspaceId?: string | null;
+  includeArchived?: boolean;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export async function searchGlobal(
+  query: GlobalSearchQuery,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').SearchPage> {
+  const params = new URLSearchParams({ q: query.q });
+  if (query.types && query.types.length > 0) params.set('types', query.types.join(','));
+  if (query.workspaceId) params.set('workspace_id', query.workspaceId);
+  if (query.includeArchived) params.set('include_archived', '1');
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', query.cursor);
+  const response = await fetch(`/api/search?${params.toString()}`, { signal });
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !Array.isArray((body as { results?: unknown }).results)
+    || !(body as { results: unknown[] }).results.every(isSearchResult)
+    || !isSearchCoverage((body as { coverage?: unknown }).coverage)) {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Search response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').SearchPage;
+}
+
+export interface SessionFindQuery {
+  q: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export async function findInSession(
+  sessionId: string,
+  query: SessionFindQuery,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').FindPage> {
+  const params = new URLSearchParams({ q: query.q });
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', query.cursor);
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/find?${params.toString()}`,
+    { signal },
+  );
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !Array.isArray((body as { matches?: unknown }).matches)
+    || typeof (body as { total?: unknown }).total !== 'number'
+    || typeof (body as { total_complete?: unknown }).total_complete !== 'boolean'
+    || !isSearchCoverage((body as { coverage?: unknown }).coverage)) {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Find response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').FindPage;
+}
+
+export interface SearchContextQuery {
+  turnId?: string | null;
+  turn?: number | null;
+  before?: number;
+  after?: number;
+  documentId?: string | null;
+  textRevision?: string | null;
+}
+
+export async function loadSearchContext(
+  sessionId: string,
+  query: SearchContextQuery,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').SearchContextPage> {
+  const params = new URLSearchParams();
+  if (query.turnId) params.set('turn_id', query.turnId);
+  if (query.turn !== undefined && query.turn !== null) params.set('turn', String(query.turn));
+  if (query.before !== undefined) params.set('before', String(query.before));
+  if (query.after !== undefined) params.set('after', String(query.after));
+  if (query.documentId) params.set('document_id', query.documentId);
+  if (query.textRevision) params.set('text_revision', query.textRevision);
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/context?${params.toString()}`,
+    { signal },
+  );
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !Array.isArray((body as { events?: unknown }).events)
+    || !(body as { session?: unknown }).session
+    || !(body as { window?: unknown }).window
+    || typeof (body as { history_complete?: unknown }).history_complete !== 'boolean') {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Context response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').SearchContextPage;
+}
+
+export async function loadSearchStatus(
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').SearchStatus> {
+  const response = await fetch('/api/search/status', { signal });
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !isSearchCoverage((body as { coverage?: unknown }).coverage)) {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Search status response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').SearchStatus;
+}

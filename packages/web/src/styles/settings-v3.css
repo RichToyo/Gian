@@ -1,0 +1,697 @@
+/* ============================================================
+   Settings v3 — ported 1:1 from design/gian-design-v2 SettingsBody.
+   Left-nav scrollspy locator + vertical-stacked cards.
+
+   Base component classes (.select, .segm, .switch, .kv-grid,
+   .theme-chip, .accent-swatch, .exec-row, .exec-status,
+   .kv-grid.shortcuts) already live in gian-v2.css; this file adds the
+   v3 layout shell (.settings2*, .s2-*) and the per-card overrides the
+   prototype applies, plus the "Open with" panel rules. Imported LAST so
+   it overrides the legacy session.css ee- and open-cat- rules.
+   Do NOT edit shared tokens or global stylesheets here.
+   ============================================================ */
+
+.settings2 {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  container-type: inline-size;
+  overflow: hidden;
+}
+
+.settings2-frame {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  grid-template-areas: "nav main";
+  align-items: stretch;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.settings2-internal-nav {
+  grid-area: nav;
+  min-width: 0;
+  padding: 18px 12px 24px;
+  border-right: 1px solid var(--hairline);
+  background: var(--surface);
+  overflow: auto;
+}
+.settings2-nav-title {
+  padding: 0 8px 18px;
+  font: 600 16px/1.2 var(--font-sans);
+  color: var(--text);
+}
+.settings2-internal-nav .settings-nav-body,
+.settings2-mobile-nav .settings-nav-body { display: grid; gap: 20px; }
+.settings2-mobile-head { display: none; grid-area: header; }
+.settings2-mobile-nav { display: none; }
+
+.s2-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.s2-grouplabel {
+  font: 600 10px/1 var(--font-mono);
+  letter-spacing: 0.10em;
+  color: var(--text-3);
+  padding: 0 8px 7px;
+}
+.s2-navitem {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 6px 9px;
+  border-radius: var(--r-2);
+  font: 500 var(--fz-13)/1.2 var(--font-sans);
+  color: var(--text-2);
+  transition: background 100ms var(--ease), color 100ms var(--ease);
+}
+.s2-navitem:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.s2-navitem.active {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* The prototype leans on a `.mono` utility that the web app never defined as a
+   bare class. Scope a local one to this surface so the footer + the `claude -p`
+   token render in monospace as the design intends. */
+.settings2 .mono { font-family: var(--font-mono); }
+
+.settings2-main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  gap: 34px;
+  min-width: 0;
+  width: 100%;
+  padding: 18px 22px 30px;
+  overflow: auto;
+  scroll-padding-top: 18px;
+}
+
+/* Continuous preference document; the internal locator owns section jumps. */
+.s2-section { scroll-margin-top: 16px; min-width: 0; }
+.s2-section + .s2-section { margin-top: 0; }
+.s2-section-heading {
+  min-height: 28px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.s2-section-heading .s2-sectiontitle { margin-bottom: 0; }
+.s2-sectiontitle {
+  margin: 0 0 12px;
+  font: 600 18px/1.25 var(--font-sans);
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+/* The sheet panel (.sheet-content) is already --surface, so a flat --surface-2
+   card reads as a dull gray slab with no edge. Use a --surface card with a
+   hairline border instead — the design's "white card, hairline edge" look —
+   and let inner controls (segm track, theme chips, selects, kbd) step down to
+   --surface-2 so they stay visible. */
+.s2-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+  padding: 18px 20px;
+}
+.s2-card + .s2-card { margin-top: 14px; }
+.settings-section-deferred { min-height: 88px; background: var(--surface-2); }
+
+/* Per-card kv-grid override (the global base is 160px + mono dt). */
+.s2-card .kv-grid {
+  grid-template-columns: 116px minmax(0, 1fr);
+  row-gap: 13px;
+  column-gap: 14px;
+}
+.s2-card .kv-grid dt {
+  color: var(--text-2);
+  font: 500 var(--fz-12)/1.4 var(--font-sans);
+  text-transform: none;
+  letter-spacing: normal;
+  align-self: center;
+}
+/* The base dd is mono (meant for runner/config values); settings values are
+   prose and controls, so flip back to sans. Explicit .mono opt-ins (font
+   family row, executor selects) are unaffected. */
+.s2-card .kv-grid dd {
+  font-family: var(--font-sans);
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The Settings sheet can be narrower than the prototype card, especially
+   after browser-only zoom is applied. Keep every appearance control inside
+   its grid cell instead of clipping the trailing themes/accents. */
+.s2-card .theme-row,
+.s2-card .accent-row { flex-wrap: wrap; }
+.s2-card .theme-chip { flex: 1 1 58px; }
+.s2-card .accent-row { gap: 4px; }
+
+/* Shortcuts: labels can be long (both locales) — give them the flexible
+   column and pin the keycaps to a clean right-hand column. */
+.s2-card .kv-grid.shortcuts { grid-template-columns: minmax(0, 1fr) auto; }
+.s2-card .kv-grid.shortcuts dt { align-self: baseline; }
+.s2-card .kv-grid.shortcuts kbd {
+  border-radius: var(--r-1);
+  color: var(--text-2);
+}
+
+/* Stacked toggles (notification events) — one per line with breathing room
+   instead of inline labels bumping into each other. */
+.s2-card .kv-grid dd > .switch { display: flex; }
+.s2-card .kv-grid dd > .switch + .switch { margin-top: var(--sp-5); }
+
+/* Segmented controls in settings read a size up from the dense global default
+   so they match the card's 12px label rhythm. */
+.s2-card .segm-item {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: var(--fz-12);
+  padding: 5px 6px;
+}
+.s2-card .segm { display: flex; width: 100%; }
+
+/* Remappable shortcut rows: the capture button shows the current keycaps;
+   while armed it pulses for the next keydown. Esc cancels, a conflict with
+   another action is reported inline. */
+.shortcut-capture {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  cursor: pointer;
+}
+.shortcut-capture:hover { background: var(--surface-2); border-color: var(--hairline); }
+.shortcut-capture.capturing {
+  border-color: var(--accent);
+  animation: shortcut-capture-pulse 1.2s var(--ease) infinite;
+}
+@keyframes shortcut-capture-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-ring); }
+  50% { box-shadow: 0 0 0 3px transparent; }
+}
+.shortcut-listening {
+  font: 500 var(--fz-12)/1 var(--font-sans);
+  color: var(--accent-text);
+}
+.keycap-combo { display: inline-flex; gap: 3px; }
+.shortcut-reset {
+  margin-left: 6px;
+  padding: 2px 4px;
+  border-radius: var(--r-1);
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.shortcut-reset:hover { background: var(--surface-2); color: var(--text); }
+/* Full-width prose rows inside the shortcuts grid: the auto-sized value
+   column must only ever hold keycaps; long text spans both columns so it
+   wraps instead of inflating the track and squeezing the label column. */
+.kv-grid.shortcuts dd.shortcut-hint,
+.kv-grid.shortcuts dd.shortcut-conflict {
+  grid-column: 1 / -1;
+  margin: -4px 0 6px;
+  font: var(--fz-12)/1.5 var(--font-sans);
+  color: var(--text-3);
+}
+.kv-grid.shortcuts dd.shortcut-conflict {
+  color: var(--danger);
+}
+
+.terminal-settings .select { width: 100%; }
+.settings-stepper {
+  display: grid;
+  grid-template-columns: 28px minmax(56px, auto) 28px;
+  align-items: center;
+  width: max-content;
+}
+.settings-stepper button {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: 500 15px/1 var(--font-sans);
+}
+.settings-stepper button:first-child { border-radius: var(--r-1) 0 0 var(--r-1); }
+.settings-stepper button:last-child { border-radius: 0 var(--r-1) var(--r-1) 0; }
+.settings-stepper button:hover:not(:disabled) { color: var(--text); border-color: var(--text-3); }
+.settings-stepper button:disabled { opacity: 0.4; cursor: default; }
+.settings-stepper output {
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-block: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--text);
+  font: 500 var(--fz-12)/1 var(--font-mono);
+  padding: 0 10px;
+}
+.terminal-shell-select { text-overflow: ellipsis; }
+.terminal-settings .field-error {
+  display: block;
+  margin-top: 5px;
+  color: var(--danger);
+  font: var(--fz-11)/1.3 var(--font-sans);
+}
+
+/* Light-theme swatches are near-white — give every chip swatch a hairline
+   ring so they stay visible against the active chip's accent-soft fill. */
+.s2-card .theme-chip .swatches i {
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+/* Default workbench widths leave Settings with roughly 340–410 logical px.
+   Stack labels above values there so zoomed controls keep useful hit targets
+   instead of degenerating into one-character columns. */
+@container (max-width: 420px) {
+  .s2-card .kv-grid {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 6px;
+  }
+  .s2-card .kv-grid dt { align-self: auto; }
+  .s2-card .kv-grid dd:not(:last-child) { margin-bottom: 8px; }
+}
+
+@container (max-width: 680px) {
+  .settings2-frame {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "header" "main";
+  }
+  .settings2-internal-nav { display: none; }
+  .settings2-mobile-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 48px;
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--hairline);
+    background: var(--surface);
+  }
+  .settings2-mobile-head strong { font: 600 var(--fz-13)/1.2 var(--font-sans); }
+  .settings2-nav-toggle { width: 34px; height: 34px; }
+  .settings2-mobile-nav {
+    display: block;
+    position: absolute;
+    inset: 48px 0 auto 0;
+    z-index: 20;
+    max-height: calc(100% - 58px);
+    overflow: auto;
+    padding: 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--hairline);
+    box-shadow: 0 16px 32px color-mix(in oklab, var(--text) 12%, transparent);
+  }
+  .settings2-main { padding: 16px; }
+}
+
+.settings-page { min-width: 0; }
+.settings-page-heading {
+  min-height: 36px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.settings-page-heading h2 {
+  margin: 0;
+  font: 600 18px/1.25 var(--font-sans);
+  letter-spacing: 0;
+  color: var(--text);
+}
+.settings-page-heading .btn { display: inline-flex; align-items: center; gap: 7px; }
+.settings-danger-action { white-space: nowrap; }
+
+.management-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, auto) minmax(150px, auto);
+  gap: 10px;
+  margin-bottom: 26px;
+}
+.management-toolbar.adopt-toolbar {
+  grid-template-columns: minmax(200px, 1fr) repeat(2, minmax(130px, auto));
+}
+.management-toolbar select,
+.settings-search {
+  min-height: 38px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  color: var(--text);
+}
+.management-toolbar select { padding: 0 32px 0 12px; }
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  color: var(--text-3);
+}
+.settings-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.settings-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: var(--fz-13)/1.3 var(--font-sans);
+}
+
+.management-group + .management-group,
+.workspace-settings-section + .workspace-settings-section { margin-top: 26px; }
+.management-group-heading {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 8px;
+  color: var(--text-2);
+}
+.management-group-heading strong { font: 600 var(--fz-13)/1.2 var(--font-sans); color: var(--text); }
+.management-group-heading span { font: 500 var(--fz-11)/1 var(--font-mono); color: var(--text-3); }
+.management-list {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+  background: var(--surface);
+  overflow: hidden;
+}
+.management-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 66px;
+  padding: 10px 14px;
+}
+.management-row + .management-row { border-top: 1px solid var(--hairline); }
+.management-row-copy { min-width: 0; display: grid; gap: 4px; }
+.management-row-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 550 var(--fz-13)/1.25 var(--font-sans);
+  color: var(--text);
+}
+.management-row-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--fz-12)/1.25 var(--font-sans);
+  color: var(--text-3);
+}
+.management-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.management-primary-action { min-width: 96px; min-height: 34px; justify-content: center; }
+.management-trash { color: var(--text-3); }
+.management-trash:hover { color: var(--danger); }
+.management-empty { padding: 28px 16px; text-align: center; color: var(--text-3); font: var(--fz-13)/1.4 var(--font-sans); }
+.native-management-row { grid-template-columns: 12px minmax(0, 1fr) auto; }
+.native-provider-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.native-provider-dot.claude { background: var(--claude); }
+.native-provider-dot.codex { background: var(--codex); }
+.native-provider-dot.kimi { background: var(--kimi, #239b65); }
+.workspace-management-row { grid-template-columns: minmax(0, 1fr) 34px 34px auto; }
+.workspace-settings-section:last-child .workspace-management-row { grid-template-columns: minmax(0, 1fr) auto; }
+
+.settings-switch span { color: var(--text-2); }
+.settings-toggle-spacer { display: none; }
+.kv-grid dd.settings-toggle-row { grid-column: 1 / -1; }
+.settings-reset-layout { margin-top: 14px; }
+.s2-subsection-block { margin-top: 20px; }
+.s2-subsection-block h4 { margin: 0 0 10px; font: 600 var(--fz-12)/1.2 var(--font-sans); color: var(--text-2); }
+.tool-settings-grid .input,
+.tool-settings-grid .select { width: 100%; }
+
+@container (max-width: 540px) {
+  .management-toolbar,
+  .management-toolbar.adopt-toolbar { grid-template-columns: minmax(0, 1fr); }
+  .management-row,
+  .native-management-row,
+  .workspace-management-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .management-row-copy { grid-column: 1 / -1; }
+  .management-row-actions { grid-column: 1 / -1; }
+  .native-provider-dot { display: none; }
+  .workspace-management-row .management-row-copy { grid-column: 1 / -1; }
+}
+
+.s2-help {
+  margin: 0 0 13px;
+  font: var(--fz-12)/1.5 var(--font-sans);
+  color: var(--text-3);
+}
+.s2-subhead {
+  font: 600 10.5px/1 var(--font-mono);
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  margin: 2px 0 9px;
+}
+.s2-card .exec-row + .exec-row {
+  margin-top: 15px;
+  padding-top: 15px;
+}
+
+.settings-account {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+.settings-account-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.settings-account-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.settings-account-avatar-fallback {
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font: 600 var(--fz-18)/1 var(--font-serif);
+}
+.settings-account-name {
+  color: var(--text);
+  font: 600 var(--fz-14)/1.4 var(--font-sans);
+}
+.settings-account-user a {
+  color: var(--accent-text);
+  font: var(--fz-12)/1.4 var(--font-mono);
+}
+.settings-account .s2-help { margin: 0; }
+
+/* CLI path row: the input fills the cell so long paths stay visible, with
+   Browse trailing (2026-08-04; was an unsized input clipped to ~20 chars).
+   The task-PM picker that used to sit under the exec rows was removed the
+   same day (no task PM anymore). */
+.s2-card .cli-path-row { display: flex; align-items: center; gap: 6px; }
+.s2-card .cli-path-row .input { flex: 1; min-width: 0; }
+
+/* Defaults row: model / effort|thinking / mode pickers side by side, each
+   with a small caption (2026-08-04 — they used to be one row per picker). */
+.exec-defaults { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.exec-default { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.exec-default:only-child { grid-column: 1 / -1; }
+.exec-default .lbl {
+  font: 500 10.5px/1.2 var(--font-sans);
+  color: var(--text-3);
+}
+.exec-default .select { width: 100%; }
+
+/* Executor caption — "applies to claude -p only". */
+.exec-note {
+  margin: 9px 0 0;
+  font: var(--fz-12)/1.45 var(--font-sans);
+  color: var(--text-3);
+}
+
+/* ---------- Open-with panel (apps list + per-type default app) ----------
+   Overrides the legacy session.css ee- and open-cat- rules (loaded earlier)
+   so they match the prototype inside the settings2 surface. */
+.settings2 .ee-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+.settings2 .ee-app-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--surface-2);
+  border: 0;
+  border-radius: var(--r-2);
+}
+.settings2 .ee-app-name {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 500 var(--fz-13)/1.2 var(--font-sans);
+  color: var(--text);
+}
+.settings2 .ee-remove {
+  width: auto;
+  height: auto;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: var(--r-1);
+}
+.settings2 .ee-remove:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.settings2 .ee-add-app {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+.settings2 .rfc-lbl {
+  font: var(--fz-12)/1 var(--font-sans);
+  color: var(--text-3);
+}
+
+.settings2 .openapps {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.browser-data-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0 2px;
+}
+.browser-data-row .s2-help { margin: 0; }
+.browser-data-row .btn { flex: none; }
+.settings2 .open-cat-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 0;
+}
+.settings2 .open-cat-label {
+  flex: 1;
+  font: var(--fz-13)/1.2 var(--font-sans);
+  color: var(--text-2);
+}
+.settings2 .open-cat-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Selects inside the Open-with panel — flat, surface-tinted (prototype look),
+   not the system-chromed select the legacy session.css applied. Same custom
+   chevron as the shared .select so both settings select styles match. */
+.settings2 .open-cat-pick select,
+.settings2 .ee-add-app select {
+  appearance: none;
+  height: auto;
+  max-width: none;
+  min-width: 190px;
+  font: var(--fz-12)/1 var(--font-sans);
+  color: var(--text);
+  background: var(--surface);
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(-45deg, transparent 50%, var(--text-3) 50%);
+  background-position: right 10px top 50%, right 6px top 50%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  padding: 6px 24px 6px 9px;
+  cursor: pointer;
+  outline: 0;
+}
+.settings2 .open-cat-pick select:focus,
+.settings2 .ee-add-app select:focus {
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+/* Executor model/effort selects render full-width inside their dd. */
+.settings2 .exec-row .kv-grid dd > .select {
+  width: 100%;
+}
+
+/* ── AI Agents: draft card and Proxy catalog modal ── */
+.s2-card.draft { box-shadow: inset 0 0 0 1px var(--accent-ring); }
+.exec-name-input {
+  width: 180px; height: 22px;
+  background: transparent; border: 0; outline: 0;
+  font: 500 13px/1 var(--font-sans); color: var(--text);
+  padding: 0 4px; margin: 0 -4px; border-radius: var(--r-1);
+}
+.exec-name-input:hover { background: var(--surface-2); }
+.exec-name-input:focus { background: var(--surface-2); box-shadow: 0 0 0 2px var(--accent-ring); }
+.exec-name-input.bad { box-shadow: 0 0 0 2px oklch(from var(--danger) l c h / 0.45); }
+.exec-status.warn { background: oklch(from var(--warn) l c h / 0.16); color: var(--warn); }
+.exec-status.draft { background: var(--accent-soft); color: var(--accent-text); }
+.delete-slot { margin-left: 6px; }
+.proxy-line { color: var(--text-2); font: 500 12px/1.4 var(--font-sans); }
+.card-actions { display: flex; gap: 8px; margin-top: 14px; }
+.s2-card .field-error { display: block; margin-top: 5px; color: var(--danger); font: var(--fz-12)/1.3 var(--font-sans); }
+.s2-card .empty {
+  padding: 8px 2px 4px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+}
+.s2-card .empty p { font: var(--fz-12)/1.5 var(--font-sans); color: var(--text-3); max-width: 42em; margin: 0; }
+.confirm-modal.wide { width: min(460px, 100%); }
+.catalog { display: flex; flex-direction: column; gap: 4px; margin: 12px 0 4px; }
+.catalog-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; text-align: left;
+  padding: 9px 10px; border: 0; border-radius: var(--r-2);
+  background: transparent; color: var(--text); cursor: pointer;
+}
+.catalog-item:hover { background: var(--surface-2); }
+/* Selected = hover wash plus a left accent edge (Owner 2026-09-23). */
+.catalog-item.active,
+.catalog-item.active:hover {
+  background: var(--surface-2);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+.catalog-name { font: 500 13px/1.2 var(--font-sans); }
+.catalog-sub { font: 12px/1.3 var(--font-sans); color: var(--text-3); margin-top: 2px; }
+
+/* Version row: version on one line, the mismatch note below it. */
+.exec-version { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.s2-card .hint {
+  margin-top: 2px;
+  color: var(--text-3);
+  font: var(--fz-11)/1.4 var(--font-sans);
+}
+.s2-card .hint.danger-hint,
+.danger-text { color: var(--danger); }

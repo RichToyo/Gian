@@ -1,0 +1,949 @@
+# Changelog
+
+This file records user-facing changes in published Gian builds. It is updated
+whenever a version is packaged and tagged for release; local test packages are
+not listed.
+
+Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
+0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
+
+## [0.6.7] - 2026-10-18
+
+### Added
+
+- Search conversations and messages, open historical matches in their source conversation, and use Cmd+F to find text within the current conversation.
+- Open actionable Inbox items for permissions, questions and update decisions, with exact native approval options and navigation to the source session. The Inbox is not a collection of completed or failed turns; marking an item read does not resolve it.
+- Add Antigravity integration with Gemini model families, separate Thinking and native Mode controls, using the official Antigravity ACP Server. Its independently released Proxy is version 0.0.1; the upstream ACP Runtime remains 1.3.0.
+
+### Changed
+
+- Agent defaults and new-session controls use the exact Proxy-advertised native catalogs and bindings, including permission-mode choices, rather than a Host-owned mode list.
+- Offer supported default HOME choices without copying credentials or rewriting existing Agent homes; Antigravity uses the default Gemini home.
+- Embed RichToyo/Gian as the future automatic-update feed. This App release is published only in RichLogic/Gian; Proxy, Catalog and Runtime resource sources remain unchanged.
+
+### Fixed
+
+- Preserve Repos/Tasks ownership when opening search hits, Inbox items and notifications; expand the owning sidebar group and reveal the selected row without background refreshes stealing scroll position.
+- Open unread Inbox items when a WebSocket read-state echo arrives before the HTTP response, while retaining exact occurrence and generation fences.
+- Keep failed native notification withdrawals visible until the affected notifications are removed, even when another notification succeeds.
+- Forward the exact native option for Inbox Approve/Reject, and display known native denials as declined rather than allowed. Unverifiable historical native outcomes render neutrally.
+- Resolve cold session catalogs before first-send dispatch, preserve native configuration through session creation, and accept the Host's attachment root as execution context without granting extra permissions.
+- Keep translated sends and their original message identity aligned, preserve selected-text translation context and font sizing, and avoid stale translation results replacing a newer selection.
+- Correct Markdown block spacing, table sizing and emphasis rendering, and preserve conversation navigation and find focus across history loading.
+
+### Known Limitations
+
+- Antigravity's cold model catalog query requires the separate official `agy` helper CLI and the OS account's default `~/.gemini` configuration. Managed/custom HOME roots are not supported for that query.
+- Proxy availability requires compatible independently published Proxy/Runtime artifacts and a signed Catalog; installing this App does not replace those resources.
+- Older Agent defaults containing a combined native model/effort ID remain runnable. Reselect the model family and Thinking level to use the separate controls; conflicting selections are rejected rather than silently rewritten.
+
+## [0.6.6] - 2026-10-10
+
+### Added
+
+- A host-local Inbox collects turn completions, approvals, and errors across sessions, with unified navigation back to the source conversation.
+- Remote sessions show globe icons and live disconnect state; sessions created through Gian MCP delegation carry a compass badge.
+
+### Changed
+
+- Unified the translation experience: optimistic translated sends with echo adoption, an auto-translate toggle, and consistent translating-state feedback on replies and first messages.
+- Pinned the Agent CLI Runtimes: Claude Code 2.1.285, Codex 0.161.0, Grok 1.0.46, and DeepSeek Harness 0.2.0-rc.2.
+- Refreshed Grok branding with its default mode label, and updated the Agents navigation icons.
+- Markdown table text now scales with the chat font setting.
+
+### Fixed
+
+- Claude Code sessions resume correctly after interrupts, report CLI exits, discover the model catalog reliably, and keep the Default label with its effort.
+- Kimi preserves turns across disconnects and shows assistant text outside the working basket.
+- Codex disk-pages long histories so large sessions stay responsive, with replay failures isolated.
+- Grok avoids Catalog inspection shutdown delays and offers its default HOME during Agent creation.
+- DeepSeek Harness reads 0.2.0 session logs and falls back from retired model choices.
+- The composer parses its document as one Markdown source, new-session Catalog mode choices are preserved, and sidebar chrome stays pinned above the scrolling session list.
+- Refresh vulnerable transitive dependency pins before stable packaging.
+
+### Notes
+
+- Proxy capabilities depend on separately published certified Proxy and Catalog versions; installing this App does not publish or replace those assets.
+- GianDev development packages now build from the source Proxies with their pinned CLI Runtime assets included.
+
+## [0.6.5] - 2026-10-07
+
+### Added
+
+- Bind an Agent to a custom Runtime path from the Add Agent dialog and Agent settings.
+
+### Fixed
+- Packaged Desktop can connect to an explicitly selected external Host without
+  claiming its instance; managed Host ownership and Host version checks remain enforced.
+
+- Offer queued message Send now when the active Proxy advertises mid-turn steering.
+- Preserve the model and thinking selections made after Catalog resolution.
+- Remove phantom blank lines around Markdown blocks in user messages.
+- Keep local Side Chat IDs out of Remote ownership checks.
+- Improve the accessibility and layout of the auto-translation control.
+- Resolve model-specific configuration on live connections before dispatch,
+  including newly created Side Chats; clear rejected starts and terminal state.
+- Keep custom Runtime selection independent of managed Runtime readiness and
+  reject missing Runtime roots before saving an Agent.
+- Accept advertised Question cancellation without inventing required answers.
+- Restore Remote interaction wire identities and preserve file Diff changes.
+- Fetch Catalog broker metadata with the bounded Catalog response budget.
+- Refresh vulnerable transitive dependency pins before stable packaging.
+
+### Notes
+
+- Proxy capabilities depend on separately published certified packages. Kimi
+  native Bash tools do not report file-history diffs; native WriteFile/Edit do.
+
+## [0.6.4] - 2026-09-28
+
+### Added
+
+- Open an Agent's own login terminal from Agents when its Runtime needs account setup.
+- Show Agent actions and conversation controls according to the capabilities declared by its Proxy.
+
+### Changed
+
+- Use the Proxy plugin ID consistently as Agent identity across setup, selection, and management.
+- Keep Remote Web's conversation context compact during long-running control sessions.
+
+### Fixed
+
+- Resume sessions against their active certified Runtime generation, and restore the update action for installed Integrations.
+- Translate the first outgoing turn correctly and reject stale translation setup instead of sending with outdated settings.
+- Preserve Claude Code's default configuration scope when no separate Agent configuration directory is needed.
+- Correct Agent logos and screenshot handling in the Desktop and Agents views.
+
+### Notes
+
+- Proxy-specific capabilities require compatible independently published Proxy and Catalog versions. Installing this App does not publish or replace those assets.
+
+## [0.6.3] - 2026-09-24
+
+### Added
+
+- Control another Gian from local conversations, with account-bound pairing,
+  remote execution, replicated history, same-account takeover, and remote
+  file, Diff and History browsing.
+- Translate outgoing messages, completed replies and selected text using a
+  separately configured local Agent/model. Original text is retained, and
+  each model translation runs in a fresh isolated conversation.
+- Follow the system theme and use adjustable macOS glass window frames.
+- Read Proxy descriptions, tutorials and version histories in English or Chinese.
+
+### Changed
+
+- Remote settings now separate controlling this Gian from connecting to other
+  Gian instances, with shared App-owned GitHub account confirmation and clearer
+  registration, pairing, reconnection and removal controls.
+- Improve Markdown/reference rendering, selected-row actions and transparent
+  frame appearance across light, warm and dark themes.
+- Use the independently published Proxy Protocol 1.0.1 and Remote Protocol 1.2.0.
+  Catalog 1.10.0 provides updated Claude, Codex, Kimi and DeepSeek integrations.
+
+### Fixed
+
+- Keep task selection and the actual message destination in sync.
+- Preserve streamed Side Chat content after completion and reopening.
+- Recover Remote connections after startup and interrupted requests without
+  silently repeating uncertain mutations or altering ordinary message text.
+- Preserve the original translation failure when temporary-thread cleanup fails;
+  closing an isolated Codex translation no longer attempts to read its history.
+- Correct composer reference whitespace, Remote Web model handling, and wide
+  table/code scrolling on narrow screens.
+
+### Notes
+
+- Native Remote peers need compatible Server and App versions and account
+  authorization; upgrading does not silently authorize legacy unbound devices.
+- Isolated model translation requires a supporting Proxy; this release supports
+  the published Codex Proxy 0.3.2. Other unsupported Proxies report an explicit error.
+- ZCode remains subject to its upstream standalone-runtime limitations.
+
+## [0.6.2] - 2026-09-21
+
+### Added
+
+- Chat Markdown now renders Mermaid diagrams, mathematical expressions, and
+  syntax-highlighted code blocks.
+- The composer supports basic Markdown editing and `@` file references, with
+  referenced file content included in the conversation context.
+
+### Changed
+
+- Unified link handling and link-type icons across chat surfaces. Web links
+  open in Gian's Browser workspace when using the desktop App.
+
+### Fixed
+
+- Sidechat replies and reasoning remain visible after streaming completes and
+  when the conversation is reopened, including Providers that finish content
+  with a completion marker instead of repeating the full text.
+
+## [0.6.1] - 2026-09-16
+
+### Changed
+
+- Moved notification preferences into Gian's settings: the master switch and
+  the per-category switches (completed turns, approvals and questions, errors)
+  are enforced by the Host before any system notification is delivered, while
+  each device keeps only its own consent and sound choice. Background sessions
+  now notify as well; the session you are watching stays silent.
+- Reworked notification navigation to jump in place: clicking a notification
+  selects the session when browsing sessions, opens it as the active Subtask
+  inside Tasks, and opens the Timer run log for a failed schedule run.
+  Update-available alerts no longer depend on the session-notification master
+  switch.
+- Removed the retired hidden-repo feature completely: the Repos rail now lists
+  every repo, including zero-session ones, matching the new-conversation
+  picker, and the Hide/Show controls are gone.
+- Flattened the managed Runtime directory layout: certified Runtimes now
+  install content-addressed under `runtimes/<id>/<version>/<sha>/` instead of
+  `runtimes/managed/...`, and the DeepSeek Harness Runtime id is renamed from
+  `dsh` to `deepseek-harness`. Existing installs migrate automatically on the
+  first start: managed trees are moved and re-verified, unreferenced legacy
+  trees are cleaned up, and broken generation pointers are repaired.
+
+### Fixed
+
+- Fixed Remote Web interactions: questions and input requests can now actually
+  be answered from Remote instead of always failing with a missing-answer
+  error, ExitPlanMode renders as the three-way plan review card over
+  gian.proxy/2.0 so accepting a plan really leaves plan mode, and a failed
+  approval now shows an inline error on the card instead of a dead click.
+- Sessions whose workspace worktree was merged or discarded can be opened and
+  resumed again: input is accepted, queued turns drain, boot watchers attach,
+  and the pinned Proxy package stays retained.
+- In-place Agent CLI self-updates no longer orphan existing sessions with
+  BINDING_RUNTIME_MISMATCH: launchable drift in version, content fingerprint,
+  or verification metadata re-mints the stored Runtime binding, while
+  identity drift still fails closed.
+- Kimi sessions keep their context-window meter accurate on Kimi Code 0.41,
+  which moved the post-turn context line from /status to /usage; late
+  post-turn usage samples now refresh the session instead of being dropped.
+
+## [0.6.0] - 2026-09-15
+
+### Added
+
+- Added the native Browser workspace with persistent tabs, constrained
+  authentication popups, origin-scoped permissions, downloads, page search,
+  detached DevTools, extension inspection, and session-scoped Browser use.
+- Added Remote Web pairing and control, including QR enrollment, encrypted
+  session state, attachments, task operations, model controls, reconnect
+  recovery, device revocation, and live Desktop connection settings.
+- Added conversation-bound scheduled automations with explicit confirmation,
+  Timer list/detail views, run history, retry-safe dispatch, and restart
+  recovery.
+- Added the read-only Custom inventory for Skills, MCP servers, Hooks, and
+  Rules across supported Agents and Workspace scopes.
+- Added the Proxy Catalog and globally managed Runtime generations, including
+  signed package verification, Runtime discovery/probing, Agent HOME
+  isolation, exact Session bindings, and install/update/rollback controls.
+- Added privacy-bounded macOS notifications for completed turns, approvals,
+  questions, and Agent errors, with per-category and sound preferences plus
+  direct navigation back to the affected Session.
+
+### Changed
+
+- Rebuilt Agents around saved Agent identities plus the signed Proxy Catalog;
+  Runtime paths are selected globally per certified Proxy generation instead
+  of being stored independently on each Agent.
+- Redesigned the primary sidebar and detail panes with persistent sections,
+  Project menus, task assignment, capped lists, improved History visuals, and
+  consistent narrow-window navigation.
+- Updated the target shipping set to Claude, Codex, Kimi, DeepSeek Harness,
+  and ZCode Proxy 0.3.0, with Proxy-owned Runtime installation recipes and
+  verified reuse of unchanged Runtime files.
+- Unified the Agents, Custom, and Timer panels, improved Timer frequency
+  editing and system-timezone display, and adapted the shared composer and
+  Remote Web audit mode to narrow windows.
+- Certified Kimi Code 0.41.0 as the managed Runtime candidate instead of the
+  unavailable legacy 0.38.0 distribution.
+- Moved formal Proxy/Catalog artifact qualification to GitHub-hosted macOS
+  ARM64. Claude, Codex, and Kimi use pinned official assets, DSH is rebuilt
+  from an exact npm lock, and live Provider accounts remain optional canary
+  evidence instead of a Release dependency.
+- Established Developer ID signing, Apple notarization, Gatekeeper validation,
+  and latest-stable GitHub publication for official macOS releases.
+- Added automatic signed App updates that download in the background and
+  install only after the user confirms a restart; release metadata and every
+  uploaded update asset are verified before the draft becomes public.
+
+### Fixed
+
+- Remote Web now recovers stalled reads and sends, retains drafts until Host
+  receipt, restores remembered sessions, and keeps reconnecting through
+  transient failures without duplicating commands.
+- Improved Remote streaming, Host presence, and large-snapshot delivery
+  without reordering encrypted frames or losing unsent drafts.
+- Corrected packaged JavaScript Runtime probes and bounded installation
+  failure diagnostics.
+- Browser tabs remain closed after restart, popup and download boundaries stay
+  user-mediated, and packaged extension/runtime state is isolated from the
+  developer profile.
+- Runtime activation, Catalog validation, Proxy lifecycle, SQLite startup,
+  DSH continuation, Codex completion summaries, and packaged smoke now fail
+  closed at their actual ownership boundaries.
+- DSH Catalog startup now tolerates optional Cordis services that are not
+  injected, and managed Kimi Runtime qualification reuses the protected user
+  configuration without replacing the user's own Kimi binary.
+- Updated the managed Codex Runtime to 0.153.4 so Gian can expose GPT-6 Astra
+  when the signed-in Codex account advertises it.
+
+### Known limitations
+
+- The macOS build currently supports Apple Silicon only.
+- Existing unsigned builds require one manual installation of 0.6.0; later
+  signed stable releases can update automatically.
+- Fresh Agent onboarding requires the matching certified Proxy coordinates in
+  the signed stable Catalog; a missing Catalog entry blocks package acceptance.
+- Remote Web changes require a matching remote deployment to take effect.
+- Grok remains outside the shipping product surface.
+
+## [0.6.0-beta3] - 2026-09-15
+
+### Fixed
+
+- Fixed GianDev aborting before startup on another Mac because ad-hoc signed
+  Electron libraries were rejected by Hardened Runtime library validation.
+  Dev builds use a dedicated entitlement for the App and helper processes;
+  signed stable builds keep their existing stricter entitlements.
+- Fixed missing GitHub sign-in configuration in GianDev packages. Builds now
+  reject a missing OAuth Client ID and verify the embedded configuration.
+
+### Known limitations
+
+- This remains an ad-hoc signed Apple Silicon Dev build, not a notarized
+  stable release. Runtime installer v1 still requires the matching certified
+  Proxy releases and Catalog; their publication is separate from the App ZIP.
+
+## [0.6.0-beta2] - 2026-09-15
+
+### Changed
+
+- Unified the Agents, Custom, and Timer panels; improved Timer frequency
+  editing, system-timezone display, and schedule indicators on Sessions.
+- Made the composer adapt to narrow windows and brought its shared layout
+  and audit mode to Remote Web.
+- Moved Runtime installation recipes into their owning Proxies, added
+  verified reuse of unchanged Runtime files, and scoped Catalog discovery
+  to each Agent's HOME.
+
+### Fixed
+
+- Improved Remote reconnect recovery, streaming updates, Host presence,
+  and large-snapshot delivery without losing unsent drafts or reordering
+  encrypted frames.
+- Corrected packaged JavaScript Runtime probes and added bounded installation
+  failure diagnostics.
+
+### Known limitations
+
+- This GianDev Apple Silicon build uses ad-hoc signing, has no automatic
+  update feed, and is not a notarized stable release.
+- Fresh Runtime installation requires matching installer-capable Proxy
+  releases in the official Catalog; building this App does not publish them.
+- Remote Web changes require a matching remote deployment to take effect.
+
+## [0.6.0-beta1] - 2026-09-14
+
+First versioned GianDev dev-channel package, built by the hosted Dev Package
+pipeline. It is ad-hoc signed, has no auto-update feed, and is intended for
+development verification; see [0.6.0] for the cumulative user-facing changes
+it contains. Dev package file names and build receipts now carry the app
+version, and app versions may use prerelease suffixes such as `-beta1`.
+
+## Proxy Installer Releases - 2026-09-16
+
+### Added
+
+- Claude, Codex, Kimi, DeepSeek Harness, and ZCode Proxy 0.3.0 provide
+  versioned Runtime installation recipes for compatible Gian Hosts.
+
+### Fixed
+
+- Proxy-only updates can reuse an unchanged, fully verified Runtime rather
+  than reinstall it. Legacy DSH launchers are preserved during migration.
+- JavaScript Runtime version probes use an explicit Node interpreter,
+  including ZCode's externally managed application Runtime.
+
+### Compatibility
+
+- New Runtime installation requires a Host supporting installer v1 and the
+  matching certified official Catalog. Provider Runtime versions are unchanged.
+- Grok remains outside the shipping set and is not included in this release.
+
+## Proxy Patch Releases - 2026-09-15
+
+### Fixed
+
+- Published Claude Proxy 0.2.5, DeepSeek Harness Proxy 0.1.7, and ZCode
+  Proxy 0.1.2 under new immutable versions so Integrations can upgrade from
+  same-version development packages to certified official packages before
+  installing their Runtimes. Provider Runtime versions are unchanged.
+
+## [0.5.5] - 2026-09-02
+
+### Changed
+
+- Published Codex Proxy 0.2.12, Kimi Proxy 0.2.7, and DeepSeek Harness Proxy
+  0.1.5 with Bridge 0.1.2. ZCode remains on Proxy 0.1.0.
+- Existing Host-owned DSH Sessions now resume through the Harness persistence
+  API only after both Proxy and Bridge verify an exact per-process ownership
+  proof.
+
+### Fixed
+
+- Settings can open a Workspace's detail view again, restoring access to its
+  repository, worktree, CLAUDE.md, and native Session controls without
+  bringing back the removed Workspace Dock item.
+- ZCode can launch an activated Proxy installed after Host startup instead of
+  remaining unavailable until another Host restart.
+- App upgrades retire the legacy LaunchAgent before starting the packaged Host,
+  preventing two Host generations from competing for production resources.
+- Manual Codex `/compact` returns promptly, follows the current
+  `contextCompaction` lifecycle, and remains interruptible. Codex also
+  reattaches idle threads after app-server replacement and drops oversized
+  startup history snapshots instead of terminating the shared runtime.
+- URL-mode Codex MCP reconnection now opens only a validated HTTPS page and
+  sends Accept only after the user explicitly confirms that reconnection
+  completed.
+- Kimi live events continue above the replayed occurrence floor after a Host
+  restart, so one persisted event id cannot be reused with changed content.
+- DSH Sessions reattach after Host restart without allowing foreign native ids
+  or history adoption. A missing persisted native Session rolls back cleanly
+  so an empty Gian Session can create a safe replacement.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- ZCode Proxy 0.1.0 accepts text only; file and image inputs are not exposed.
+- DSH Proxy 0.1.5 accepts text and workspace tools. Typed file/image inputs
+  and interactive approval/question routing remain unadvertised.
+- Scheduled Automations and Grok are not included in the 0.5.5 product
+  surface.
+
+## [0.5.4] - 2026-09-01
+
+### Added
+
+- Added ZCode as a production Agent integration, using the Agent runtime from
+  ZCode.app with model, Thinking, approval, permission, native-session, and
+  replay support. Workspaces run in isolated app-server processes.
+- Added persistent manual ordering for sidebar workspaces, Tasks, and
+  Sessions.
+
+### Changed
+
+- Published Codex Proxy 0.2.11, Kimi Proxy 0.2.6, DSH Proxy 0.1.4, and
+  ZCode Proxy 0.1.0.
+- DSH now targets latest Harness 0.1.1-rc.2, waits for late Provider
+  registration, exposes Provider-specific model and reasoning controls, and
+  shows the Provider selector beside Model in both composers. Selections apply
+  to the actual model request; reasoning remains separate from visible text,
+  same-Session concurrent Turns fail busy, and shared Sessions isolate
+  interrupts correctly.
+- Kimi now provides the ACP terminal service used by its native command tools
+  and preserves catalog controls and terminal availability across runtime
+  invalidation, detach, and reattach.
+- Untitled non-Claude Sessions begin native title discovery as soon as the
+  first Turn is accepted instead of waiting for a long Turn to finish.
+
+### Fixed
+
+- Codex capacity failures now settle with their real provider error and leave
+  the Session recoverable.
+- Side Chats preserve their owning panel, tool details, and inline quoted
+  context when switching between parent and child conversations.
+- ZCode no longer hangs after provider business errors or loses terminal
+  events that share native identities. Permission retries remain one card,
+  interrupts cancel the actual foreground execution, and provider request
+  headers and identifiers stay out of conversation events.
+- Existing DSH Agents now rebind their Gian-owned profile to the Bridge bundled
+  with the current App instead of silently retaining an older Bridge symlink.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- ZCode requires a separately configured ZCode CLI provider account. Gian
+  does not import Desktop authorization or modify `~/.zcode`.
+- ZCode Proxy 0.1.0 accepts text only; file and image inputs are not exposed.
+- DSH Proxy 0.1.4 accepts text and workspace tools. Typed file/image inputs
+  and interactive approval/question routing remain unadvertised.
+- Scheduled Automations and Grok are not included in the 0.5.4 product
+  surface.
+
+## [0.5.3] - 2026-08-28
+
+### Added
+
+- Composer can attach files, folders, selected transcript text, and Browser
+  elements as context cards, and keep those references inline through copy
+  and paste.
+- Side Chat can be created and titled explicitly, keep its own model,
+  Thinking, Fast, and approval settings, and open from a running Codex turn
+  without stopping the parent.
+- Live turns show a Working / Worked block with the turn's tool rows, and
+  approval or question cards use a shared risk-aware layout.
+- Settings range controls use minus / value / plus steppers. AI Agents,
+  Adopt, and Archive no longer show unused filters or bulk-delete actions.
+- Review headers stay pinned while scrolling, and file navigation stays in
+  the inspector.
+- Codex sessions receive a session-scoped Gian MCP identity and the
+  `gian-session` Skill. A Worktree tool can create and bind a view-only
+  checkout without changing the Agent working directory.
+- New Sessions bind to a verified Agent runtime profile: exact CLI path,
+  CLI version, and Proxy version.
+
+### Changed
+
+- Published Claude Proxy 0.2.3, Codex Proxy 0.2.10, Kimi Proxy 0.2.3, and
+  DeepSeek Harness Proxy 0.1.3.
+- Gian Tool now authenticates Host-listened MCP and authorizes methods by
+  role and direct Session ownership.
+- Trace folds tool calls into summaries and compresses idle gaps between
+  turns.
+
+### Fixed
+
+- Codex no longer fails large-thread resume, reuses interaction identities
+  after restart, or loses Fork actions after recovery and reattach.
+- Forked sessions get distinct titles, newly created forks open immediately,
+  and the per-turn Fork control hides when the Proxy cannot fork.
+- The new-session title and first message no longer overlap.
+- DeepSeek Harness multi-step turns no longer reuse one content or finalize
+  event identity.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.3 product surface.
+
+## [0.5.2] - 2026-08-25
+
+### Added
+
+- Settings now manages user AI Agents (name, color, Proxy, CLI path, and
+  defaults) instead of one executor per kind. New sessions and the composer
+  list only ready Agents, and each session stays bound to the Agent that
+  created it.
+- Live turns collect tool, command, and search activity into a 5-line
+  Activity box. Clicking it opens the full event feed in the side panel.
+- Added Gian Tool v0, a local CLI and MCP control plane for Task, Session,
+  and approval operations. Gian sessions do not receive it automatically.
+- Side Chat and Session Fork now work on Claude, Codex, and Kimi, not just
+  the protocol and UI shell.
+- Codex traces render as a semantic timeline instead of a flat tool list.
+
+### Changed
+
+- Published Claude Proxy 0.2.2, Codex Proxy 0.2.3, and Kimi Proxy 0.2.2
+  with Side Chat, Fork, and the transcript and approval fixes below.
+- Codex catalogs now advertise the Fast service tier where the selected
+  model supports it.
+
+### Fixed
+
+- Stopped Claude Code thinking-token heartbeats from flooding the
+  transcript and freezing the page.
+- Codex MCP tool approvals now send the native accept, session, decline,
+  and cancel responses the app-server expects.
+- Long completed-turn summaries open the side-panel event feed instead of
+  expanding hundreds of rows inline.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.2 product surface.
+
+## [0.5.1] - 2026-08-24
+
+### Fixed
+
+- Settings and new-session now consume Proxy v2 catalogs safely, so Kimi
+  models stay visible and thinking is resolved per selected model.
+- Restored Codex semantic approval presets in the catalog-backed mode
+  control.
+- Allowed DeepSeek Harness Task subtask creation and persisted native
+  session ids so a second DSH create no longer collides.
+
+### Changed
+
+- Published Codex Proxy 0.2.1, Kimi Proxy 0.2.1, and DeepSeek Harness
+  Proxy 0.1.1 with those catalog and DSH session fixes.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.1 product surface.
+
+## [0.5.0] - 2026-08-22
+
+### Added
+
+- Added DeepSeek Harness (DSH) as a managed Agent integration, including its
+  Gian profile, Bridge bundle, Proxy, runtime discovery, and installer flow.
+- Added Proxy-owned model, effort, permission-mode, and capability catalogs
+  through the `gian.proxy/2.0` protocol for Claude Code, Codex, Kimi Code, and
+  DeepSeek Harness.
+- Added durable Side Chats and session forks where the selected Agent reports
+  support for them.
+- Added an Execution Trace with step trees, requests, structured interactions,
+  and replayed session evidence.
+
+### Changed
+
+- Made Proxy catalogs authoritative for new-session and Settings controls, and
+  hardened turn lifecycle, queued-message, replay, and event identity handling.
+- Hid Grok from onboarding, Settings, and new-session choices for this release.
+
+### Fixed
+
+- Restored Claude replay, Kimi plan projection, and Codex structured question
+  handling across the Proxy 2.0 bridge.
+- Fixed DSH activity completion, replay identifiers, error codes, and packaged
+  Bridge discovery.
+- Fixed the Settings panel layout race that could appear after changing zoom.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.0 product surface.
+
+## [0.4.5] - 2026-08-15
+
+### Added
+
+- Reworked the Settings Appearance and Chat sections: theme, locale, and
+  zoom are dropdowns; accent swatches are rounded squares; chat font size
+  (12–20 px, default 14) and font family are selectable.
+- Made every in-app keyboard shortcut remappable from Settings — command
+  palette, steer / send-now, child sessions, unread, approval keys, and the
+  global screenshot shortcut — with conflict detection, per-row reset, and
+  live rebinding of the screenshot shortcut.
+- Added “Check for updates” to the Settings Proxy rows: the newest
+  compatible Proxy release can be discovered and installed from Settings.
+- Added an optional preference to hide the Gian main window during
+  screenshots (kept visible by default so the frozen desktop includes Gian).
+- Speeded up screenshots by reusing the warm-up page and parallelizing
+  capture preparation.
+- New-session page image thumbnails can be zoomed in from the attachment
+  chips.
+
+### Fixed
+
+- Restored the action-menu separators and the new-session title divider with
+  an inset style after the all-dividers-hidden pass blanked them.
+- Long hint and conflict text no longer squeeze the shortcuts keycap column
+  in Settings; both now span the row as subdued full-width lines.
+- Approval cards for Grok and Kimi no longer render empty. The command being
+  approved (or the fallback approval title) is now surfaced as the card body,
+  so pending approvals show what they are asking to run.
+- Requires Grok Proxy 0.2.1 (released with this build) which fixes Grok
+  sessions terminating on protocol turn-id mismatches.
+
+## [0.4.4] - 2026-08-14
+
+### Added
+
+- Aligned the Grok Build integration with Grok Build CLI 1.0.3’s ACP protocol:
+  each Gian Grok session now runs its own Proxy and agent process scoped to
+  that session’s working directory, with native session list/adopt/delete,
+  slash-command filtering, resource-link attachments, and recommended CLI
+  version hints.
+- Added support for current Grok Build CLI agent flags.
+
+### Fixed
+
+- Fixed the per-task … menu being clipped by the sidebar; it now opens as a
+  viewport-clamped popover aligned to its trigger.
+- Fixed in-app Browser links always opening a new tab and loading project pages
+  at their workspace-relative URLs so parent-relative assets resolve.
+- Fixed Files preview for paths outside the current working tree, such as
+  session attachments.
+- Sped up clipboard screenshot capture.
+- Fixed native configuration error messages to use the executor’s proper name
+  (for example, “Kimi”) instead of the raw executor id.
+
+## [0.4.3] - 2026-08-13
+
+### Added
+
+- Added signed macOS native notifications for completed turns, pending
+  approvals and questions, and terminal errors, including background sessions
+  and the red-close/no-window state.
+- Added background App update checks and downloads, an Updates settings surface
+  that shows the installed version and supports manual checks, and explicit
+  restart-to-install behavior using the stable GitHub Releases channel.
+- Added fail-closed signed/notarized release configuration and deterministic
+  `latest-mac.yml` artifact verification for the DMG and ZIP update assets.
+
+### Changed
+
+- Moved desktop notification delivery from the active renderer transcript to
+  an Electron-main subscription over a small privacy-bounded Host attention
+  protocol, preventing background sessions from leaking full transcripts.
+- Made the 0.4.3 DMG the one-time manual bridge from unsigned 0.4.2 builds;
+  automatic updates begin with upgrades from 0.4.3 to later signed releases.
+- Made update installation follow Gian's safe shutdown boundary: downloads
+  never interrupt work, while an explicit confirmed restart first stops the
+  managed Host and CLI processes before arming replacement.
+
+### Known limitations
+
+- Complete Inbox/read-state synchronization, APNs remote push, and notification
+  generation after Gian has fully quit remain outside the 0.4.3 scope.
+
+## [0.4.2] - 2026-08-12
+
+### Added
+
+- Added independently versioned Claude, Codex, and Kimi Proxy plugins using
+  the `gian.proxy/1` compatibility contract, so compatible Agent integrations
+  can update separately from the desktop app.
+- Added a composer-first new-session flow with workspace, Agent, model, effort,
+  mode, and service-tier selection before the first message is sent.
+
+### Changed
+
+- Upgraded the bundled Host runtime and all source, CI, release, and daemon
+  install gates to Node.js 24 LTS.
+- Refined Diffs, Git History, worktree identity, queue presentation, and
+  inspector controls for denser and more predictable review workflows.
+- Improved transcript, session, Provider retry, and multi-window recovery so
+  stale progress and failed optimistic state do not survive canonical refreshes.
+
+### Fixed
+
+- Fixed Event Storage v3 migration verification for JSON artifacts that
+  contain nested artifact references, so valid transitive links no longer stop
+  an otherwise lossless offline migration.
+- Fixed Claude OAuth and API terminal errors being projected as successful
+  completed replies; Gian now keeps the provider error and ends the turn as
+  failed.
+- Fixed fresh packaged profiles failing before onboarding when no managed
+  Agent Proxy has been installed yet.
+
+## [0.4.1] - 2026-08-09
+
+### Added
+
+- Added a singleton multi-diff inspector that keeps file, history, and
+  transcript diffs in one consistent review surface.
+- Added stronger release canaries for Codex compatibility and steering, Kimi
+  session-store compatibility and lifecycle behavior, and provider attachments.
+
+### Changed
+
+- Refined Git History with compact single-line commits, branch-chain graph
+  colors, clearer filters, bounded lanes, and continuous loading.
+- Made Plan, Agent, and Diff underbar panels mutually exclusive, with predictable
+  toggle, outside-click, and Escape behavior.
+- Improved transcript minimap and message navigation behavior across narrow and
+  wide chat layouts.
+
+### Fixed
+
+- Stabilized transcript identities, hydration, terminal state, and history
+  recovery so provider updates cannot leave duplicate or stale cards behind.
+- Preserved color-rendered transcript diffs while reusing pinned detail tabs.
+- Hardened Browser view detachment, Agent runtime replacement, Proxy exit
+  recovery, watcher restart behavior, and Kimi session-store downgrade safety.
+
+## [0.4.0] - 2026-08-08
+
+### Added
+
+- Added an isolated multi-tab Browser for project HTML and regular web content,
+  with separate history per tab and no Node or preload access to page content.
+- Added Git History inspection for branches, commits, and changed files directly
+  beside the active coding session.
+- Redesigned transcripts with compact single-line event rows, turn folding,
+  context panels, and richer Sheet detail views.
+- Added controlled Event Storage v3 migration tooling to keep durable session
+  history responsive as transcripts grow.
+
+### Changed
+
+- Simplified the workbench layout, panel behavior, breadcrumb identity, and
+  device-local zoom controls for a more focused coding surface.
+- Improved native session recovery, worktree context refresh, queue behavior,
+  and changed-file inspection across reconnects and provider restarts.
+
+### Fixed
+
+- Hardened Agent CLI and managed Proxy updates so active runtimes retain their
+  leases until process cleanup completes.
+- Fixed duplicate Codex recovery callbacks, delayed Proxy bring-up events, and
+  several workspace, session-finalization, and file-preview safety boundaries.
+
+### Known limitations
+
+- Event Storage v3 migration remains an explicit maintenance operation; it is
+  not an automatic startup compaction or database-size reduction step.
+
+## [0.3.0] - 2026-08-07
+
+### Added
+
+- Added an Unfiled session group so sessions remain accessible after their
+  workspace is deleted.
+- Added paged transcript history and bounded replacement of mutable event
+  snapshots to keep long-running sessions responsive.
+- Added deterministic pending and optimistic feedback for user actions, with
+  reconciliation after failures, timeouts, or reconnects.
+
+### Changed
+
+- Last-turn file changes now open directly in the Diffs inspector, including
+  changes viewed from a workspace's primary checkout.
+- Working-tree and branch view selections now persist per session across
+  reloads without changing the Agent's execution directory.
+- Agent discovery and sidebar data loading now avoid repeated blocking probes
+  and unnecessary full-session event subscriptions.
+
+### Fixed
+
+- Fixed relative transcript links that became unresponsive when the linked
+  file was created after the transcript first loaded.
+- Fixed packaged Workbench Terminal startup when `node-pty` was already loaded
+  from the unpacked application directory.
+- Fixed workspace deletion being blocked by existing sessions or worktrees;
+  surviving sessions now lose only their workspace affiliation.
+
+### Known limitations
+
+- Event-storage v3 artifact offloading and compaction are not activated as an
+  automatic startup migration. Existing large databases remain compatible but
+  are not physically reduced by this release.
+
+## [0.2.1-hotfix] - 2026-08-06
+
+### Fixed
+
+- Reattached Kimi sessions automatically after an in-place managed Proxy
+  update removed the live Proxy connection. Sending a message no longer fails
+  with `no proxy for session` while a stale session ID remains cached.
+
+## [0.2.1] - 2026-08-06
+
+### Added
+
+- Added a current-turn change indicator that opens the files changed by the
+  latest agent turn.
+- Expanded the Changes inspector with Last Turn, working-tree, individual
+  commit, and branch comparison sources, including commit and base-branch
+  pickers.
+- Preserved unsent text and uploaded attachments per session, including across
+  session switches and reloads.
+- Added attachment previews and inline text editing to queued messages.
+- Added provider-driven model, thinking-level, and permission-mode choices for
+  Kimi, plus Claude model discovery from the configured
+  `availableModels` list.
+
+### Changed
+
+- Improved transcript navigation with user-message minimap markers, previous
+  and next controls, and a scroll-to-bottom action.
+- Streaming output now follows the bottom only while the reader is already at
+  the bottom, so reading earlier transcript content is no longer interrupted.
+
+### Fixed
+
+- Applied configured Kimi model, thinking level, and mode when creating a new
+  session.
+- Kept the Changes inspector toggle available after the inspector was hidden.
+
+## [0.2.0] - 2026-08-04
+
+### Added
+
+- Added an Archived view in Spaces with Restore and confirmed permanent Delete
+  actions for archived sessions.
+- Added version-aware managed Proxy status and checksum-verified in-place
+  updates when an installed Proxy is older than the Gian release.
+- Completing a Task now archives its sessions, and reopening it restores them
+  without changing each session's own completion state.
+
+### Changed
+
+- Focused Tasks on grouping sessions rather than autonomous project
+  management.
+- Simplified search to find active sessions by name.
+- Removed the autonomous Task Manager and action loop, automatic AI workspace
+  summary writeback, embedded Browser, Sidechat, Discord and Slack bots, dock
+  badge, and file or command palette search from the beta product scope.
+- Saving a custom Agent CLI path now uses a confirmed desktop relaunch so the
+  next session starts with the selected runtime.
+
+### Fixed
+
+- Isolated GianDev launch configuration from inherited production settings.
+- Preserved Task archive and restore behavior after removing the autonomous
+  manager runtime.
+
+## [0.1.2] - 2026-08-04
+
+### Added
+
+- Added an explicit connected-GitHub first step to onboarding, with Back and
+  Continue navigation.
+- Allowed onboarding to finish when any one Agent CLI and Proxy pair is ready;
+  the other Agents remain optional and can be configured later.
+
+### Changed
+
+- Treated the selected directory as the parent directory for projects. New
+  projects are now created directly under it instead of inside an additional
+  `workspaces` directory.
+- Reduced the directory preview to the Agent worktree convention and removed
+  the redundant bulk Agent initialization action.
+
+### Fixed
+
+- Preserved npm and wrapper launcher paths, together with their companion Node
+  runtime directories, so packaged Gian can detect and run installed Agent
+  CLIs under Finder's minimal environment.
+
+## [0.1.1] - 2026-08-04
+
+### Fixed
+
+- Replaced the unusable GitHub OAuth configuration from 0.1.0.
+- Added a release-time GitHub Device Flow check so a build cannot be published
+  with a missing or invalid OAuth client ID.
+
+## [0.1.0] - 2026-08-03
+
+### Added
+
+- Shipped the first Gian macOS beta with one desktop interface for Codex,
+  Claude Code, and Kimi Code.
+- Added structured live transcripts for assistant output, plans, tool calls,
+  commands, file changes, approvals, and errors.
+- Added multiple concurrent sessions, queued follow-up messages, stop and
+  steering controls, Tasks, isolated Git worktrees, Files, Diffs, and a
+  workspace terminal.
+- Added native session discovery and resume, local SQLite storage, GitHub
+  onboarding, official CLI discovery, and versioned Gian Proxy downloads.
+- Included the original experimental Task Manager, Sidechat, Browser, and
+  Discord or Slack integrations that were later removed from the 0.2 beta
+  scope.
+
+### Known Issues
+
+- The published build contained a placeholder GitHub OAuth client ID and could
+  not complete first-run login. It was superseded by 0.1.1.
+
+[0.5.4]: https://github.com/RichLogic/Gian/releases/tag/v0.5.4
+[0.5.3]: https://github.com/RichLogic/Gian/releases/tag/v0.5.3
+[0.5.2]: https://github.com/RichLogic/Gian/releases/tag/v0.5.2
+[0.5.1]: https://github.com/RichLogic/Gian/releases/tag/v0.5.1
+[0.5.0]: https://github.com/RichLogic/Gian/releases/tag/v0.5.0
+[0.2.1-hotfix]: https://github.com/RichLogic/Gian/releases/tag/v0.2.1-hotfix
+[0.2.1]: https://github.com/RichLogic/Gian/releases/tag/v0.2.1
+[0.2.0]: https://github.com/RichLogic/Gian/releases/tag/v0.2.0
+[0.1.2]: https://github.com/RichLogic/Gian/releases/tag/v0.1.2
+[0.1.1]: https://github.com/RichLogic/Gian/releases/tag/v0.1.1
+[0.1.0]: https://github.com/RichLogic/Gian/releases/tag/v0.1.0

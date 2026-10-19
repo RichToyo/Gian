@@ -1,0 +1,252 @@
+import type {
+  Session,
+  SessionStatus,
+} from '@gian/shared';
+
+export interface CreatedSessionFirstMessagePlan {
+  structuredText: string | null;
+  seedOptimisticEcho: boolean;
+}
+
+/**
+ * Decide how the App should dispatch the first message after session:create.
+ * Both executors stay on the structured path (`message:send`).
+ */
+export function planCreatedSessionFirstMessage(
+  pendingMessage: string | null | undefined,
+): CreatedSessionFirstMessagePlan {
+  const text = pendingMessage?.trim() || null;
+  return {
+    structuredText: text,
+    seedOptimisticEcho: text !== null,
+  };
+}
+/**
+ * Whether the Stop button should show (a turn is actually in flight) — NOT
+ * merely because the composer is blocked on a pending question.
+ * `status==='running'` covers proxy lifecycle and `pending` covers the
+ * structured in-flight window.
+ */
+export function isTurnRunning(status: SessionStatus, pending: boolean): boolean {
+  return pending || status === 'running';
+}
+
+/** Sessions that created at least one child via the Gian MCP session.create
+ *  tool — the CALLER side of created_by_session_id (which sits on the child). */
+export function delegatedCallerIds(sessions: Session[]): Set<string> {
+  return new Set(sessions.map(s => s.created_by_session_id).filter((id): id is string => id != null));
+}
+
+/** A session needs the user's attention when it is waiting for input, or when
+ * its completed/failed turn has not been read yet. */
+export function sessionNeedsAttention(
+  session: Pick<Session, 'status' | 'unread'>,
+): boolean {
+  return session.status === 'pending'
+    || ((session.status === 'done' || session.status === 'error') && session.unread === 1);
+}
+
+export interface SessionCanonFact {
+  revision: number;
+  disposition: 'active' | 'archived' | 'deleted';
+  task_id: string | null;
+}
+
+/** Bounded freshness for one in-flight session list. Snapshot writes and
+ *  lifecycle writes bump this; a late HTTP body does not. */
+export interface SessionCanon {
+  snapshot: number;
+  facts: Map<string, SessionCanonFact>;
+}
+
+export function createSessionCanon(): SessionCanon {
+  return { snapshot: 0, facts: new Map() };
+}
+
+export function noteSessionSnapshot(
+  canon: SessionCanon,
+  sessions: readonly Pick<Session, 'id' | 'task_id'>[],
+): void {
+  canon.snapshot += 1;
+  const seen = new Set<string>();
+  for (const session of sessions) {
+    seen.add(session.id);
+    const taskId = session.task_id ?? null;
+    const prev = canon.facts.get(session.id);
+    const same = prev?.disposition === 'active' && prev.task_id === taskId;
+    canon.facts.set(session.id, {
+      revision: same ? prev.revision : (prev?.revision ?? 0) + 1,
+      disposition: 'active',
+      task_id: taskId,
+    });
+  }
+  for (const [id, prev] of [...canon.facts]) {
+    if (seen.has(id) || prev.disposition !== 'active') continue;
+    canon.facts.set(id, {
+      revision: prev.revision + 1,
+      disposition: 'deleted',
+      task_id: prev.task_id,
+    });
+  }
+}
+
+export function noteSessionLifecycle(
+  canon: SessionCanon,
+  sessionId: string,
+  disposition: SessionCanonFact['disposition'],
+  taskId: string | null,
+): void {
+  const prev = canon.facts.get(sessionId);
+  canon.facts.set(sessionId, {
+    revision: (prev?.revision ?? 0) + 1,
+    disposition,
+    task_id: taskId,
+  });
+}
+
+/** Apply a session:updated payload to the active-only client collection. */
+export function applySessionUpdate(
+  sessions: Session[],
+  update: Pick<Session, 'id'> & Partial<Session>,
+): Session[] {
+  if (update.archived === 1) {
+    return sessions.filter(session => session.id !== update.id);
+  }
+
+  const existing = sessions.findIndex(session => session.id === update.id);
+  if (existing >= 0) {
+    return sessions.map(session => session.id === update.id
+      ? { ...session, ...update }
+      : session);
+  }
+
+  // An unarchive broadcast carries a complete Session because the archived
+  // row was not present in the initial active-only state sync.
+  if (
+    update.archived === 0
+    && update.workspace_id !== undefined
+    && update.executor !== undefined
+    && update.type !== undefined
+    && update.created_at !== undefined
+  ) {
+    return [update as Session, ...sessions];
+  }
+
+  return sessions;
+}
+
+/** Sidebar rail ordering inside one workspace group: pinned first
+ *  (most-recently-pinned first), then manual drag order (migration 067
+ *  `workspace_order`; NULL = never dragged — those keep the activity order
+ *  ABOVE the manual range so a fresh session still lands on top), then by
+ *  last activity. */
+export function sortSessionsForRail<
+  T extends Pick<Session, 'pinned_at' | 'updated_at'> & { workspace_order?: number | null },
+>(
+  sessions: T[],
+): T[] {
+  return sessions.slice().sort((a, b) => {
+    const ap = a.pinned_at ? 1 : 0;
+    const bp = b.pinned_at ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    if (a.pinned_at && b.pinned_at) return Date.parse(b.pinned_at) - Date.parse(a.pinned_at);
+    const am = a.workspace_order != null ? 1 : 0;
+    const bm = b.workspace_order != null ? 1 : 0;
+    if (am !== bm) return am - bm;
+    if (am && bm) return a.workspace_order! - b.workspace_order!;
+    return Date.parse(b.updated_at) - Date.parse(a.updated_at);
+  });
+}
+
+/**
+ * Apply a whole-list order overlay (the drag-reorder operations' id arrays)
+ * over an already-sorted list: listed ids take the overlay's order, unlisted
+ * rows keep their relative order at the end (a row created mid-flight lands
+ * at the bottom until the run confirms and the canonical order columns take
+ * over). Stable for unlisted rows.
+ */
+export function orderByIds<T extends { id: string }>(
+  list: readonly T[],
+  ids: readonly string[],
+): T[] {
+  const rank = new Map(ids.map((id, index) => [id, index]));
+  return [...list].sort((a, b) => (rank.get(a.id) ?? ids.length) - (rank.get(b.id) ?? ids.length));
+}
+
+/** Sidebar rail ordering for workspace groups: pinned first, stable within
+ *  each pinned/unpinned group (host `sort_order` is the incoming order). */
+export function sortWorkspacesForRail<T extends { pinned: 0 | 1 }>(workspaces: T[]): T[] {
+  return workspaces.slice().sort((a, b) => b.pinned - a.pinned);
+}
+
+/** Sidebar rail sections (Codex-style, 2026-08-03): pinned content lives in a
+ *  dedicated "Pinned" section above "Projects". A pinned SESSION becomes a
+ *  standalone row in Pinned (it leaves its workspace group); a pinned
+ *  WORKSPACE moves its whole group (header + its unpinned sessions) into
+ *  Pinned. Everything else stays grouped by workspace under Projects. Every
+ *  workspace gets a group — including ones with zero sessions, so the rail
+ *  lists the same repos as the create-conversation picker — except the
+ *  internal `__gian_root__` workspace. Only genuinely missing workspace ids
+ *  collect in Unfiled. */
+export interface RailSections<T> {
+  /** Standalone pinned session rows, most-recently-pinned first. */
+  pinnedSessions: T[];
+  /** Unpinned sessions grouped by workspace_id (each list rail-sorted).
+   *  Workspaces with zero sessions have no entry — readers use `?? []`. */
+  byWs: Map<string, T[]>;
+  /** Pinned workspace ids (including empty ones), in host order. */
+  pinnedWsIds: string[];
+  /** Unpinned workspace ids (including empty ones), in host order
+   *  (orphan ids — sessions whose workspace isn't in the list — appended). */
+  projectWsIds: string[];
+  /** Unpinned sessions whose workspace is gone (NULL after workspace delete,
+   *  migration 045) — rail-sorted. */
+  unfiled: T[];
+  /** False when nothing is pinned — the rail then renders without section
+   *  labels, exactly like the pre-sections layout. */
+  hasPinned: boolean;
+}
+
+export function buildRailSections<T extends Pick<Session, 'workspace_id' | 'pinned_at' | 'updated_at'>>(
+  sessions: T[],
+  workspaces: Array<{ id: string; name?: string; pinned: 0 | 1 }>,
+): RailSections<T> {
+  const pinnedSessions = sortSessionsForRail(sessions.filter(s => s.pinned_at != null));
+  const byWs = new Map<string, T[]>();
+  const unfiled: T[] = [];
+  for (const s of sessions) {
+    if (s.pinned_at != null) continue;
+    // NULL workspace_id (workspace deleted → ON DELETE SET NULL) lands in
+    // Unfiled.
+    if (s.workspace_id == null) {
+      unfiled.push(s);
+      continue;
+    }
+    const list = byWs.get(s.workspace_id) ?? [];
+    list.push(s);
+    byWs.set(s.workspace_id, list);
+  }
+  for (const [id, list] of byWs) byWs.set(id, sortSessionsForRail(list));
+  const sortedUnfiled = sortSessionsForRail(unfiled);
+  const pinnedWsIds: string[] = [];
+  const projectWsIds: string[] = [];
+  const seen = new Set<string>();
+  for (const w of workspaces) {
+    // The internal root workspace never gets a rail group (seen-marked so a
+    // stray session there never falls back to an orphan group either).
+    if (w.name === '__gian_root__') { seen.add(w.id); continue; }
+    seen.add(w.id);
+    (w.pinned === 1 ? pinnedWsIds : projectWsIds).push(w.id);
+  }
+  for (const wsId of byWs.keys()) {
+    if (!seen.has(wsId)) projectWsIds.push(wsId);
+  }
+  return {
+    pinnedSessions,
+    byWs,
+    pinnedWsIds,
+    projectWsIds,
+    unfiled: sortedUnfiled,
+    hasPinned: pinnedSessions.length > 0 || pinnedWsIds.length > 0,
+  };
+}

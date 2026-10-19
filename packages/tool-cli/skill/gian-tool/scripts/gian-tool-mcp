@@ -1,0 +1,18 @@
+#!/bin/sh
+# Run gian-tool-mcp from the installed Gian.app bundle. Does not start or configure Gian.
+set -u
+
+app="${GIAN_APP_PATH:-/Applications/Gian.app}"
+runtime="$app/Contents/Resources/runtime/node"
+entry="$app/Contents/Resources/app.asar.unpacked/node_modules/@gian/tool-mcp/dist/cli.js"
+
+if [ ! -f "$runtime" ] || [ ! -x "$runtime" ]; then
+  echo "gian-tool-mcp: bundled Node runtime is missing: $runtime" >&2
+  exit 1
+fi
+if [ ! -f "$entry" ]; then
+  echo "gian-tool-mcp: bundled CLI entry is missing: $entry" >&2
+  exit 1
+fi
+
+exec "$runtime" "$entry" "$@"

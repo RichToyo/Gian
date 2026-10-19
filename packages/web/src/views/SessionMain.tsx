@@ -1,0 +1,657 @@
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  ApprovalDecision,
+  ApprovalMode,
+  ConfigValue,
+  ComposerDocument,
+  NativeConfigValue,
+  MessageContextItem,
+  Session,
+  ThinkingEffort,
+  UserAgentStatus,
+  Workspace,
+} from '@gian/shared';
+import {
+  Composer,
+  discardComposerDraft,
+} from '../components/Composer.js';
+import { loadSessionTrace, loadAgents } from '../api.js';
+import { remoteRequest } from '../remote-environments.js';
+import { DeletedAgentDialog } from '../components/DeletedAgentDialog.js';
+import { PlanChip } from '../components/PlanChip.js';
+import { QueueList } from '../components/QueueList.js';
+import type { ActionControlState } from '../components/action-gating.js';
+import {
+  fetchSteerCached,
+  peekSteerCached,
+  queueSendNowEnabled,
+} from '../components/composer/capabilities.js';
+import { TurnDiffChip } from '../components/TurnDiffChip.js';
+import { UnderbarPanelGroup } from '../components/UnderbarPanelGroup.js';
+import { useT } from '../i18n/index.js';
+import { toast } from '../feedback.js';
+import { useTranslation } from '../translation/use-translation.js';
+import { AutoTranslationChip, languageName } from '../translation/TranslationControls.js';
+import { beginTranslationEcho, removeTranslationEcho } from '../operations/message.js';
+import '../translation/translation.css';
+import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
+import {
+  useOperationDispatchOptional,
+  useOperationRun,
+} from '../operations/use-operations.js';
+import { deriveTraceSnapshot } from '../trace/derive.js';
+import { TraceView } from '../trace/TraceView.js';
+import type { TraceSnapshot } from '../trace/types.js';
+import { Transcript } from '../transcript/Transcript.js';
+import { ConversationFind } from '../transcript/ConversationFind.js';
+import {
+  TranscriptMinimap,
+  TranscriptNavigation,
+} from '../transcript/TranscriptMinimap.js';
+import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
+import { isTurnRunning } from '../session-routing.js';
+import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
+import type { TranscriptTextSelection } from '../transcript/selection-context.js';
+import {
+  addTranscriptSelectionToDraft,
+  startTranscriptSelectionSideChat,
+} from '../controllers/transcript-selection-actions.js';
+
+export interface SessionMainProps {
+  session: Session;
+  workspace: Workspace | null;
+  items: TranscriptItem[];
+  /** False while the session's history is still loading — suppresses the
+   *  transcript empty state so switching sessions doesn't flash it. */
+  hydrated?: boolean;
+  history?: TranscriptHistoryState;
+  onLoadOlder?: () => void;
+  onRetryHistory?: () => void;
+  pending: boolean;
+  queue: QueueEntry[];
+  planText?: string;
+  codexPlanCompleted?: boolean;
+  codexPlanStatus?: 'active' | 'paused' | 'completed';
+  codexPlanTurn?: number;
+  onSend: (
+    text: string,
+    options?: {
+      oneShotBypass?: boolean;
+      translationId?: string;
+      /** Translated sends adopt the pre-dispatch echo this id points at. */
+      echoId?: string;
+      /** Display-only translation record for the adopted echo. */
+      translation?: import('@gian/shared').TranslationRecord;
+      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+      contextItems?: MessageContextItem[];
+      composerDocument?: ComposerDocument;
+    },
+  ) => void;
+  onSendSkill: (name: string, path: string) => void;
+  onStop: () => void;
+  onApprove: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string | boolean | string[]>,
+    context?: ApprovalActionContext,
+  ) => void;
+  onQueueAdd: (
+    text: string,
+    attachments?: Array<{ path: string; name: string; mime: string; size?: number }>,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
+  ) => void;
+  onQueueRemove: (queueId: string) => void;
+  onQueueUpdate: (queueId: string, text: string) => void;
+  onQueueClear: () => void;
+  onQueueSendNow: () => void;
+  onSteer: (
+    text: string,
+    options?: {
+      attachments?: Array<{ path: string; name: string; mime: string; size?: number }>;
+      contextItems?: MessageContextItem[];
+      composerDocument?: ComposerDocument;
+    },
+  ) => void;
+  onSetMode: (mode: ApprovalMode) => void;
+  onSetModel: (model: string) => void;
+  onSetEffort: (effort: ThinkingEffort | null) => void;
+  onSetServiceTier: (tier: 'fast' | null) => void;
+  onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
+  onSetTurnConfig?: (optionId: string, value: ConfigValue) => void;
+  onReopen?: () => void;
+  onOpenAgents?: () => void;
+  /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
+  onShowLastTurnChanges: (turn: number, path: string) => void;
+  /** Session Fork standard controls (proposal §10.6): `forkAtTurnControl`
+   *  gates the per-turn transcript affordance (`session.fork.atTurn`) —
+   *  always rendered when provided, greyed never hidden (§15). The head-fork
+   *  entry lives in the session dropdown menu (PathBreadcrumb), not here. */
+  forkAtTurnControl?: ActionControlState | null;
+  sideChatControl?: ActionControlState | null;
+  /** Timer "open the Run's Turn" request (Issue #51): when set, the
+   *  Transcript scrolls to the scheduled user message of this run and then
+   *  reports consumption. */
+  scheduleFocus?: { runId: string } | null;
+  onConsumeScheduleFocus?: () => void;
+  /** Exact message navigation (Issue #168): reveal one transcript identity,
+   *  loading its bounded context window first when it is not mounted. */
+  messageFocus?: {
+    messageId?: string;
+    interactionId?: string;
+    turn?: number;
+    nonce: number;
+    turnId?: string;
+    documentId?: string;
+    textRevision?: string;
+  } | null;
+  onConsumeMessageFocus?: () => void;
+  /** Bounded context-window load around a search/find target. */
+  onLoadMessageContext?: (focus: {
+    turnId?: string;
+    turn?: number;
+    documentId?: string;
+    textRevision?: string;
+  }) => Promise<boolean>;
+  /** Explicit "back to latest" while a detached context window is shown. */
+  onReturnToLatest?: () => void;
+}
+
+export function SessionMain({
+  session,
+  workspace,
+  items,
+  hydrated,
+  history,
+  onLoadOlder,
+  onRetryHistory,
+  pending,
+  queue,
+  planText,
+  codexPlanCompleted,
+  codexPlanStatus,
+  codexPlanTurn,
+  onSend,
+  onSendSkill,
+  onStop,
+  onApprove,
+  onQueueAdd,
+  onQueueRemove,
+  onQueueUpdate,
+  onQueueClear,
+  onQueueSendNow,
+  onSteer,
+  onSetMode,
+  onSetModel,
+  onSetEffort,
+  onSetServiceTier,
+  onSetNativeConfig,
+  onSetTurnConfig,
+  onReopen,
+  onOpenAgents,
+  onShowLastTurnChanges,
+  forkAtTurnControl,
+  sideChatControl,
+  scheduleFocus,
+  onConsumeScheduleFocus,
+  messageFocus,
+  onConsumeMessageFocus,
+  onLoadMessageContext,
+  onReturnToLatest,
+}: SessionMainProps) {
+  const t = useT();
+  const translation = useTranslation(session.id);
+  const mainScrollRef = useRef<HTMLDivElement>(null);
+  // Conversation find (Issue #168): while the find bar owns navigation, the
+  // transcript must not re-pin to the bottom on streaming/new messages.
+  const [findActive, setFindActive] = useState(false);
+  // Find-drift signal: item count + trailing message text length (streams
+  // grow the last bubble in place).
+  const contentSignal = useMemo(() => {
+    const tail = items[items.length - 1];
+    const tailText = tail && 'text' in tail ? (tail as { text?: string }).text?.length ?? 0 : 0;
+    return `${items.length}:${tailText}`;
+  }, [items]);
+  const dispatch = useOperationDispatchOptional();
+  const openChatPanel = useContext(ChatPanelOpenContext);
+  const [selectionCreate, setSelectionCreate] = useState<{
+    runId: string;
+    sidechatId: string;
+  }>();
+  const selectionCreateRun = useOperationRun(selectionCreate?.runId);
+  const signaledSelectionCreateRef = useRef<string | null>(null);
+  // User-set completion flag (spec §B): a completed session is closed for
+  // input — the composer blocks and a banner explains how to reopen. The host
+  // enforces the same rule in `sendMessage` and the queue drain.
+  const sessionCompleted = session.completed_at != null;
+  const [advertisedSteer, setAdvertisedSteer] = useState<boolean | undefined>(() => (
+    peekSteerCached(session.executor, session.agent_id)
+  ));
+  useEffect(() => {
+    let alive = true;
+    setAdvertisedSteer(peekSteerCached(session.executor, session.agent_id));
+    void fetchSteerCached(session.executor, session.agent_id)
+      .then(advertised => { if (alive) setAdvertisedSteer(advertised); })
+      .catch(() => { if (alive) setAdvertisedSteer(undefined); });
+    return () => { alive = false; };
+  }, [session.executor, session.agent_id]);
+  const [remoteStatus, setRemoteStatus] = useState('connecting');
+  useEffect(() => {
+    if (!session.remote_execution) return;
+    let alive = true;
+    setRemoteStatus('connecting');
+    const refresh = () => {
+      void remoteRequest<{ status: string }>(`/sessions/${session.id}/status`)
+        .then(result => { if (alive) setRemoteStatus(result.status); })
+        .catch(() => { if (alive) setRemoteStatus('offline'); });
+    };
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [session.id, session.remote_execution?.environment_id]);
+  const remoteUnavailable = !!session.remote_execution && remoteStatus !== 'ready';
+  const [knownAgents, setKnownAgents] = useState<UserAgentStatus[] | null>(null);
+  const [agentRepairRunId, setAgentRepairRunId] = useState<string>();
+  const agentRepairRun = useOperationRun(agentRepairRunId);
+  const agentRepairPending = !!agentRepairRun
+    && agentRepairRun.phase !== 'failed'
+    && agentRepairRun.phase !== 'timed-out';
+  const [agentRepairError, setAgentRepairError] = useState('');
+  const [agentRepairDismissed, setAgentRepairDismissed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    loadAgents()
+      .then(list => { if (alive) setKnownAgents(list); })
+      .catch(() => { if (alive) setKnownAgents([]); });
+    return () => { alive = false; };
+  }, []);
+  // A deleted Agent's session stays readable from its snapshots. New turns
+  // remain blocked until the user chooses a same-Proxy replacement.
+  const agentDeleted = !session.remote_execution && !!session.agent_id
+    && knownAgents !== null
+    && !knownAgents.some(agent => agent.id === session.agent_id);
+  // A disabled Agent keeps its session history readable but cannot continue.
+  const agentDisabled = !!session.agent_id
+    && knownAgents?.find(agent => agent.id === session.agent_id)?.enabled === false;
+
+  useEffect(() => {
+    if (!agentDeleted) {
+      setAgentRepairRunId(undefined);
+      setAgentRepairError('');
+      setAgentRepairDismissed(false);
+    }
+  }, [agentDeleted]);
+
+  useEffect(() => {
+    if (!agentRepairRun) return;
+    if (agentRepairRun.phase === 'failed' || agentRepairRun.phase === 'timed-out') {
+      setAgentRepairError(agentRepairRun.error ?? t('session.agentDeleted.rebindFailed'));
+      setAgentRepairRunId(undefined);
+    }
+  }, [agentRepairRun, t]);
+
+  useEffect(() => {
+    if (!selectionCreate || !selectionCreateRun) return;
+    if (signaledSelectionCreateRef.current === selectionCreateRun.id) return;
+    if (selectionCreateRun.phase === 'failed') {
+      signaledSelectionCreateRef.current = selectionCreateRun.id;
+      discardComposerDraft(selectionCreate.sidechatId);
+      toast({
+        kind: 'error',
+        message: selectionCreateRun.error ?? t('sidechat.createFailed'),
+      });
+    } else if (selectionCreateRun.phase === 'timed-out') {
+      signaledSelectionCreateRef.current = selectionCreateRun.id;
+      toast({ kind: 'warning', message: t('sidechat.createUnknown') });
+    }
+  }, [selectionCreate, selectionCreateRun, t]);
+
+  // Archived sessions open read-only (Issue #168): never unarchive, never
+  // enable send/queue/approval affordances.
+  const archivedReadOnly = session.archived === 1;
+  const transcriptReadOnly = sessionCompleted || agentDeleted || agentDisabled || archivedReadOnly;
+  const selectionCreatePending = selectionCreateRun?.phase === 'pending'
+    || selectionCreateRun?.phase === 'optimistic';
+  const askSelectionEnabled = !transcriptReadOnly
+    && sideChatControl?.enabled === true
+    && dispatch !== null
+    && openChatPanel !== null
+    && !selectionCreatePending;
+  const askSelectionReason = askSelectionEnabled
+    ? undefined
+    : transcriptReadOnly
+      ? t('transcript.selection.readOnly')
+      : selectionCreatePending
+        ? t('sidechat.creating')
+        : (sideChatControl?.reason ?? t('sidechat.unavailable'));
+
+  function addSelectionToChat(selection: TranscriptTextSelection): void {
+    if (!addTranscriptSelectionToDraft(session.id, selection)) {
+      toast({ kind: 'warning', message: t('composer.context.limitReached') });
+    }
+  }
+
+  function askSelectionInSideChat(selection: TranscriptTextSelection): void {
+    if (!dispatch || !openChatPanel || sideChatControl?.enabled !== true || selectionCreatePending) return;
+    try {
+      const started = startTranscriptSelectionSideChat({
+        parentSessionId: session.id,
+        selection,
+        dispatch,
+        openChatPanel,
+      });
+      if (!started) return;
+      signaledSelectionCreateRef.current = null;
+      setSelectionCreate({ runId: started.run.id, sidechatId: started.sidechatId });
+    } catch (error) {
+      toast({
+        kind: 'error',
+        message: error instanceof Error ? error.message : t('sidechat.createFailed'),
+      });
+    }
+  }
+  // Chat / Trace tab. Core's persisted projection is authoritative because it
+  // contains protocol-only step/request evidence that Transcript cannot carry.
+  // The local projection keeps older/offline sessions readable while the Host
+  // snapshot is loading or temporarily unavailable.
+  const [sessionView, setSessionView] = useState<'chat' | 'trace'>('chat');
+  const [hostTraceSnapshot, setHostTraceSnapshot] = useState<TraceSnapshot | null>(null);
+  const running = pending || session.status === 'running' || session.status === 'pending';
+  useEffect(() => {
+    if (agentDeleted && !running) setAgentRepairDismissed(false);
+  }, [agentDeleted, running]);
+
+  function repairDeletedAgent(agentId: string): void {
+    if (agentRepairPending || running) return;
+    setAgentRepairError('');
+    if (!dispatch) {
+      setAgentRepairError(t('session.agentDeleted.rebindFailed'));
+      return;
+    }
+    const run = dispatch('session.rebindAgent', { sessionId: session.id, agentId });
+    setAgentRepairRunId(run.id);
+  }
+  const derivedTraceSnapshot = useMemo(
+    () => deriveTraceSnapshot(items, session.id, {
+      partial: running || hydrated === false,
+      generatedAt: new Date().toISOString(),
+    }),
+    [items, session.id, running, hydrated],
+  );
+  const traceSnapshot = useMemo<TraceSnapshot>(() => {
+    if (hostTraceSnapshot?.sessionId !== session.id) return derivedTraceSnapshot;
+    return {
+      ...hostTraceSnapshot,
+      partial: hostTraceSnapshot.partial || running || hydrated === false,
+    };
+  }, [derivedTraceSnapshot, hostTraceSnapshot, hydrated, running, session.id]);
+
+  useEffect(() => {
+    setHostTraceSnapshot(null);
+  }, [session.id]);
+
+  useEffect(() => {
+    if (sessionView !== 'trace') return;
+    const controller = new AbortController();
+    let refreshTimer: number | undefined;
+
+    const refresh = async () => {
+      try {
+        const snapshot = await loadSessionTrace(session.id, controller.signal);
+        if (!controller.signal.aborted) setHostTraceSnapshot(snapshot);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.warn(`[trace] failed to load session ${session.id}:`, error);
+        }
+      }
+    };
+
+    void refresh();
+    if (running) refreshTimer = window.setInterval(() => { void refresh(); }, 500);
+    return () => {
+      controller.abort();
+      if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
+    };
+  }, [hydrated, items, running, session.id, sessionView]);
+
+  return (
+    <main className="main">
+      {/* The top-right +N/-N Git badge was removed (2026-09-09 owner call);
+          changes open from the Diffs rail or the transcript's change chips. */}
+      <div className="main-head session-chat-head">
+        <div className="segm session-view-tabs" data-testid="session-view-tabs">
+          <button
+            className={`segm-item ${sessionView === 'chat' ? 'active' : ''}`}
+            onClick={() => setSessionView('chat')}
+          >
+            {t('trace.tab.chat')}
+          </button>
+          <button
+            className={`segm-item ${sessionView === 'trace' ? 'active' : ''}`}
+            onClick={() => setSessionView('trace')}
+          >
+            {t('trace.tab.trace')}
+          </button>
+        </div>
+      </div>
+      {sessionCompleted && (
+        <div className="session-banner">
+          <span>{t('coding.banner.completed')}</span>
+          <span className="session-banner-spacer" />
+          {onReopen && (
+            <button className="btn xs secondary" onClick={onReopen}>
+              {t('tasks.subtask.reopen')}
+            </button>
+          )}
+        </div>
+      )}
+      {archivedReadOnly && (
+        <div className="session-banner" role="status" data-testid="archived-readonly-banner">
+          <span>{t('coding.banner.archivedReadOnly')}</span>
+        </div>
+      )}
+      {remoteUnavailable && <div className="session-banner" role="status">
+        <span>{remoteStatus === 'auth_required' ? t('remote.execution.authRequired')
+          : remoteStatus === 'unavailable' ? t('remote.execution.unavailable')
+            : remoteStatus === 'connecting' ? t('remote.execution.connecting') : t('remote.execution.offline')}</span>
+      </div>}
+      {agentDisabled && !agentDeleted && (
+        <div className="session-banner agent-disabled-banner" role="status"
+             data-testid="agent-disabled-banner">
+          <span>{t('agents.disabled.banner')}</span>
+          <span className="session-banner-spacer" />
+        </div>
+      )}
+      <div className="main-scroll" ref={mainScrollRef}>
+        {sessionView === 'trace' ? (
+          <TraceView snapshot={traceSnapshot} />
+        ) : (
+          <Transcript
+            key={session.id}
+            items={items}
+            hydrated={hydrated}
+            hasOlder={history?.hasMore ?? false}
+            loadingOlder={history?.loadingOlder ?? false}
+            onLoadOlder={onLoadOlder}
+            historyError={history?.error}
+            onRetryHistory={onRetryHistory}
+            pending={running}
+            onApprove={onApprove}
+            translation={translation}
+            findActive={findActive}
+            messageFocus={messageFocus}
+            onConsumeMessageFocus={onConsumeMessageFocus}
+            onLoadMessageContext={onLoadMessageContext}
+            returnToLatestGeneration={history?.returnToLatestGeneration ?? 0}
+            approvalsLockedReason={transcriptReadOnly
+              ? (archivedReadOnly ? t('coding.banner.archivedReadOnly') : t('transcript.selection.readOnly'))
+              : null}
+            selectionActions={{
+              translate: {
+                label: t('translation.to').replace('{language}', languageName(translation.state.preferences.reading_language)),
+                enabled: translation.ready,
+                run: selection => translation.select(selection.text),
+              },
+              addToChat: {
+                enabled: !transcriptReadOnly,
+                ...(!transcriptReadOnly ? {} : { reason: t('transcript.selection.readOnly') }),
+                run: addSelectionToChat,
+              },
+              askInSideChat: {
+                enabled: askSelectionEnabled,
+                ...(askSelectionReason ? { reason: askSelectionReason } : {}),
+                run: askSelectionInSideChat,
+              },
+            }}
+            forkAtTurn={forkAtTurnControl
+              ? { sourceSessionId: session.id, state: forkAtTurnControl }
+              : null}
+            scheduleFocus={scheduleFocus}
+            onConsumeScheduleFocus={onConsumeScheduleFocus}
+          />
+        )}
+      </div>
+      {sessionView === 'chat' && (
+        <ConversationFind
+          sessionId={session.id}
+          scopeRef={mainScrollRef}
+          items={items}
+          history={history}
+          contentSignal={contentSignal}
+          onLoadMessageContext={onLoadMessageContext}
+          onActiveChange={setFindActive}
+        />
+      )}
+      {sessionView === 'chat' && history?.detachedFromLatest && onReturnToLatest && (
+        <button
+          type="button"
+          className="conv-return-latest"
+          data-testid="return-to-latest"
+          onClick={onReturnToLatest}
+        >
+          {t('find.returnToLatest')}
+        </button>
+      )}
+      {sessionView === 'chat' && <TranscriptMinimap items={items} />}
+      {sessionView === 'chat' && (
+        <>
+          <QueueList
+            sessionId={session.id}
+            queue={queue}
+            onRemove={sessionCompleted || remoteUnavailable || archivedReadOnly ? undefined : onQueueRemove}
+            onUpdate={sessionCompleted || remoteUnavailable || archivedReadOnly ? undefined : onQueueUpdate}
+            onClear={sessionCompleted || remoteUnavailable || archivedReadOnly ? undefined : onQueueClear}
+            onSendNow={queueSendNowEnabled({
+              executor: session.executor,
+              steerAdvertised: advertisedSteer,
+              completed: sessionCompleted || archivedReadOnly,
+              remoteUnavailable,
+            }) ? onQueueSendNow : undefined}
+            readOnly={sessionCompleted || remoteUnavailable || archivedReadOnly}
+          />
+          <UnderbarPanelGroup sessionId={session.id}>
+            <PlanChip
+              items={items}
+              planText={planText}
+              planCompleted={codexPlanCompleted}
+              planStatus={codexPlanStatus}
+              planTurn={codexPlanTurn}
+              sessionId={session.id}
+            />
+            <TurnDiffChip
+              items={items}
+              sessionId={session.id}
+              onShowLastTurn={onShowLastTurnChanges}
+            />
+            <AutoTranslationChip
+              on={translation.state.enabled}
+              title={t('translation.auto')}
+              disabled={!translation.ready || translation.saving || !!translation.sending}
+              onClick={() => void translation.toggle(!translation.state.enabled)}
+            />
+            <TranscriptNavigation items={items} />
+          </UnderbarPanelGroup>
+          {translation.error && <div className="translation-error" role="alert">{translation.error}</div>}
+          <Composer
+            session={session}
+            onSend={(text, options) => {
+              if (!translation.state.enabled || !text.trim()) {
+                onSend(text, options);
+                return;
+              }
+              const prepared = translation.prepareSend(text, options?.composerDocument);
+              if (!prepared) {
+                // Settings still loading / unconfigured / another translated
+                // send in flight: keep the composer's blocking contract so it
+                // retains the draft instead of showing a half-sent bubble.
+                return Promise.reject(new Error('Translation is not ready.'));
+              }
+              // Optimistic up-screen: the bubble renders now with an inline
+              // Translating row and the composer clears immediately (the
+              // handler returns undefined); the wire dispatch still waits for
+              // the translation (the Host validates translationId against the
+              // original text). 'original' = the user skipped translation.
+              const echo = beginTranslationEcho({
+                sessionId: session.id,
+                text,
+                exec: session.executor,
+                ...(options?.attachments ? { attachments: options.attachments } : {}),
+                ...(options?.contextItems ? { contextItems: options.contextItems } : {}),
+                ...(options?.composerDocument ? { composerDocument: options.composerDocument } : {}),
+              });
+              void prepared.then(outcome => {
+                onSend(text, {
+                  ...options,
+                  translationId: outcome === 'original' ? 'original' : outcome.id,
+                  ...(echo ? { echoId: echo.id } : {}),
+                  ...(outcome !== 'original' ? { translation: outcome } : {}),
+                });
+              }).catch(() => {
+                // Abandoned before dispatch (unmount / session switch): the
+                // never-sent bubble must not linger.
+                if (echo) removeTranslationEcho(session.id, echo.id);
+              });
+              return;
+            }}
+            onSendSkill={onSendSkill}
+            onStop={onStop}
+            onQueueAdd={onQueueAdd}
+            onSteer={onSteer}
+            onSetMode={onSetMode}
+            onSetModel={onSetModel}
+            onSetEffort={onSetEffort}
+            onSetServiceTier={onSetServiceTier}
+            onSetNativeConfig={onSetNativeConfig}
+            onSetTurnConfig={onSetTurnConfig}
+            disabled={pending || sessionCompleted || agentDeleted || agentDisabled || remoteUnavailable || archivedReadOnly}
+            running={isTurnRunning(session.status, pending)}
+            disabledSubmitBehavior={sessionCompleted || remoteUnavailable || archivedReadOnly ? 'block' : 'queue'}
+            executor={session.executor}
+            agentId={session.agent_id ?? null}
+            workspaceId={workspace?.id}
+            workingTree={session.remote_execution ? {
+              id: `remote:${session.id}`, path: session.remote_execution.worktree_root ?? '',
+            } : workspace
+              ? {
+                  id: session.worktree_path ? `wt:${session.id}` : `ws:${session.workspace_id}`,
+                  path: session.worktree_path ?? workspace.path,
+                }
+              : null}
+          />
+        </>
+      )}
+      {agentDeleted && knownAgents !== null && !agentRepairDismissed && (
+        <DeletedAgentDialog
+          session={session}
+          agents={knownAgents}
+          busy={agentRepairPending}
+          sessionBusy={running}
+          error={agentRepairError}
+          onSelect={agentId => { void repairDeletedAgent(agentId); }}
+          onOpenAgents={onOpenAgents}
+          onLater={() => setAgentRepairDismissed(true)}
+        />
+      )}
+    </main>
+  );
+}

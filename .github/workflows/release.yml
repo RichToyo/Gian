@@ -1,0 +1,259 @@
+name: Release Gian
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Release source / ${{ matrix.lane }}
+    if: github.repository == 'RichToyo/Gian' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [policy, typecheck, build, unit, integration, system]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Scan publication source for public English
+        run: node scripts/check-public-english.mjs --ref "${{ github.sha }}"
+      - name: Verify public source boundaries
+        run: node scripts/delivery-certificate.mjs verify-public-source
+      - run: pnpm install --frozen-lockfile
+      - name: Check this release revision
+        env:
+          LANE: ${{ matrix.lane }}
+        run: |
+          if [[ "$LANE" == typecheck || "$LANE" == build ]]; then
+            pnpm "$LANE"
+          else
+            node scripts/source-gate.mjs "$LANE" HEAD full
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-source-${{ matrix.lane }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos-arm64:
+    needs: source
+    if: github.repository == 'RichToyo/Gian' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    environment: production
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Scan publication source for public English
+        run: node scripts/check-public-english.mjs --ref "${{ github.sha }}"
+      - name: Verify public source boundaries
+        run: node scripts/delivery-certificate.mjs verify-public-source
+
+      - name: Verify signed stable release configuration
+        env:
+          GIAN_GITHUB_CLIENT_ID: ${{ vars.GIAN_GITHUB_CLIENT_ID }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          test -n "${GIAN_GITHUB_CLIENT_ID}"
+          test -n "${CSC_LINK}"
+          test -n "${CSC_KEY_PASSWORD}"
+          test -n "${APPLE_API_KEY_BASE64}"
+          test -n "${APPLE_API_KEY_ID}"
+          test -n "${APPLE_API_ISSUER}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify version and reserve immutable RC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          node scripts/check-version-consistency.mjs --release-ref "$TAG"
+          echo "GIAN_RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "RC already exists; do not rebuild"; exit 1; fi
+
+      - name: Audit production dependencies
+        run: pnpm run quality:audit:prod
+
+      - name: Prepare Apple signing material
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/gian-notary"
+          printf '%s' "${APPLE_API_KEY_BASE64}" | base64 -D > "${RUNNER_TEMP}/gian-notary/AuthKey.p8"
+          chmod 600 "${RUNNER_TEMP}/gian-notary/AuthKey.p8"
+          printf '%s' "${CSC_LINK}" | base64 -D > "${RUNNER_TEMP}/gian-notary/signing.p12"
+          chmod 600 "${RUNNER_TEMP}/gian-notary/signing.p12"
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/gian-notary/gian-signing.keychain"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          echo "::add-mask::${KEYCHAIN_PASSWORD}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${RUNNER_TEMP}/gian-notary/signing.p12" \
+            -k "${KEYCHAIN_PATH}" \
+            -P "${CSC_KEY_PASSWORD}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "${KEYCHAIN_PASSWORD}" \
+            "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}"
+          security find-identity -v -p codesigning | grep -F 'Developer ID Application:'
+          echo "CSC_KEYCHAIN=${KEYCHAIN_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Build signed and notarized Gian
+        run: pnpm --filter @gian/desktop make:mac:release
+        env:
+          GIAN_GITHUB_CLIENT_ID: ${{ vars.GIAN_GITHUB_CLIENT_ID }}
+          APPLE_API_KEY: ${{ runner.temp }}/gian-notary/AuthKey.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+
+      - name: Remove temporary signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${CSC_KEYCHAIN:-}" ]; then
+            security delete-keychain "${CSC_KEYCHAIN}" || true
+          fi
+          rm -f \
+            "${RUNNER_TEMP}/gian-notary/signing.p12" \
+            "${RUNNER_TEMP}/gian-notary/AuthKey.p8"
+
+      - name: Verify signed, notarized stable artifacts
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          test -x packages/desktop/release/mac-arm64/Gian.app/Contents/MacOS/Gian
+          test -x packages/desktop/release/mac-arm64/Gian.app/Contents/Resources/runtime/node
+          test -f "packages/desktop/release/Gian-${VERSION}-arm64.dmg"
+          test -f "packages/desktop/release/Gian-${VERSION}-arm64.dmg.blockmap"
+          test -f "packages/desktop/release/Gian-${VERSION}-arm64.zip"
+          test -f "packages/desktop/release/Gian-${VERSION}-arm64.zip.blockmap"
+          test -f packages/desktop/release/latest-mac.yml
+          codesign --verify --deep --strict --verbose=2 packages/desktop/release/mac-arm64/Gian.app
+          # The bundled Node must carry the library-validation exception (managed JS
+          # runtimes load upstream-adhoc-signed native addons); the App must not.
+          NODE_ENTITLEMENTS="$(codesign -d --entitlements - --xml packages/desktop/release/mac-arm64/Gian.app/Contents/Resources/runtime/node)"
+          echo "${NODE_ENTITLEMENTS}" | grep -q 'com.apple.security.cs.disable-library-validation'
+          echo "${NODE_ENTITLEMENTS}" | grep -q 'com.apple.security.cs.allow-jit'
+          APP_ENTITLEMENTS="$(codesign -d --entitlements - --xml packages/desktop/release/mac-arm64/Gian.app/Contents/MacOS/Gian)"
+          if echo "${APP_ENTITLEMENTS}" | grep -q 'com.apple.security.cs.disable-library-validation'; then
+            echo "Main executable unexpectedly carries disable-library-validation"
+            exit 1
+          fi
+          xcrun stapler validate packages/desktop/release/mac-arm64/Gian.app
+          spctl --assess --type execute --verbose=2 packages/desktop/release/mac-arm64/Gian.app
+
+      - name: Create complete update checksums
+        working-directory: packages/desktop/release
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('../../../package.json').version")"
+          shasum -a 256 \
+            "Gian-${VERSION}-arm64.dmg" \
+            "Gian-${VERSION}-arm64.dmg.blockmap" \
+            "Gian-${VERSION}-arm64.zip" \
+            "Gian-${VERSION}-arm64.zip.blockmap" \
+            latest-mac.yml > SHA256SUMS
+
+      - name: Stage draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          RELEASE_DIR=packages/desktop/release
+          ASSETS=(
+            "${RELEASE_DIR}/Gian-${VERSION}-arm64.dmg"
+            "${RELEASE_DIR}/Gian-${VERSION}-arm64.dmg.blockmap"
+            "${RELEASE_DIR}/Gian-${VERSION}-arm64.zip"
+            "${RELEASE_DIR}/Gian-${VERSION}-arm64.zip.blockmap"
+            "${RELEASE_DIR}/latest-mac.yml"
+            "${RELEASE_DIR}/SHA256SUMS"
+          )
+          gh release create "${GIAN_RELEASE_TAG}" \
+            "${ASSETS[@]}" \
+            --draft --target "$GITHUB_SHA" --generate-notes \
+            --notes "Signed RC. Awaiting explicitly authorized Desktop acceptance." \
+            --title "Gian ${GIAN_RELEASE_TAG}"
+
+      - name: Verify exact draft release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          RELEASE_JSON="${RUNNER_TEMP}/gian-release.json"
+          VERIFIED=false
+          for ATTEMPT in 1 2 3; do
+            gh release view "${GIAN_RELEASE_TAG}" \
+              --json tagName,isDraft,isPrerelease,assets > "${RELEASE_JSON}"
+            if node scripts/verify-update-artifacts.mjs \
+              --release-dir packages/desktop/release \
+              --version "${VERSION}" \
+              --app-update-config packages/desktop/release/mac-arm64/Gian.app/Contents/Resources/app-update.yml \
+              --github-release-json "${RELEASE_JSON}"; then
+              VERIFIED=true
+              break
+            fi
+            sleep $((ATTEMPT * 5))
+          done
+          test "${VERIFIED}" = true
+
+      - name: Record immutable build receipt
+        run: node scripts/delivery-certificate.mjs build packages/desktop/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-build-${{ github.run_id }}
+          path: packages/desktop/release/release-build-receipt.json
+          retention-days: 30
+      - name: Attach build receipt to draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GIAN_RELEASE_TAG" packages/desktop/release/release-build-receipt.json

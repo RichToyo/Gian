@@ -1,0 +1,868 @@
+/* ============================================================
+   shell-v2.css — Gian V2 shell styles (Phase 1 redesign)
+   Pasted verbatim from design/gian-design-v2/css/app.css where
+   rules apply, plus dock-anchored runner chip + popover (V1
+   carry-over) for connection state.
+   Imported AFTER shell.css so V2 rules win on equal specificity.
+   ============================================================ */
+
+/* ---------- App shell grid ---------- */
+.app {
+  display: grid;
+  /* A one-column grid defaults to an `auto` track whose min-content size can
+     exceed the explicit 100vw container. At narrow widths the breadcrumb +
+     workbench then widened both the topbar and body while `.app` merely
+     clipped them, hiding the Dock and trailing controls. Force the sole
+     track to honor the viewport and let the already shrinkable descendants
+     (`min-width: 0`) do their job. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h) 1fr;
+  /* Both dimensions must be explicit, otherwise the grid auto-sizes to its
+     content width and the Workbench/Dock can push past the viewport. */
+  width: var(--gian-browser-viewport-width, 100vw);
+  height: var(--gian-browser-viewport-height, 100vh);
+  min-width: 0;
+  /* Frame translucency is painted once on body; nested chrome stays
+     transparent so the glass alpha never stacks. */
+  background: transparent;
+  overflow: hidden;
+}
+.body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
+  /* override old grid */
+  grid-template-columns: none;
+  padding: 0;
+  overflow: hidden;
+}
+/* Panel 1's responsive quarter-width floor is enforced by panel-layout.ts.
+   Clear the legacy fixed 420px floor so CSS and drag geometry agree. */
+.body .main { min-width: 0; }
+.body.wb-only .sheet { flex: 1; min-width: 0; width: auto; }
+/* Workbench-only view: CodingView stays mounted so the sessions sidebar is
+   visible, but its main chat pane collapses. `.view` shrinks to fit the
+   sidebar; `.main` (chat) is hidden entirely. */
+.body.wb-only .view { flex: none; }
+.body.wb-only .view > .main { display: none; }
+
+/* splitter — 4px drag handle; on hover a long accent bar appears across the full edge */
+.splitter {
+  flex: none;
+  width: 4px;
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+  z-index: 5;
+  transition: transform 160ms var(--ease-soft);
+}
+.view-splitter { transition: transform 160ms var(--ease-soft); }
+.splitter::after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 8px; bottom: 8px;
+  transform: translateX(-50%);
+  width: 2px;
+  border-radius: var(--r-1);
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 140ms var(--ease), width 140ms var(--ease);
+  pointer-events: none;
+  box-shadow: 0 0 0 0 var(--accent-ring);
+}
+.splitter:hover::after,
+.splitter.dragging::after { opacity: 0.85; width: 3px; box-shadow: 0 0 6px 0 var(--accent-ring); }
+
+.splitter.h {
+  width: auto;
+  height: 4px;
+  cursor: row-resize;
+}
+.splitter.h::after {
+  left: 8px; right: 8px;
+  top: 50%; bottom: auto;
+  transform: translateY(-50%);
+  width: auto; height: 2px;
+  transition: opacity 140ms var(--ease), height 140ms var(--ease);
+}
+.splitter.h:hover::after,
+.splitter.h.dragging::after { height: 3px; width: auto; }
+
+/* ---------- Topbar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Right inset centers the trailing panel-3 toggle over the dock column
+     below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
+  padding: 0 6px 0 8px;
+  background: transparent;
+}
+
+/* Hairline between the window-chrome button cluster and the path breadcrumb —
+   restored per Owner call (2026-08-21), reverting the 2363ae8 blanking. */
+.tb-divider {
+  width: 1px;
+  height: 16px;
+  flex: none;
+  background: var(--hairline);
+  margin: 0 4px;
+}
+
+.brand {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text);
+  text-decoration: none;
+  padding: 3px 8px 3px 6px;
+  margin: 0 2px;
+  border-radius: var(--r-2);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+}
+.brand:hover { background: var(--surface); }
+
+/* mode dropdown — switches Sessions / Spaces / Bots */
+.mode-anchor { position: relative; }
+
+.mode-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 160px;
+  background: var(--surface);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+  z-index: 80;
+  display: flex; flex-direction: column;
+  gap: 1px;
+}
+.mode-pop-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent; border: 0;
+  border-radius: var(--r-1);
+  text-align: left;
+  font-size: var(--fz-13);
+  color: var(--text);
+  cursor: pointer;
+}
+.mode-pop-item:hover { background: var(--surface-2); }
+.mode-pop-item.active { background: var(--accent-soft); color: var(--accent-text); }
+.mode-pop-item .check { width: 12px; color: var(--accent-text); font-size: 11px; }
+
+/* path */
+.path {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex: 1;
+  min-width: 0;
+  margin-left: 4px;
+}
+.path-sep {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+  font-size: 11px;
+  flex: none;
+  opacity: 0.7;
+}
+.path-seg-anchor { position: relative; display: inline-flex; }
+.path-seg {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 7px;
+  border-radius: var(--r-1);
+  font-size: var(--fz-12);
+  color: var(--text-2);
+  max-width: 240px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+  position: relative;
+}
+.path-seg:hover { background: var(--surface); color: var(--text); border-color: var(--hairline); }
+.path-seg.copied {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-color: oklch(from var(--accent) l c h / 0.5);
+}
+.path-copied {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--text);
+  color: var(--text-inv);
+  font: 500 10.5px/1 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: none;
+  padding: 4px 7px 4px 6px;
+  border-radius: var(--r-1);
+  box-shadow: var(--shadow-2);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 60;
+  animation: path-copied-in 140ms var(--ease);
+}
+.path-copied::before {
+  content: "";
+  position: absolute;
+  top: -3px; left: 50%; transform: translateX(-50%) rotate(45deg);
+  width: 6px; height: 6px;
+  background: var(--text);
+}
+.path-copied svg { color: var(--ok); }
+@keyframes path-copied-in {
+  from { opacity: 0; transform: translate(-50%, -2px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+/* `.path-seg.branch` / `.path-seg.session` carry no face/size/color
+   overrides — every breadcrumb segment reads in the same style, one path,
+   no per-kind emphasis (2026-08-04; the branch's mono + 11px and the
+   session's --text made the three segments look mismatched). */
+.path-seg.session {
+  padding-right: 5px;
+}
+.path-seg-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+  flex: none;
+}
+.path-editing { display: inline-flex; align-items: center; gap: 6px; }
+.path-seg-label { display: inline-block; }
+.path-seg-affordance {
+  display: inline-flex; align-items: center;
+  margin-left: 2px;
+  color: var(--text-3);
+  opacity: 0;
+  transform: translateX(-2px);
+  transition: opacity 120ms var(--ease), transform 120ms var(--ease);
+}
+.path-seg:hover .path-seg-affordance,
+.path-seg:focus-visible .path-seg-affordance {
+  opacity: 0.8;
+  transform: translateX(0);
+}
+.path-seg-affordance.caret {
+  opacity: 0.55;
+  transform: none;
+}
+.path-seg:hover .path-seg-affordance.caret { opacity: 1; }
+
+.path-rename-input {
+  padding: 3px 7px;
+  border-radius: var(--r-1);
+  font: 500 var(--fz-12)/1.4 var(--font-sans);
+  background: var(--surface);
+  border: 0;
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  color: var(--text);
+  min-width: 200px;
+}
+
+/* ---------- session menu (when path session-segment is clicked) ---------- */
+.session-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 200px;
+  background: var(--surface);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+  z-index: 80;
+}
+.session-menu .item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent; border: 0;
+  border-radius: var(--r-1);
+  text-align: left;
+  font: var(--fz-12)/1 var(--font-sans);
+  color: var(--text);
+  cursor: pointer;
+}
+.session-menu .item:hover { background: var(--surface-2); }
+.session-menu .item.danger { color: var(--danger); }
+.session-menu .item.danger:hover { background: var(--danger-soft); }
+.session-menu .item svg { width: 13px; height: 13px; color: var(--text-3); }
+.session-menu .item.danger svg { color: var(--danger); }
+.session-menu .item .sub {
+  margin-left: auto;
+  flex: none;
+  padding-left: 12px;
+  font: 10px/1 var(--font-mono);
+  color: var(--text-3);
+}
+/* Branch (worktree) menu: the active tree is bold + carries a check glyph;
+   the detail (Primary / owning session) reuses the `.sub` hint style so the
+   worktree dropdown and the session dropdown share one row format. */
+.session-menu .item.active { font-weight: 600; }
+/* Fixed-width slot for the active check so all labels align (2026-08-03). */
+.session-menu .item .item-check {
+  width: 13px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.session-menu .item .item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* The row sets `font: …/1`; inside this overflow-hidden box a 1.0 line-height
+     clips descenders (p/g/y) — give the label its own taller line box. */
+  line-height: 1.35;
+}
+/* Branch (worktree) menu: let long worktree names breathe. The bare menu
+   shrink-fits inside its breadcrumb anchor, so `codex/push-realtime-…` names
+   ellipsized well short of readable; size to content with a viewport-aware
+   cap instead, and the row's `title` tooltip covers anything still longer
+   (2026-08-05). */
+.session-menu.branch-menu {
+  width: max-content;
+  max-width: min(480px, calc(100vw - 48px));
+}
+/* Group separator inside session/branch menus — inset on both sides so it
+   reads as a divider with breathing room, not an edge-to-edge rule. */
+.session-menu .rule { height: 1px; margin: 4px 10px; background: var(--hairline); }
+
+/* ---------- Dock (right icon strip) — frame surface ---------- */
+.dock {
+  width: var(--dock-w, 38px);
+  flex: none;
+  display: flex; flex-direction: column;
+  align-items: center;
+  padding: 6px 3px;
+  gap: 2px;
+  background: transparent;
+}
+.dock-group {
+  display: flex; flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+}
+.dock-divider {
+  width: 18px;
+  height: 1px;
+  margin: 4px auto;
+  /* Owner call (2026-08-21): dock group dividers stay VISIBLE — reverts the
+     2363ae8 blanking for the right rail only. */
+  background: var(--hairline);
+  flex: none;
+}
+.dock-spacer { flex: 1; }
+.dock-btn {
+  position: relative;
+  width: 32px; height: 32px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-2);
+  color: var(--text-3);
+  background: transparent; border: 0;
+  cursor: pointer;
+}
+.dock-btn:hover { background: var(--surface); color: var(--text); }
+.dock-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.dock-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.dock-btn svg { width: 17px; height: 17px; }
+/* hover label — floats to the LEFT of the dock so it doesn't get clipped */
+.dock-btn .lbl {
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px 8px;
+  border-radius: var(--r-2);
+  background: var(--text);
+  color: var(--text-inv);
+  font: 500 11px/1 var(--font-sans);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 80ms ease;
+  z-index: 60;
+  box-shadow: var(--shadow-2);
+}
+.dock-btn:hover .lbl { opacity: 1; transition-delay: 200ms; }
+/* per-group hover affordance to reinforce visual difference */
+.dock-btn.panel:hover    { background: oklch(from var(--text) l c h / 0.06); }
+.dock-btn.wb:hover       { background: oklch(from var(--accent) l c h / 0.10); }
+.dock-btn.panel.active   { background: oklch(from var(--text) l c h / 0.10); color: var(--text); }
+.dock-btn.wb.active      { background: var(--accent-soft); color: var(--accent-text); }
+/* ---------- Runner chip (V1-style, anchored bottom of the Dock) ----------
+   Clicking the chip pops out a V1-style runner-pop panel to the left of the
+   Dock with host info (latency, agents, disk, versions, workspace root).
+   The chip itself is just a colored dot — the Dock is narrow (38px) and a
+   text label would either truncate or push past the column. */
+.runner-anchor {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  margin-top: 2px;
+  margin-bottom: 4px;
+}
+.runner-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-3);
+  transition: background 120ms var(--ease);
+}
+.runner-chip:hover { background: var(--surface-3); }
+.runner-chip[aria-expanded="true"] { background: var(--surface-3); }
+.runner-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 999px;
+  background: var(--text-3);
+  box-shadow: 0 0 0 2px var(--surface-2);
+  flex: none;
+}
+.runner-chip[data-state="ok"] .runner-dot,
+.runner-pop-head .runner-dot[data-state="ok"] {
+  background: oklch(0.72 0.16 152);
+  box-shadow: 0 0 0 2px var(--surface-2), 0 0 6px 0 oklch(0.72 0.16 152 / 0.55);
+}
+.runner-chip[data-state="reconnecting"] .runner-dot,
+.runner-pop-head .runner-dot[data-state="reconnecting"] {
+  background: oklch(0.78 0.16 80);
+  animation: runner-pulse 1.2s ease-in-out infinite;
+}
+.runner-chip[data-state="offline"] .runner-dot,
+.runner-pop-head .runner-dot[data-state="offline"] {
+  background: oklch(0.68 0.18 28);
+}
+@keyframes runner-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.runner-pop {
+  position: absolute;
+  bottom: 0;
+  right: calc(100% + 8px);
+  min-width: 260px;
+  max-width: 320px;
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-2);
+  z-index: 80;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+}
+.runner-pop-head {
+  display: flex; align-items: center; gap: 10px;
+}
+.runner-pop-host { min-width: 0; }
+.runner-pop-name {
+  font: 600 12.5px/1.2 var(--font-sans);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runner-pop-meta {
+  font: 500 10.5px/1.3 var(--font-mono);
+  color: var(--text-3);
+  margin-top: 2px;
+}
+.runner-pop-divider {
+  height: 1px;
+  margin: 8px 10px;
+  background: var(--hairline);
+  opacity: 0.6;
+}
+.runner-pop-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font: 500 11px/1.4 var(--font-mono);
+}
+.runner-pop-list dt {
+  color: var(--text-3);
+  text-align: right;
+}
+.runner-pop-list dd {
+  color: var(--text);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Hide old shell elements that V2 removed ---------- */
+/* These selectors used to live in shell.css; the elements are no longer
+   rendered in Phase 1, but hiding rules keep snapshots clean in case any
+   leftover markup sneaks in. */
+.nav { display: none; }
+
+/* ---------- Reset legacy session.css overrides that conflict with V2 ----------
+   session.css gives `.sidebar` rounded corners + box-shadow (treating it as an
+   island). V2 sidebar is flat against the body — same --bg frame background,
+   no shadow, no rounding. */
+.sidebar {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  width: var(--rail-w, 272px) !important;
+}
+
+/* components.css `.sheet` was the legacy settings overlay panel — width
+   380, padding 18, shadow + radius + animation. V2 Sheet (Workbench) uses
+   `.sheet` as a transparent column whose children are `.sheet-group` islands.
+   Hard-reset the leaked properties. (The legacy animation is overridden by
+   the phase-6 `.sheet` entry animation at the end of this file.) */
+.sheet {
+  padding: 0 !important;
+  gap: 0 !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  overflow: visible !important;
+}
+
+/* CSS class name collision: V2's `.sheet-tab.preview` (italic preview-tab
+   indicator) and shell.css `.preview` (the legacy 400px right-column
+   file preview drawers) share the `.preview` class. The legacy `.preview` rule
+   sets width:400px + display:flex + flex-direction:column, which leaks onto
+   the tab button and makes a single preview tab fill the whole row. Restore
+   V2 tab layout explicitly. */
+.sheet-tab.preview {
+  width: auto !important;
+  display: inline-flex !important;
+  flex-direction: row !important;
+  flex: none !important;
+  background: oklch(from var(--text) l c h / 0.02) !important;
+}
+
+.sheet-content { position: relative; }
+
+/* Path row: full path on the left + the file action buttons (md toggle /
+   Open with / copy+wrap menu) on the right. It's the first child of the
+   scrolling `.sheet-content` and `position: sticky` so it rides the top of the
+   viewport — the path and actions stay visible while the file scrolls. Shown
+   only for tabs that have a path (file/diff). */
+.sheet-path-row {
+  position: sticky; top: 0; z-index: 5;
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px 4px 10px;
+  background: var(--surface);
+}
+.sheet-path {
+  flex: 1 1 auto; min-width: 0;
+  display: inline-flex; align-items: baseline;
+  overflow: hidden;
+  font: var(--fz-11)/1.5 var(--font-mono);
+  color: var(--text-3);
+}
+.sheet-path .sheet-path-dir {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex: 0 1 auto;
+}
+.sheet-path .sheet-path-file { flex: none; white-space: nowrap; color: var(--text-2); }
+/* The action group now lives inside the path row — inline, no float/shadow.
+   `.sheet-act-wrap` keeps its own positioning for the dropdown menus. */
+.sheet-content-actions {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---------- Executors section status pills ----------
+   `.exec-status.ok` exists in gian-v2.css; loading/err variants are added
+   here so the row reflects proxy fetch state. */
+.exec-status.loading {
+  background: oklch(from var(--text) l c h / 0.07);
+  color: var(--text-3);
+}
+.exec-status.err {
+  background: oklch(from var(--danger) l c h / 0.12);
+  color: var(--danger);
+}
+
+/* ---------- Image tab body (renders straight from /raw) ---------- */
+.sheet-image {
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; overflow: auto;
+  background: var(--surface-inset, var(--surface-2));
+}
+.sheet-image img {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-1);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+
+/* Notice for non-previewable files (PDF, …) — centered card + open buttons. */
+
+/* ---------- Diff tab body (Changes inspector → Sheet) ---------- */
+.sheet-tab .ext-ico.diff { background: oklch(0.55 0.12 145); }
+.sheet-diff {
+  font: var(--fz-12)/1.55 var(--font-mono);
+  padding: 8px 0 14px;
+  color: var(--text);
+}
+/* Plain text Sheet body used by transcript diff snapshots. */
+.sheet-text {
+  font: var(--fz-12)/1.6 var(--font-mono);
+  padding: 10px 14px 16px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sheet-diff-empty {
+  padding: 14px 16px;
+  color: var(--text-3);
+  font: var(--fz-12)/1.5 var(--font-mono);
+}
+.sheet-diff-file + .sheet-diff-file { margin-top: 12px; }
+.sheet-diff-file-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 14px;
+  background: var(--surface-2);
+  font: 500 11px/1 var(--font-mono);
+  color: var(--text-2);
+}
+.sheet-diff-file-head .stat { display: inline-flex; gap: 6px; }
+.sheet-diff-file-head .add { color: oklch(0.55 0.16 145); }
+.sheet-diff-file-head .del { color: oklch(0.58 0.18 28); }
+.sheet-diff-hunk + .sheet-diff-hunk { margin-top: 8px; }
+.sheet-diff-hunk-head {
+  padding: 4px 14px;
+  font: 500 11px/1.4 var(--font-mono);
+  color: var(--text-3);
+  background: oklch(from var(--text) l c h / 0.03);
+}
+.sheet-diff-ln {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  padding: 0 8px 0 6px;
+  white-space: pre;
+}
+.sheet-diff-ln .sig {
+  color: var(--text-3);
+  text-align: center;
+  user-select: none;
+}
+.sheet-diff-ln .txt {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.sheet-diff-ln.add { background: oklch(from oklch(0.72 0.16 152) l c h / 0.09); }
+.sheet-diff-ln.add .sig { color: oklch(0.55 0.16 145); }
+.sheet-diff-ln.del { background: oklch(from oklch(0.62 0.18 28) l c h / 0.08); }
+.sheet-diff-ln.del .sig { color: oklch(0.58 0.18 28); }
+
+/* ---------- Split (side-by-side) diff view ---------- */
+/* Each row is two equal columns (old | new). A column is itself a
+   [num-gutter | text] grid so line numbers align independently per side.
+   Colors are reused from the unified `.add` / `.del` rules above. */
+.sheet-diff.split .sheet-diff-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.sheet-diff.split .sheet-diff-side {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  min-width: 0;
+}
+.sheet-diff.split .sheet-diff-side.old { border-right: 1px solid var(--border, oklch(from var(--text) l c h / 0.08)); }
+.sheet-diff.split .sheet-diff-side .num {
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-3);
+  user-select: none;
+}
+.sheet-diff.split .sheet-diff-side .txt {
+  padding: 0 8px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.sheet-diff.split .sheet-diff-side.add { background: oklch(from oklch(0.72 0.16 152) l c h / 0.09); }
+.sheet-diff.split .sheet-diff-side.del { background: oklch(from oklch(0.62 0.18 28) l c h / 0.08); }
+.sheet-diff.split .sheet-diff-side.empty { background: oklch(from var(--text) l c h / 0.02); }
+/* Word-wrap off → match the unified `pre` behavior so long lines scroll. */
+.sheet-diff.split.nowrap .sheet-diff-side .txt { white-space: pre; }
+.sheet-diff.split.nowrap .sheet-diff-split-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+}
+.sheet-diff.split.nowrap .sheet-diff-pane {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.sheet-diff.split.nowrap .sheet-diff-pane.old {
+  border-right: 1px solid var(--border, oklch(from var(--text) l c h / 0.08));
+}
+.sheet-diff.split.nowrap .sheet-diff-pane .sheet-diff-side {
+  width: max-content;
+  min-width: 100%;
+}
+.sheet-diff.split.nowrap .sheet-diff-pane .sheet-diff-side.old { border-right: 0; }
+
+/* §#7 — session-row status indicator (replaces the legacy kebab). */
+.ri-status {
+  position: absolute;
+  top: 50%; right: 8px;
+  transform: translateY(-50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  pointer-events: none;
+}
+.ri-status.running svg { animation: ri-spin 1.1s linear infinite; transform-origin: center; }
+@keyframes ri-spin { to { transform: rotate(360deg); } }
+.ri-status.err svg path { stroke-linecap: round; }
+.rail-item.active .ri-status { opacity: 1; }
+/* Hover shows the row actions in the same slot, so the status glyph must
+   yield even on the active row — beats `.rail-item.active` above on
+   specificity. Running rows keep their spinner (tasks-v3.css). */
+.rail-item.session-row:not(.is-running):hover .ri-status { opacity: 0; }
+
+/* Status icon — gradient disc + knockout glyph (spec 2026-06-28 §H).
+   Rendered INSIDE the .ri-status positioning wrapper, so session-row
+   placement is unchanged; only the visual is new. Colours are
+   computed from --g1/2/3 (tokens.css) and re-tint per accent + theme. */
+.gico { position: relative; display: inline-flex; flex: 0 0 auto; width: 16px; height: 16px; }
+.gico .gfill {
+  position: absolute; inset: 0;
+  -webkit-mask-repeat: no-repeat, no-repeat; mask-repeat: no-repeat, no-repeat;
+  -webkit-mask-position: center, center; mask-position: center, center;
+  -webkit-mask-size: contain, contain; mask-size: contain, contain;
+  mask-composite: subtract;
+}
+/* needs attention (unread / pending) — flowing gradient + breathe + glow */
+.gico.unread .gfill {
+  background: linear-gradient(115deg, var(--g1), var(--g2) 42%, var(--g3) 78%, var(--g1));
+  background-size: 230% 230%;
+  animation: gico-flow 4s ease-in-out infinite;
+  filter: drop-shadow(0 0 4px var(--gGlow));
+}
+.gico.unread { animation: gico-breathe 4s ease-in-out infinite; }
+/* Read — solid accent, static */
+.gico.read .gfill { background: var(--accent); }
+/* running — fixed 16px gradient ring, spin only */
+.gico.ring { width: 16px; height: 16px; }
+.gico.ring .gring {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--g1), var(--g2), var(--g3), var(--g2), var(--g1));
+  -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 59%);
+  mask: radial-gradient(closest-side, transparent 56%, #000 59%);
+  /* Running spins faster than the 4s needs attention flow/breathe — it's active work,
+     not a slow "needs you" pulse, so it should visibly turn (2026-07-01). */
+  animation: gico-spin 1.2s linear infinite;
+  filter: drop-shadow(0 0 4px var(--gGlow));
+}
+@keyframes gico-flow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+/* Breathe between 14px (0.875×16) and 18px (1.125×16) — base .gico is 16px. */
+@keyframes gico-breathe { 0%, 100% { transform: scale(0.875); } 50% { transform: scale(1.125); } }
+@keyframes gico-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .gico.unread, .gico.unread .gfill, .gico.ring .gring { animation: none !important; }
+}
+
+/* ---------- User-message position reset + message footer ----------
+   `.msg.user` pin reset, `.msg-foot` and `.msg-copy` moved to @gian/chat-ui
+   (packages/chat-ui/styles/chat-ui.css). */
+
+/* ---------- Motion (phase 6) ----------
+   Soft, short UI animation built on the tokens in tokens.css
+   (--ease-soft / --dur-fast / --dur-med). Panels keep their display:none
+   keep-alive — a display:none→flex flip restarts CSS animations, so the
+   entry animation replays every time a panel or tab group is shown again,
+   while hiding stays instant (no layout jitter for terminals/iframes). */
+@keyframes gian-pop-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gian-panel-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gian-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Panel 2 / panel 3 entry (rail open, or tab-group switch inside the sheet). */
+.sheet { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
+.inspector { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
+.sheet-group { animation: gian-fade-in var(--dur-fast) var(--ease-soft); }
+
+/* Popovers & dropdowns (mode switcher, menus). */
+.mode-pop,
+.sheet-act-menu,
+.runner-pop { animation: gian-pop-in var(--dur-fast) var(--ease-soft); }
+
+/* Chrome buttons — soft hover/active instead of instant color flips. */
+.dock-btn,
+.tb-toggle,
+.sb-mode,
+
+/* Sidebar collapse — the rail stays mounted (state preserved) and its width
+   transitions. --dur-fast (not --dur-med) because the same width property is
+   drag-resized live; a longer transition would trail the pointer. */
+.sidebar {
+  transition:
+    width var(--dur-fast) var(--ease-soft),
+    opacity var(--dur-fast) var(--ease-soft),
+    transform 160ms var(--ease-soft);
+}
+.sheet,
+.chat-context-panel,
+.inspector {
+  transition:
+    width 160ms var(--ease-soft),
+    opacity 160ms var(--ease-soft),
+    transform 160ms var(--ease-soft);
+}
+.body[data-panel-resizing="true"] .sidebar,
+.body[data-panel-resizing="true"] .sheet,
+.body[data-panel-resizing="true"] .chat-context-panel,
+.body[data-panel-resizing="true"] .inspector,
+.body[data-panel-resizing="true"] [data-panel-seam] {
+  transition: none;
+}
+.view.rail-collapsed { gap: 0; }
+.view.rail-collapsed .sidebar {
+  width: 0 !important;
+  min-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.view.rail-collapsed .view-splitter { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .sheet,
+  .chat-context-panel,
+  .inspector,
+  [data-panel-seam] {
+    transition-duration: 0ms !important;
+  }
+}

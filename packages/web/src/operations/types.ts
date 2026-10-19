@@ -1,0 +1,410 @@
+/**
+ * UI Operation Layer — Phase 0 artifact of
+ * `docs/archive/proposals/ui-operation-layer.md`.
+ *
+ * This module currently contains ONLY the closed operation-name union, the
+ * policy table, and the shared types from proposal §4.2/§4.3. The operation
+ * store, overlay reducer, dispatcher, and hooks land in Phase 1. Nothing
+ * here is wired into product code yet; the full rationale for every name
+ * and policy lives in `docs/archive/proposals/ui-operation-inventory.md`.
+ */
+import type { ClientToServerMessage } from '@gian/shared';
+
+export type OperationPolicy = 'local' | 'optimistic' | 'pending';
+
+/**
+ * Closed union of every registered UI operation. Adding a name here without
+ * a policy entry (or vice versa) fails TypeScript via `OPERATION_POLICIES`
+ * below — that is the type-level completeness gate from proposal §4.2.
+ */
+export type OperationName =
+  | 'translation.run'
+  | 'translation.cancel'
+  | 'translation.setAuto'
+  | 'remote.connectEnvironment'
+  | 'remote.removeEnvironment'
+  // Session
+  | 'session.create'
+  | 'session.fork'
+  | 'session.forkSession'
+  | 'sidechat.create'
+  | 'sidechat.resume'
+  | 'sidechat.close'
+  | 'sidechat.setTurnConfig'
+  | 'session.delete'
+  | 'session.stop'
+  | 'session.recover'
+  | 'session.rename'
+  | 'session.archive'
+  | 'session.pin'
+  | 'session.setUnread'
+  | 'session.setMode'
+  | 'session.setModel'
+  | 'session.setEffort'
+  | 'session.setServiceTier'
+  | 'session.assignTask'
+  | 'session.rebindAgent'
+  | 'session.reorder'
+  | 'session.setNativeConfig'
+  | 'session.setTurnConfig'
+  | 'session.merge'
+  | 'session.drop'
+  // Side Chat (gian.proxy/2.0 proposal §10.5)
+  | 'sidechat.create'
+  | 'sidechat.resume'
+  | 'sidechat.close'
+  // Message / Queue / Approval
+  | 'message.send'
+  | 'message.sendSkill'
+  | 'message.steer'
+  | 'message.uploadAttachment'
+  | 'context.pickResources'
+  | 'queue.add'
+  | 'queue.update'
+  | 'queue.remove'
+  | 'queue.clear'
+  | 'queue.sendNow'
+  | 'approval.resolve'
+  | 'inbox.markRead'
+  | 'inbox.markUnread'
+  | 'inbox.skipVersion'
+  // Task
+  | 'task.create'
+  | 'task.rename'
+  | 'task.toggleDone'
+  | 'task.pin'
+  | 'task.delete'
+  | 'task.createSubtask'
+  | 'task.completeSubtask'
+  | 'task.reopenSubtask'
+  | 'task.reorder'
+  // Workspace
+  | 'workspace.create'
+  | 'workspace.rename'
+  | 'workspace.pin'
+  | 'workspace.reorder'
+  | 'workspace.delete'
+  | 'workspace.saveClaudeMd'
+  | 'workspace.pickFolder'
+  | 'workspace.cloneRepo'
+  // Git / worktree / external open
+  | 'git.fetch'
+  | 'git.historyFetch'
+  | 'git.abortPendingOp'
+  | 'git.stage'
+  | 'git.unstage'
+  | 'files.openExternal'
+  | 'browser.openExternal'
+  | 'browser.clearData'
+  // Native Session
+  | 'native.adopt'
+  | 'native.delete'
+  // Settings / Agents / Onboarding / Auth
+  | 'settings.save'
+  | 'settings.resetOnboarding'
+  | 'agent.installCli'
+  | 'agent.installProxy'
+  | 'agent.checkProxyUpdate'
+  | 'agent.pickCliPath'
+  | 'agent.pickHome'
+  | 'agent.pickRuntime'
+  | 'agent.create'
+  | 'agent.delete'
+  | 'agent.patch'
+  | 'agent.setPath'
+  | 'agent.switchProxy'
+  | 'agent.restartApp'
+  // Proxy Catalog (WP4) + Runtime control plane (WP6)
+  | 'catalog.sync'
+  | 'catalog.installProxy'
+  | 'catalog.installRuntime'
+  | 'catalog.updateProxy'
+  | 'catalog.rollbackProxy'
+  | 'catalog.uninstallProxy'
+  | 'catalog.discoverRuntime'
+  | 'catalog.probeRuntime'
+  | 'onboarding.saveProjectRoot'
+  | 'onboarding.complete'
+  | 'auth.login'
+  | 'auth.logout'
+  | 'auth.githubLogin'
+  // Terminal
+  | 'term.spawn'
+  | 'term.close'
+  // Conversation-bound Schedules (Issue #51 / ADR-0053)
+  | 'schedule.update'
+  | 'schedule.pause'
+  | 'schedule.resume'
+  | 'schedule.runNow'
+  | 'schedule.archive'
+  | 'schedule.resolveConfirmation';
+
+/**
+ * The policy table — the Phase 0 source of truth. `optimistic` renders the
+ * reversible result immediately and rolls back only on explicit failure;
+ * `pending` renders a stable in-progress state and blocks duplicate
+ * submission. There is deliberately no fourth policy (proposal §2).
+ */
+export const OPERATION_POLICIES = {
+  'translation.run': 'pending',
+  'translation.cancel': 'pending',
+  'translation.setAuto': 'pending',
+  'remote.connectEnvironment': 'pending',
+  'remote.removeEnvironment': 'pending',
+  'session.create': 'pending',
+  'session.fork': 'pending',
+  // Protocol Fork is distinct from the legacy "Fork as executor" operation.
+  'session.forkSession': 'pending',
+  'sidechat.create': 'pending',
+  'sidechat.resume': 'pending',
+  'sidechat.close': 'pending',
+  'sidechat.setTurnConfig': 'optimistic',
+  'session.delete': 'pending',
+  'session.stop': 'pending',
+  'session.recover': 'pending',
+  'session.rename': 'optimistic',
+  'session.archive': 'optimistic',
+  'session.pin': 'optimistic',
+  'session.setUnread': 'optimistic',
+  'session.setMode': 'optimistic',
+  'session.setModel': 'optimistic',
+  'session.setEffort': 'optimistic',
+  'session.setServiceTier': 'optimistic',
+  'session.assignTask': 'optimistic',
+  'session.rebindAgent': 'pending',
+  'session.reorder': 'optimistic',
+  // Pending, not optimistic (Phase 2a decision, inventory §4 note 6): the
+  // rendered value lives in `native_config_options[].currentValue` — a nested
+  // array element, not a flat Session field — so it does not fit the
+  // entity+field overlay model (absorption compares with Object.is). The
+  // Composer's local option patch keeps the instant feedback; the run tracks
+  // the Host result per config option.
+  'session.setNativeConfig': 'pending',
+  'session.setTurnConfig': 'optimistic',
+  'session.merge': 'pending',
+  'session.drop': 'pending',
+  'message.send': 'optimistic',
+  'message.sendSkill': 'optimistic',
+  'message.steer': 'pending',
+  'message.uploadAttachment': 'pending',
+  'context.pickResources': 'pending',
+  'queue.add': 'optimistic',
+  'queue.update': 'optimistic',
+  'queue.remove': 'optimistic',
+  'queue.clear': 'optimistic',
+  'queue.sendNow': 'pending',
+  'approval.resolve': 'pending',
+  'inbox.markRead': 'pending',
+  'inbox.markUnread': 'pending',
+  'inbox.skipVersion': 'pending',
+  'task.create': 'pending',
+  'task.rename': 'optimistic',
+  'task.toggleDone': 'optimistic',
+  'task.pin': 'optimistic',
+  'task.delete': 'pending',
+  'task.createSubtask': 'pending',
+  'task.completeSubtask': 'pending',
+  'task.reopenSubtask': 'pending',
+  'task.reorder': 'optimistic',
+  'workspace.create': 'pending',
+  'workspace.rename': 'optimistic',
+  'workspace.pin': 'optimistic',
+  'workspace.reorder': 'optimistic',
+  'workspace.delete': 'pending',
+  'workspace.saveClaudeMd': 'pending',
+  'workspace.pickFolder': 'pending',
+  'workspace.cloneRepo': 'pending',
+  'git.fetch': 'pending',
+  'git.historyFetch': 'pending',
+  'git.abortPendingOp': 'pending',
+  'git.stage': 'pending',
+  'git.unstage': 'pending',
+  'files.openExternal': 'pending',
+  'browser.openExternal': 'pending',
+  'browser.clearData': 'pending',
+  'native.adopt': 'pending',
+  'native.delete': 'pending',
+  'settings.save': 'optimistic',
+  'settings.resetOnboarding': 'pending',
+  'agent.installCli': 'pending',
+  'agent.installProxy': 'pending',
+  'agent.checkProxyUpdate': 'pending',
+  'agent.create': 'pending',
+  'agent.delete': 'pending',
+  'agent.patch': 'pending',
+  'agent.setPath': 'pending',
+  'agent.switchProxy': 'pending',
+  'agent.pickCliPath': 'pending',
+  'agent.pickHome': 'pending',
+  'agent.pickRuntime': 'pending',
+  'agent.restartApp': 'pending',
+  'catalog.sync': 'pending',
+  'catalog.installProxy': 'pending',
+  'catalog.installRuntime': 'pending',
+  'catalog.updateProxy': 'pending',
+  'catalog.rollbackProxy': 'pending',
+  'catalog.uninstallProxy': 'pending',
+  'catalog.discoverRuntime': 'pending',
+  'catalog.probeRuntime': 'pending',
+  'onboarding.saveProjectRoot': 'pending',
+  'onboarding.complete': 'pending',
+  'auth.login': 'pending',
+  'auth.logout': 'pending',
+  'auth.githubLogin': 'pending',
+  'term.spawn': 'pending',
+  'term.close': 'pending',
+  // Schedule mutations are REST-backed with a stable Idempotency-Key minted
+  // per dispatch; `pending` blocks duplicate submissions on the same entity
+  // (inventory §5 destructive-guard semantics apply to archive as well).
+  'schedule.update': 'pending',
+  'schedule.pause': 'pending',
+  'schedule.resume': 'pending',
+  'schedule.runNow': 'pending',
+  'schedule.archive': 'pending',
+  'schedule.resolveConfirmation': 'pending',
+} satisfies Record<OperationName, OperationPolicy>;
+
+/**
+ * WS message types that mutate Host state — every `ClientToServerMessage`
+ * except the protocol exceptions (proposal §4.4): authentication bootstrap,
+ * event subscription, terminal byte streaming, replay request, and the
+ * read-only attention reconciliation lookup (0.6.7 — it is a query against
+ * stored refs, never a state change).
+ */
+export type MutatingWsType = Exclude<
+  ClientToServerMessage['type'],
+  'auth' | 'events:subscribe' | 'term:input' | 'term:resize' | 'term:replay-request' | 'attention:lookup'
+>;
+
+/** The mutating members of `ClientToServerMessage` — every one carries the
+ *  optional `request_id` correlation field (proposal §4.4). */
+export type MutatingClientMessage = Exclude<
+  ClientToServerMessage,
+  { type: 'auth' | 'events:subscribe' | 'term:input' | 'term:resize' | 'term:replay-request' | 'attention:lookup' }
+>;
+
+/**
+ * WS-type → policy map. All operations sharing one WS type share its policy
+ * (e.g. `session:create` backs both `session.create` and `session.fork`,
+ * both pending), so a type-level map is sufficient for the static gate's
+ * reverse check (proposal §6: a mutating WS type missing here fails).
+ */
+export const WS_TYPE_POLICIES = {
+  'session:create': 'pending',
+  'session:fork': 'pending',
+  'sidechat:create': 'pending',
+  'sidechat:resume': 'pending',
+  'sidechat:close': 'pending',
+  'sidechat:set_turn_config': 'optimistic',
+  'message:send': 'optimistic',
+  'message:steer': 'pending',
+  'approval:resolve': 'pending',
+  'session:stop': 'pending',
+  'session:recover': 'pending',
+  'session:rename': 'optimistic',
+  'session:archive': 'optimistic',
+  'session:pin': 'optimistic',
+  'session:delete': 'pending',
+  'session:set_unread': 'optimistic',
+  'session:set_mode': 'optimistic',
+  'session:set_model': 'optimistic',
+  'session:set_effort': 'optimistic',
+  'session:set_service_tier': 'optimistic',
+  'session:assign_task': 'optimistic',
+  'session:set_native_config': 'pending', // see OPERATION_POLICIES note
+  'session:set_turn_config': 'optimistic',
+  'task:create': 'pending',
+  'task:update': 'optimistic',
+  'task:delete': 'pending',
+  'queue:add': 'optimistic',
+  'queue:remove': 'optimistic',
+  'queue:update': 'optimistic',
+  'queue:send_now': 'pending',
+  'queue:clear': 'optimistic',
+  'term:spawn': 'pending',
+  'term:close': 'pending',
+} satisfies Record<MutatingWsType, OperationPolicy>;
+
+/** One field-level optimistic write (proposal §4.2). */
+export interface FieldWrite {
+  /** Field name on the entity, e.g. "name". */
+  field: string;
+  /** Overlay value; the store records the prior value for rollback. */
+  value: unknown;
+}
+
+/**
+ * A single overlay revision, keyed by entity + field (proposal §4.3).
+ * Overlays always render above canonical state; a run's result affects only
+ * the overlays whose `operationId` still matches that run.
+ */
+export interface OptimisticOverlay {
+  /** Entity + field, e.g. "session:<id>:name". */
+  entityFieldKey: string;
+  /** The run that wrote this revision. */
+  operationId: string;
+  value: unknown;
+  /** Value to restore on rollback. */
+  previous: unknown;
+  /** Set after timeout/disconnect — outcome unknown, never rolled back. */
+  unresolved?: boolean;
+}
+/** Transient state of one dispatched operation run (proposal §4.3). */
+export interface OperationRun {
+  id: string;
+  name: OperationName;
+  entityKey: string;
+  phase: 'optimistic' | 'pending' | 'confirmed' | 'failed' | 'timed-out';
+  startedAt: number;
+  error?: string;
+  /** Machine-readable failure code when the executor surfaced one (e.g. the
+   *  Host's REST error code), so views can map errors to their cause. */
+  errorCode?: string;
+  /** REST executor result, recorded on success (Phase 3a) so views can
+   *  consume the created/updated entity (e.g. select the workspace or
+   *  subtask a pending create returned) from `useOperationRun`. */
+  result?: unknown;
+}
+
+export interface OperationError {
+  code: string;
+  message: string;
+}
+
+/**
+ * Per-dispatch context handed to `execute`/`reconcile`/`rollback`.
+ * `requestId` correlates the run with the Host: for WS-backed operations it
+ * is the `request_id` sent on the wire; for REST-backed ones it is still
+ * minted (it identifies the local run) even though the HTTP promise already
+ * identifies the request (proposal §4.4).
+ */
+export interface OperationContext {
+  runId: string;
+  requestId: string;
+  /** Canonical entity key captured when the run starts. Escape-hatch
+   * rollbacks use it to converge adjacent local UI state precisely. */
+  entityKey: string;
+}
+
+/**
+ * Registry entry shape (proposal §4.2). Overlay ownership, absorption,
+ * rollback, and the unresolved path are uniform and store-driven (§4.3);
+ * `reconcile`/`rollback` are escape hatches for non-standard effects only.
+ *
+ * Transport is declared by exactly one of (checked at registration time):
+ * - `buildMessage` — WS executor: the dispatcher mints `request_id`, sends
+ *   the message through the socket, and settles the run from the correlated
+ *   `operation:result` (proposal §4.4). `Result` is `void` here.
+ * - `execute` — REST executor: the dispatcher settles the run from the
+ *   returned promise (resolve → confirmed, reject → failed).
+ */
+export interface OperationDefinition<Input, Result = void> {
+  policy: OperationPolicy;
+  entityKey(input: Input): string;
+  optimisticWrites?(input: Input): FieldWrite[];
+  buildMessage?(input: Input): MutatingClientMessage;
+  execute?(input: Input, context: OperationContext): Promise<Result>;
+  reconcile?(result: Result, context: OperationContext): void;
+  rollback?(error: OperationError, context: OperationContext): void;
+  timeoutMs: number;
+}

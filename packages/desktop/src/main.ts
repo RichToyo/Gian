@@ -1,0 +1,2113 @@
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  desktopCapturer,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  Menu,
+  Notification,
+  nativeImage,
+  nativeTheme,
+  net,
+  safeStorage,
+  screen,
+  session,
+  shell,
+  systemPreferences,
+  type MenuItemConstructorOptions,
+  type WebContents,
+} from 'electron';
+import type {
+  GianBrowserBounds,
+  GianBrowserProjectTarget,
+  GianBrowserState,
+  GianScreenshotCapture,
+  GianScreenshotErrorCode,
+  GianScreenshotTarget,
+} from '@gian/shared';
+import {
+  OFFICIAL_APP_REPOSITORY,
+  officialCatalogSourcePolicy,
+} from '@gian/shared';
+import electronUpdater from 'electron-updater';
+import type { ChildProcess } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  desktopRequestBoundaryUrls,
+  isSafeExternalUrl,
+  isTrustedDesktopUrl,
+  resolveDesktopApplicationIdentity,
+  resolveDesktopDisplayName,
+  resolveDesktopTargets,
+  resolveDesktopWindowChrome,
+} from './config.js';
+import { ensureHostAvailable } from './host-service.js';
+import {
+  FileGitHubCredentialStore,
+  GitHubAuthService,
+  resolveGitHubOAuthClientId,
+} from './github-auth.js';
+import {
+  GITHUB_RELEASE_BROKER_SOCKET_ENV,
+  GitHubReleaseMetadataBroker,
+  resolveGitHubReleaseBrokerSocketPath,
+} from './github-request-broker.js';
+import {
+  REMOTE_IDENTITY_BROKER_SOCKET_ENV,
+  RemoteIdentityBroker,
+  resolveRemoteIdentityBrokerSocketPath,
+} from './remote-identity-broker.js';
+import { FileRemoteIdentityStore } from './remote-identity-store.js';
+import {
+  DESKTOP_TOKEN_HEADER,
+  resolveManagedHostPaths,
+  resolveUnpackedAppPath,
+  shouldProvisionPackagedDevRuntimes,
+  startManagedHost,
+} from './managed-host.js';
+import {
+  ManagedHostDrainCoordinator,
+  ManagedHostQuitGate,
+  ManagedHostReplacementGate,
+} from './managed-host-shutdown.js';
+import { retireLegacyHostLaunchAgent } from './legacy-host-retirement.js';
+import { BrowserController, registerBrowserScheme } from './browser-controller.js';
+import { BrowserAutomationService } from './browser-automation.js';
+import {
+  BROWSER_USE_BROKER_SOCKET_ENV,
+  BrowserUseBroker,
+  resolveBrowserUseBrokerSocketPath,
+} from './browser-use-broker.js';
+import { FileBrowserStateStore } from './browser-state.js';
+import { resolveBrowserSmokeDownloadDirectory } from './browser-download.js';
+import {
+  FileBrowserExtensionStore,
+  resolveBrowserSmokeExtensionDirectory,
+} from './browser-extension.js';
+import {
+  AppUpdateController,
+  type AppUpdateState,
+} from './app-updater.js';
+import {
+  AttentionClient,
+  type AttentionSocket,
+} from './attention-client.js';
+import {
+  FileDesktopNotificationPreferenceStore,
+  NativeNotificationService,
+  deliveredInboxRead,
+  desktopNavigationTargetsEqual,
+  desktopNotificationHostId,
+  inboxMarkReadHeaders,
+  formatNativeAttention,
+  type DesktopNotificationState,
+  type DesktopNotificationTarget,
+  type NativeNotificationDelivery,
+} from './native-notifications.js';
+import {
+  DEFAULT_ZOOM_PERCENT,
+  normalizeZoomPercent,
+  stepZoomPercent,
+} from './zoom.js';
+import {
+  ScreenshotController,
+  screenshotShortcutForPlatform,
+  type ScreenPermissionStatus,
+} from './screenshot/controller.js';
+import {
+  DEFAULT_SCREENSHOT_PREFERENCES,
+  FileScreenshotPreferenceStore,
+  sanitizeScreenshotPreferences,
+  type ScreenshotPreferences,
+} from './screenshot-preferences.js';
+import { readPickedComposerResources } from './resource-picker.js';
+import { environmentSettings, productionHostIsOccupied } from './dev-environment.js';
+
+const { autoUpdater } = electronUpdater;
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const preloadPath = join(currentDir, 'preload.cjs');
+const screenshotPreloadPath = join(currentDir, 'screenshot-preload.cjs');
+const screenshotHtmlPath = join(app.getAppPath(), 'renderer', 'screenshot.html');
+const titlebarCss = readFileSync(
+  join(app.getAppPath(), 'renderer', 'titlebar.css'),
+  'utf8',
+);
+const desktopPackageMetadata = JSON.parse(
+  readFileSync(join(app.getAppPath(), 'package.json'), 'utf8'),
+) as { gianReleaseChannel?: unknown };
+const signedProductionRelease = app.isPackaged
+  && desktopPackageMetadata.gianReleaseChannel === 'stable';
+const devArtifact = app.isPackaged && desktopPackageMetadata.gianReleaseChannel === 'dev';
+
+const applicationIdentity = resolveDesktopApplicationIdentity(
+  app.isPackaged,
+  app.getPath('appData'),
+  process.env,
+  devArtifact ? 'dev' : undefined,
+);
+const applicationName = applicationIdentity.name;
+let displayName = resolveDesktopDisplayName(applicationIdentity, process.env);
+let environmentSelected = !devArtifact;
+let productionDataSelected = false;
+
+registerBrowserScheme();
+app.setName(applicationName);
+if (applicationIdentity.userDataPath) {
+  // Keep the dev shell's Chromium profile and single-instance lock isolated
+  // from the installed production app so both can run at the same time.
+  app.setPath('userData', applicationIdentity.userDataPath);
+}
+
+const targets = resolveDesktopTargets({
+  isPackaged: app.isPackaged,
+  channel: devArtifact ? 'dev' : undefined,
+  platform: process.platform,
+});
+// Packaged smoke has to follow a real app.relaunch() into a process that is no
+// longer attached to Playwright. A harness-scoped stable token lets that test
+// query the replacement Host directly. Production keeps a fresh random token;
+// the override is accepted only alongside the existing packaged-smoke flag.
+const smokeDesktopToken = process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1'
+  ? process.env['GIAN_DESKTOP_SMOKE_TOKEN']?.trim()
+  : undefined;
+const desktopToken = app.isPackaged
+  ? smokeDesktopToken || randomBytes(32).toString('base64url')
+  : null;
+const desktopInstanceId = app.isPackaged ? randomUUID() : null;
+
+let mainWindow: BrowserWindow | null = null;
+let browserController: BrowserController | null = null;
+let browserAutomationService: BrowserAutomationService | null = null;
+let browserUseBroker: BrowserUseBroker | null = null;
+let screenshotController: ScreenshotController | null = null;
+let screenshotPreferencesStore: FileScreenshotPreferenceStore | null = null;
+let screenshotPreferences: ScreenshotPreferences = { ...DEFAULT_SCREENSHOT_PREFERENCES };
+let managedHost: ChildProcess | null = null;
+let legacyHostRetirement: Promise<void> | null = null;
+let githubAuthService: GitHubAuthService | null = null;
+let githubReleaseBroker: GitHubReleaseMetadataBroker | null = null;
+let remoteIdentityBroker: RemoteIdentityBroker | null = null;
+let loadingSurface:
+  | { window: BrowserWindow; promise: Promise<boolean> }
+  | null = null;
+let replacementOperation: Promise<boolean> | null = null;
+let rendererReady = false;
+let rendererDocumentReady = false;
+let pendingNavigationTarget: DesktopNavigationTarget | null = null;
+let notificationService: NativeNotificationService | null = null;
+let attentionClient: AttentionClient | null = null;
+let appUpdateController: AppUpdateController | null = null;
+let updateReadyNotification: Notification | null = null;
+let notifiedUpdateVersion: string | null = null;
+let creatingMainWindow: Promise<BrowserWindow> | null = null;
+const managedHostDrainCoordinator = new ManagedHostDrainCoordinator();
+const managedHostQuitGate = new ManagedHostQuitGate(managedHostDrainCoordinator.stop);
+const managedHostReplacementGate = new ManagedHostReplacementGate(
+  managedHostDrainCoordinator.stop,
+);
+
+type DesktopNavigationTarget =
+  | DesktopNotificationTarget
+  | { type: 'settings'; section: 'updates' };
+
+const DISABLED_UPDATE_STATE: AppUpdateState = {
+  status: 'disabled',
+  trigger: null,
+  update: null,
+  progress: null,
+  error: null,
+};
+
+const DISABLED_NOTIFICATION_STATE: DesktopNotificationState = {
+  supported: false,
+  preferences: {
+    desktop: false,
+    sound: false,
+  },
+  lastError: null,
+  registryError: null,
+};
+
+function dataDirectory(): string {
+  return process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.gian');
+}
+
+function logDirectory(): string {
+  if (app.isPackaged) return join(dataDirectory(), 'logs');
+  return join(
+    process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.gian-dev'),
+    'logs',
+  );
+}
+
+function getGitHubAuthService(): GitHubAuthService {
+  if (githubAuthService) return githubAuthService;
+  githubAuthService = new GitHubAuthService({
+    clientId: resolveGitHubOAuthClientId({
+      env: process.env,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
+    store: new FileGitHubCredentialStore({
+      path: join(app.getPath('userData'), 'github-auth.json'),
+      encryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: value => safeStorage.encryptString(value),
+      decrypt: value => safeStorage.decryptString(value),
+    }),
+    fetch: net.fetch,
+  });
+  return githubAuthService;
+}
+
+function releaseRepository(): string {
+  return process.env['GIAN_RELEASE_REPOSITORY']?.trim() || OFFICIAL_APP_REPOSITORY;
+}
+
+function githubReleaseBrokerSocketPath(): string {
+  const developmentSocket = !app.isPackaged
+    ? process.env[GITHUB_RELEASE_BROKER_SOCKET_ENV]?.trim()
+    : undefined;
+  return developmentSocket || resolveGitHubReleaseBrokerSocketPath(
+    desktopInstanceId ?? applicationIdentity.userDataPath ?? app.getPath('userData'),
+  );
+}
+
+async function startGitHubReleaseBroker(): Promise<void> {
+  if (githubReleaseBroker) return;
+  const service = getGitHubAuthService();
+  const catalogPolicy = officialCatalogSourcePolicy();
+  const broker = new GitHubReleaseMetadataBroker({
+    socketPath: githubReleaseBrokerSocketPath(),
+    allowedRepository: releaseRepository(),
+    allowedCatalogRepository: catalogPolicy.repository,
+    allowedArtifactRepositories: catalogPolicy.artifactRepositories,
+    fetchReleaseMetadata: (request, signal) => service.fetchReleaseMetadata(request, signal),
+  });
+  await broker.start();
+  githubReleaseBroker = broker;
+}
+
+async function ensureGitHubReleaseBroker(): Promise<void> {
+  try {
+    await startGitHubReleaseBroker();
+  } catch (error) {
+    // The app remains usable offline and the Host retains its anonymous
+    // GitHub fallback when the local credential broker cannot start.
+    console.error('[desktop] GitHub release broker failed to start', error);
+  }
+}
+
+function remoteIdentityBrokerSocketPath(): string {
+  const developmentSocket = !app.isPackaged
+    ? process.env[REMOTE_IDENTITY_BROKER_SOCKET_ENV]?.trim()
+    : undefined;
+  return developmentSocket || resolveRemoteIdentityBrokerSocketPath(
+    desktopInstanceId ?? applicationIdentity.userDataPath ?? app.getPath('userData'),
+  );
+}
+
+async function startRemoteIdentityBroker(): Promise<void> {
+  if (remoteIdentityBroker) return;
+  const broker = new RemoteIdentityBroker({
+    socketPath: remoteIdentityBrokerSocketPath(),
+    githubAccountId: async () => {
+      const state = await getGitHubAuthService().getState();
+      return state.status === 'signed_in' ? String(state.user.id) : null;
+    },
+    store: new FileRemoteIdentityStore({
+      path: join(app.getPath('userData'), 'remote-identity.json'),
+      encryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: value => safeStorage.encryptString(value),
+      decrypt: value => safeStorage.decryptString(value),
+    }),
+  });
+  await broker.start();
+  remoteIdentityBroker = broker;
+}
+
+async function ensureRemoteIdentityBroker(): Promise<void> {
+  try {
+    await startRemoteIdentityBroker();
+  } catch (error) {
+    console.error('[desktop] Remote identity broker failed to start', error);
+  }
+}
+
+function browserUseBrokerSocketPath(): string {
+  const developmentSocket = !app.isPackaged
+    ? process.env[BROWSER_USE_BROKER_SOCKET_ENV]?.trim()
+    : undefined;
+  return developmentSocket || resolveBrowserUseBrokerSocketPath(
+    desktopInstanceId ?? applicationIdentity.userDataPath ?? app.getPath('userData'),
+  );
+}
+
+async function startBrowserUseBroker(): Promise<void> {
+  if (browserUseBroker) return;
+  const broker = new BrowserUseBroker({
+    socketPath: browserUseBrokerSocketPath(),
+    handler: () => browserAutomationService,
+  });
+  await broker.start();
+  browserUseBroker = broker;
+}
+
+async function ensureBrowserUseBroker(): Promise<void> {
+  try {
+    await startBrowserUseBroker();
+  } catch (error) {
+    console.error('[desktop] Browser Use broker failed to start', error);
+  }
+}
+
+function isMainWindowSender(sender: WebContents): boolean {
+  return !!mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents;
+}
+
+const ZOOM_CHANGED_CHANNEL = 'desktop:zoom-changed';
+
+function currentMainWindowZoom(): number {
+  if (!mainWindow || mainWindow.isDestroyed()) return DEFAULT_ZOOM_PERCENT;
+  return normalizeZoomPercent(mainWindow.webContents.getZoomFactor() * 100);
+}
+
+function setMainWindowZoom(value: unknown): number {
+  const percent = normalizeZoomPercent(value);
+  if (!mainWindow || mainWindow.isDestroyed()) return percent;
+  mainWindow.webContents.setZoomFactor(percent / 100);
+  mainWindow.webContents.send(ZOOM_CHANGED_CHANNEL, percent);
+  return percent;
+}
+
+function changeMainWindowZoom(direction: -1 | 1): number {
+  return setMainWindowZoom(stepZoomPercent(currentMainWindowZoom(), direction));
+}
+
+function startProductionHost(): void {
+  if (desktopReplacementPending()) return;
+  if (!app.isPackaged || !desktopToken || !desktopInstanceId) return;
+  if (!environmentSelected) return;
+  if (managedHost && managedHost.exitCode === null && !managedHost.killed) return;
+
+  const paths = resolveManagedHostPaths({
+    hostEntry: resolveUnpackedAppPath(require.resolve('@gian/host')),
+    resourcesPath: process.resourcesPath,
+    dataDir: dataDirectory(),
+    sourceFirstDev: devArtifact && !productionDataSelected,
+  });
+  const child = startManagedHost({
+    electronExecutable: join(process.resourcesPath, 'runtime', 'node'),
+    paths,
+    host: new URL(targets.hostUrl).hostname,
+    port: Number(new URL(targets.hostUrl).port),
+    desktopToken,
+    instanceId: desktopInstanceId,
+    githubBrokerSocket: githubReleaseBrokerSocketPath(),
+    remoteBrokerSocket: remoteIdentityBrokerSocketPath(),
+    browserBrokerSocket: browserUseBrokerSocketPath(),
+    sourceFirstDev: devArtifact && !productionDataSelected,
+    env: {
+      ...process.env,
+      GIAN_RELEASE_VERSION: app.getVersion(),
+      GIAN_RELEASE_REPOSITORY: releaseRepository(),
+      ...(shouldProvisionPackagedDevRuntimes({
+        devArtifact,
+        productionDataSelected,
+        smoke: process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1',
+        dataDir: dataDirectory(),
+        devDataDir: environmentSettings('dev', homedir()).dataDir,
+      }) ? { GIAN_PROVISION_DEV_RUNTIMES: '1' } : {}),
+      ...(devArtifact && process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1'
+        ? { GIAN_DEV_RUNTIME_PROVISION_MODE: 'isolated' } : {}),
+    },
+  });
+  managedHost = child;
+  child.once('error', error => {
+    console.error('[desktop] managed host failed to start', error);
+  });
+  child.once('exit', (code, signal) => {
+    if (managedHost === child) managedHost = null;
+    if (code !== 0 && signal !== 'SIGTERM') {
+      console.error(`[desktop] managed host exited (${code ?? signal ?? 'unknown'})`);
+    }
+  });
+}
+
+function installDesktopRequestBoundary(): void {
+  if (!desktopToken) return;
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: desktopRequestBoundaryUrls(targets.hostUrl) },
+    (details, callback) => {
+      details.requestHeaders[DESKTOP_TOKEN_HEADER] = desktopToken;
+      callback({ requestHeaders: details.requestHeaders });
+    },
+  );
+}
+
+function rendererCanNavigate(): boolean {
+  return !!mainWindow
+    && !mainWindow.isDestroyed()
+    && !mainWindow.webContents.isDestroyed()
+    && rendererReady;
+}
+
+async function ensureMainWindow(): Promise<BrowserWindow> {
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+  if (creatingMainWindow) return creatingMainWindow;
+  const creation = createMainWindow();
+  creatingMainWindow = creation;
+  try {
+    return await creation;
+  } finally {
+    if (creatingMainWindow === creation) creatingMainWindow = null;
+  }
+}
+
+async function activateDesktopNavigation(target: DesktopNavigationTarget): Promise<void> {
+  if (desktopReplacementPending()) return;
+  pendingNavigationTarget = target;
+  let window: BrowserWindow;
+  try {
+    window = await ensureMainWindow();
+  } catch (error) {
+    console.warn('[desktop] navigation window was not created', error);
+    return;
+  }
+  if (desktopReplacementPending() || pendingNavigationTarget !== target) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  // A cold renderer may already have claimed this target through
+  // `desktop:navigation:ready` while createMainWindow was awaiting loadURL.
+  if (!rendererCanNavigate() || pendingNavigationTarget !== target) return;
+  try {
+    window.webContents.send('desktop:navigation', target);
+  } catch (error) {
+    console.warn('[desktop] navigation delivery failed', error);
+    return;
+  }
+  if (pendingNavigationTarget !== target) return;
+  markDeliveredInboxRead(target);
+}
+
+function createNativeNotificationDelivery(): NativeNotificationDelivery {
+  return {
+    show(payload, callbacks) {
+      const notification = new Notification({
+        id: payload.id,
+        title: payload.title,
+        body: payload.body,
+        silent: payload.silent,
+      });
+      notification.once('click', callbacks.onClick);
+      notification.once('close', callbacks.onClose);
+      notification.once('failed', callbacks.onFailed);
+      notification.show();
+      return { close: () => notification.close() };
+    },
+    remove(id) {
+      // Electron's per-id delete is darwin-only. Other platforms keep the ref.
+      if (process.platform !== 'darwin' || typeof Notification.remove !== 'function') return false;
+      try {
+        Notification.remove(id);
+        return true;
+      } catch (error) {
+        console.warn('[desktop] notification remove failed', error);
+        return false;
+      }
+    },
+    async reclaim(id, callbacks) {
+      if (process.platform !== 'darwin' || typeof Notification.getHistory !== 'function') return null;
+      let history: Notification[];
+      try {
+        history = await Notification.getHistory();
+      } catch (error) {
+        console.warn('[desktop] notification history failed', error);
+        return null;
+      }
+      const found = history.find(notification => notification.id === id);
+      if (!found) return null;
+      // A restored notification stays where it is. show() would dismiss and repost it.
+      found.once('click', callbacks.onClick);
+      found.once('close', callbacks.onClose);
+      return { close: () => found.close() };
+    },
+  };
+}
+
+function markDeliveredInboxRead(target: DesktopNavigationTarget): void {
+  if (target.type !== 'session' && target.type !== 'schedule_confirmation') return;
+  const ref = deliveredInboxRead(target, target);
+  if (!ref) return;
+  void deliverInboxRead(ref);
+}
+
+async function deliverInboxRead(ref: { id: string; generation: number }): Promise<void> {
+  // Packaged Main owns the desktop token. Unpackaged dev has no token and no
+  // native OS notification path. Do not invent a credential or skip auth.
+  if (!desktopToken) {
+    console.warn('[desktop] inbox mark-read skipped because this process has no desktop token');
+    return;
+  }
+  // The window uses the default session (no partition). Login stores
+  // httpOnly SameSite=Strict `gian_session` there for the Host origin.
+  // This fetch has no document origin, so do not rely on the cookie jar
+  // attaching that Strict cookie. Read it and send it. requireAuth still
+  // checks the cookie or Bearer; the desktop token only satisfies
+  // requireDesktopClient.
+  let sessionCookie: string | null = null;
+  try {
+    const cookies = await session.defaultSession.cookies.get({
+      url: targets.hostUrl,
+      name: 'gian_session',
+    });
+    const value = cookies.find(cookie => cookie.name === 'gian_session')?.value ?? '';
+    sessionCookie = value.length > 0 ? value : null;
+  } catch (error) {
+    console.warn('[desktop] inbox mark-read could not read the session cookie', error);
+    return;
+  }
+  const headers = inboxMarkReadHeaders({
+    desktopToken,
+    sessionCookie,
+    desktopTokenHeader: DESKTOP_TOKEN_HEADER,
+  });
+  if (!headers) return;
+  const url = new URL(`/api/inbox/${encodeURIComponent(ref.id)}/read`, targets.hostUrl);
+  try {
+    const response = await session.defaultSession.fetch(url.href, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ generation: ref.generation }),
+    });
+    if (!response.ok) {
+      console.warn(`[desktop] inbox mark-read was not accepted status=${response.status}`);
+    }
+  } catch (error) {
+    console.warn('[desktop] inbox mark-read failed', error);
+  }
+}
+
+function showUpdateReadyNotification(state: AppUpdateState): void {
+  const version = state.update?.version;
+  // Update-ready alerts are independent of the session-notification consent
+  // (preferences.desktop): turning off background Session alerts must not
+  // silence an already-downloaded update. Sound still follows the device
+  // preference.
+  if (
+    state.status !== 'downloaded'
+    || !version
+    || version === notifiedUpdateVersion
+    || !app.isPackaged
+    || process.platform !== 'darwin'
+    || !Notification.isSupported()
+  ) {
+    return;
+  }
+  notifiedUpdateVersion = version;
+  updateReadyNotification?.close();
+  const notification = new Notification({
+    title: `Gian ${version} is ready`,
+    body: 'Open Updates when you are ready to restart and install.',
+    silent: notificationService?.getState().preferences.sound !== true,
+  });
+  updateReadyNotification = notification;
+  notification.once('click', () => {
+    void activateDesktopNavigation({ type: 'settings', section: 'updates' });
+  });
+  notification.once('close', () => {
+    if (updateReadyNotification === notification) updateReadyNotification = null;
+  });
+  notification.once('failed', () => {
+    if (updateReadyNotification === notification) updateReadyNotification = null;
+    console.warn('[desktop-updater] update-ready notification was not delivered');
+  });
+  notification.show();
+}
+
+function initializeDesktopServices(): void {
+  const nativeNotificationSupported = app.isPackaged
+    && signedProductionRelease
+    && process.platform === 'darwin'
+    && process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] !== '1'
+    && Notification.isSupported();
+  const notificationHostId = desktopNotificationHostId(dataDirectory());
+  const notificationStore = new FileDesktopNotificationPreferenceStore(
+    join(app.getPath('userData'), 'notification-preferences.json'),
+    notificationHostId,
+  );
+  notificationService = new NativeNotificationService({
+    hostId: notificationHostId,
+    supported: nativeNotificationSupported,
+    store: notificationStore,
+    refs: notificationStore,
+    localeStore: notificationStore,
+    delivery: createNativeNotificationDelivery(),
+    format: formatNativeAttention,
+    onActivate: target => { void activateDesktopNavigation(target); },
+  });
+  notificationService.subscribe(state => {
+    if (rendererCanNavigate()) mainWindow?.webContents.send('desktop:notifications-state', state);
+  });
+
+  appUpdateController = new AppUpdateController({
+    updater: autoUpdater,
+    isPackaged: app.isPackaged,
+    signedRelease: signedProductionRelease,
+    platform: process.platform,
+    variant: applicationIdentity.variant,
+    disabled: process.env['GIAN_DISABLE_AUTO_UPDATE'] === '1'
+      || process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1',
+    logger: {
+      warn: message => { console.warn(message); },
+    },
+    beforeInstall: disposeScreenshotController,
+  });
+  appUpdateController.subscribe(state => {
+    if (rendererCanNavigate()) mainWindow?.webContents.send('desktop:updater-state', state);
+    showUpdateReadyNotification(state);
+  });
+  appUpdateController.start();
+
+  if (nativeNotificationSupported && desktopToken) {
+    attentionClient = new AttentionClient({
+      hostUrl: targets.hostUrl,
+      token: desktopToken,
+      tokenHeader: DESKTOP_TOKEN_HEADER,
+      socketFactory: (url, init) => (
+        new WebSocket(url, init) as unknown as AttentionSocket
+      ),
+      onAttention: message => { notificationService?.handleAttention(message); },
+      onControl: message => { notificationService?.applyAttentionControl(message); },
+      lookupRefs: () => notificationService?.attentionLookupRefs() ?? [],
+    });
+  }
+}
+
+function stopDesktopServicesForExit(): void {
+  attentionClient?.stop();
+  appUpdateController?.stop();
+  githubAuthService?.cancel();
+}
+
+function desktopReplacementPending(): boolean {
+  return managedHostReplacementGate.isDraining() || managedHostReplacementGate.isArmed();
+}
+
+function resumeDesktopServicesAfterCancelledExit(restartManagedHost: boolean): void {
+  if (restartManagedHost) startProductionHost();
+  initializeScreenshotController();
+  attentionClient?.start();
+  appUpdateController?.start();
+}
+
+function disposeScreenshotController(): void {
+  // macOS quitAndInstall closes windows BEFORE before-quit. A prewarmed
+  // screenshot panel is non-closable, so waiting for before-quit deadlocks it.
+  screenshotController?.dispose();
+  screenshotController = null;
+}
+
+function initializeScreenshotController(): void {
+  if (screenshotController) return;
+  screenshotController = createScreenshotController();
+  screenshotController.registerShortcut();
+  void screenshotController.warmUp().catch(error => {
+    console.warn('[desktop] screenshot overlay warm-up failed', error);
+  });
+}
+
+function showUnsafeExitBlocked(): void {
+  console.error('[desktop] managed Host did not exit; cancelling unsafe replacement');
+  dialog.showErrorBox(
+    'Gian could not restart safely',
+    'The managed Host and CLI processes did not finish shutting down. Gian did not start a replacement or install the update. Wait a moment, then try again.',
+  );
+}
+
+function showReplacementStartFailed(): void {
+  console.error('[desktop] replacement could not be started after the managed Host exited');
+  dialog.showErrorBox(
+    'Gian could not restart',
+    'Gian could not complete the restart or update. Its services have been restored. Check Updates for an error, then try again.',
+  );
+}
+
+function showReplacementBusy(): void {
+  console.error('[desktop] restart rejected because a normal quit is already draining the managed Host');
+  dialog.showErrorBox(
+    'Gian is already quitting',
+    'Gian is already waiting for the managed Host and CLI processes to stop. If the App remains open, wait a moment and try Restart again.',
+  );
+}
+
+/**
+ * A replacement must never be armed before the managed Host has actually
+ * exited. Electron's relaunch helper and Squirrel updater both remember their
+ * launch intent even when a later before-quit event is prevented.
+ */
+function runAfterManagedHostExit(startReplacement: () => boolean | Promise<boolean>): Promise<boolean> {
+  if (replacementOperation) return replacementOperation;
+  if (managedHostReplacementGate.isArmed()) return Promise.resolve(true);
+  // A normal OS quit owns the existing drain attempt. Do not attach a second
+  // replacement continuation to the same process exit.
+  if (managedHostQuitGate.isDraining()) {
+    showReplacementBusy();
+    return Promise.resolve(false);
+  }
+
+  stopDesktopServicesForExit();
+  const child = managedHost;
+  const hadLiveManagedHost = !!child
+    && child.exitCode === null
+    && child.signalCode === null;
+
+  let operation!: Promise<boolean>;
+  operation = managedHostReplacementGate.run(child, startReplacement).then(result => {
+    if (result === 'started') return true;
+    if (result === 'blocked') {
+      resumeDesktopServicesAfterCancelledExit(false);
+      showUnsafeExitBlocked();
+      return false;
+    }
+    // The Host was confirmed gone, but the updater/relauncher itself failed.
+    // Restore a packaged Host so the current window does not become stranded.
+    resumeDesktopServicesAfterCancelledExit(hadLiveManagedHost);
+    // Native installation may have closed the main window before failing.
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      void ensureMainWindow().catch(error => {
+        console.error('[desktop] failed to restore window after cancelled replacement', error);
+      });
+    }
+    showReplacementStartFailed();
+    return false;
+  }).finally(() => {
+    if (replacementOperation === operation) replacementOperation = null;
+  });
+  replacementOperation = operation;
+  return operation;
+}
+
+async function openExternal(candidate: string): Promise<void> {
+  if (isSafeExternalUrl(candidate)) await shell.openExternal(candidate);
+}
+
+// Match the web shell's theme backgrounds (styles/tokens.css): light is
+// #f7f7f5, dark is oklch(0.140 0.004 265) ≈ #08090b (Air-matched ramp). A
+// hardcoded light background made dark-theme users see a bright flash on
+// launch and reload before the renderer applied body[data-theme]. macOS
+// skips this entirely: createMainWindow uses a fully transparent base over
+// the system vibrancy instead, so this only serves non-macOS launches.
+function windowBackground(): string {
+  return nativeTheme.shouldUseDarkColors ? '#08090b' : '#f7f7f5';
+}
+
+interface MainWindowCaptureState {
+  window: BrowserWindow;
+  wasVisible: boolean;
+  wasMinimized: boolean;
+  wasFocused: boolean;
+}
+
+function revealMainWindow(window: BrowserWindow): void {
+  if (window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  window.focus();
+}
+
+async function showScreenPermissionHelp(): Promise<void> {
+  const result = await dialog.showMessageBox({
+    type: 'warning',
+    title: 'Screen Capture Unavailable',
+    message: 'Gian cannot capture the screen yet.',
+    detail: 'If Gian is disabled under Privacy & Security → Screen & System Audio Recording, enable it. If it is already enabled, quit Gian completely and reopen it before retrying.',
+    buttons: ['Open System Settings', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (result.response === 0 && process.platform === 'darwin') {
+    await shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    );
+  }
+}
+
+function createScreenshotController(): ScreenshotController {
+  return new ScreenshotController({
+    platform: process.platform,
+    initialShortcut: screenshotPreferences.shortcut,
+    overlayHtmlPath: screenshotHtmlPath,
+    overlayPreloadPath: screenshotPreloadPath,
+    listDisplays: () => screen.getAllDisplays().map(display => ({
+      id: display.id,
+      bounds: { ...display.bounds },
+      scaleFactor: display.scaleFactor,
+    })),
+    getCursorPoint: () => screen.getCursorScreenPoint(),
+    captureScreens: thumbnailSize => desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize,
+      fetchWindowIcons: false,
+    }),
+    createOverlayWindow: options => {
+      const overlay = new BrowserWindow(options);
+      overlay.webContents.on('will-navigate', event => event.preventDefault());
+      overlay.webContents.on('will-attach-webview', event => event.preventDefault());
+      overlay.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      overlay.webContents.session.setPermissionCheckHandler(() => false);
+      overlay.webContents.session.setPermissionRequestHandler(
+        (_webContents, _permission, callback) => callback(false),
+      );
+      return overlay;
+    },
+    getScreenPermissionStatus: () => {
+      if (process.platform !== 'darwin') return 'granted';
+      return systemPreferences.getMediaAccessStatus('screen') as ScreenPermissionStatus;
+    },
+    showScreenPermissionHelp,
+    prepareMainWindow: async () => {
+      const window = mainWindow;
+      if (!window || window.isDestroyed()) return null;
+      if (!screenshotPreferences.hideMainWindowDuringCapture) {
+        // Keep the Gian window visible: the frozen desktop then includes it,
+        // so the user can capture Gian's own surface too.
+        return { window, wasVisible: false, wasMinimized: false, wasFocused: false };
+      }
+      const state: MainWindowCaptureState = {
+        window,
+        wasVisible: window.isVisible(),
+        wasMinimized: window.isMinimized(),
+        wasFocused: window.isFocused(),
+      };
+      if (state.wasVisible) window.hide();
+      return state;
+    },
+    restoreMainWindow: async (token, outcome) => {
+      const state = token as MainWindowCaptureState | null;
+      if (!state || state.window.isDestroyed()) return;
+      if (outcome === 'success') {
+        revealMainWindow(state.window);
+        return;
+      }
+      if (!state.wasVisible) return;
+      if (state.wasMinimized) {
+        state.window.minimize();
+        return;
+      }
+      if (state.wasFocused) revealMainWindow(state.window);
+      else state.window.showInactive();
+    },
+    waitForDesktopToSettle: token => {
+      const state = token as MainWindowCaptureState | null;
+      return state?.wasVisible
+        ? new Promise(resolve => setTimeout(resolve, 100))
+        : Promise.resolve();
+    },
+    watchDisplayChanges: listener => {
+      screen.on('display-added', listener);
+      screen.on('display-removed', listener);
+      screen.on('display-metrics-changed', listener);
+      return () => {
+        screen.removeListener('display-added', listener);
+        screen.removeListener('display-removed', listener);
+        screen.removeListener('display-metrics-changed', listener);
+      };
+    },
+    registerGlobalShortcut: (accelerator, listener) =>
+      globalShortcut.register(accelerator, listener),
+    unregisterGlobalShortcut: accelerator => globalShortcut.unregister(accelerator),
+    randomId: randomUUID,
+    now: () => new Date(),
+    writePngToClipboard: bytes => {
+      const clipboardImage = nativeImage.createFromBuffer(Buffer.from(bytes));
+      if (clipboardImage.isEmpty()) return false;
+      clipboard.writeImage(clipboardImage);
+      return true;
+    },
+    onCaptured: (capture: GianScreenshotCapture) => {
+      const window = mainWindow;
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+      revealMainWindow(window);
+      window.webContents.send('desktop:screenshot:captured', capture);
+    },
+    onError: (error: GianScreenshotErrorCode) => {
+      const window = mainWindow;
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+      if (error === 'no-target' || error === 'capture-failed') revealMainWindow(window);
+      window.webContents.send('desktop:screenshot:error', error);
+    },
+  });
+}
+
+function hardenWebContents(contents: WebContents): void {
+  contents.on('will-navigate', (event, url) => {
+    if (isTrustedDesktopUrl(url, targets)) return;
+    event.preventDefault();
+    void openExternal(url);
+  });
+
+  contents.setWindowOpenHandler(({ url }) => {
+    if (isTrustedDesktopUrl(url, targets)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          backgroundColor: windowBackground(),
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            webSecurity: true,
+          },
+        },
+      };
+    }
+    void openExternal(url);
+    return { action: 'deny' };
+  });
+}
+
+function installDesktopTitlebar(contents: WebContents): void {
+  contents.on('dom-ready', () => {
+    void contents.insertCSS(titlebarCss).catch(error => {
+      console.error('[desktop] failed to install titlebar styles', error);
+    });
+  });
+}
+
+async function showUnavailable(
+  window: BrowserWindow,
+  reason: 'host' | 'web',
+): Promise<void> {
+  const path = join(app.getAppPath(), 'renderer', 'unavailable.html');
+  await window.loadFile(path, {
+    query: {
+      host: targets.hostUrl,
+      reason,
+      web: targets.webUrl,
+    },
+  });
+  // No Gian renderer will perform the visibility handshake on this local
+  // error page. Treat every Session as background so attention is not queued
+  // indefinitely while the Host/Web surface is unavailable.
+  if (mainWindow === window) {
+    notificationService?.setContext({ visibleSessionId: null });
+  }
+}
+
+async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
+  if (desktopReplacementPending()) return false;
+  if (loadingSurface?.window === window) return loadingSurface.promise;
+  if (mainWindow === window) screenshotController?.invalidateTarget();
+
+  const promise = (async () => {
+    if (app.isPackaged && !devArtifact) {
+      legacyHostRetirement ??= retireLegacyHostLaunchAgent({
+        homeDir: app.getPath('home'),
+      }).then(result => {
+        if (result.retired) console.log(`[desktop] retired legacy Host LaunchAgent: ${result.sourcePath}`);
+      });
+      await legacyHostRetirement;
+    }
+    await ensureGitHubReleaseBroker();
+    await ensureRemoteIdentityBroker();
+    await ensureBrowserUseBroker();
+    if (productionDataSelected && await productionHostIsOccupied()) {
+      dialog.showErrorBox('GianDev', 'Quit production Gian completely first (port 8990 is still in use).');
+      return false;
+    }
+    const readiness = await ensureHostAvailable({
+      healthUrl: targets.healthUrl,
+      manageHost: targets.manageHost,
+      startHost: startProductionHost,
+      ...(desktopToken
+        ? { requestHeaders: { [DESKTOP_TOKEN_HEADER]: desktopToken } }
+        : {}),
+      ...(desktopInstanceId ? { managedInstanceId: desktopInstanceId } : {}),
+      expectedVersion: app.getVersion(),
+    });
+    if (window.isDestroyed()) return false;
+
+    if (!readiness.ready) {
+      await showUnavailable(window, 'host');
+      return false;
+    }
+
+    try {
+      await window.loadURL(targets.webUrl);
+      return true;
+    } catch {
+      await showUnavailable(window, 'web');
+      return false;
+    }
+  })();
+  loadingSurface = { window, promise };
+
+  try {
+    return await promise;
+  } finally {
+    if (loadingSurface?.promise === promise) loadingSurface = null;
+  }
+}
+
+function buildApplicationMenu(): void {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: applicationName,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        {
+          label: 'Reconnect',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => {
+            if (mainWindow) void loadGianSurface(mainWindow);
+          },
+        },
+        {
+          label: 'Screenshot',
+          accelerator: screenshotPreferences.shortcut
+            ?? screenshotShortcutForPlatform(process.platform),
+          registerAccelerator: false,
+          click: () => { void screenshotController?.start(); },
+        },
+        {
+          label: 'Open Logs',
+          click: () => {
+            void shell.openPath(logDirectory());
+          },
+        },
+        {
+          label: 'Check for Updates…',
+          enabled: appUpdateController?.isEnabled() ?? false,
+          click: () => {
+            void activateDesktopNavigation({ type: 'settings', section: 'updates' });
+            void appUpdateController?.checkForUpdates('manual');
+          },
+        },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Actual Size',
+          accelerator: 'CmdOrCtrl+0',
+          click: () => { setMainWindowZoom(DEFAULT_ZOOM_PERCENT); },
+        },
+        {
+          label: 'Zoom In',
+          accelerator: 'CmdOrCtrl+Plus',
+          click: () => { changeMainWindowZoom(1); },
+        },
+        {
+          label: 'Zoom Out',
+          accelerator: 'CmdOrCtrl+-',
+          click: () => { changeMainWindowZoom(-1); },
+        },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+        ...(!app.isPackaged
+          ? ([
+              { type: 'separator' },
+              { role: 'toggleDevTools' },
+            ] satisfies MenuItemConstructorOptions[])
+          : []),
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        { role: 'front' },
+      ],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+async function createMainWindow(): Promise<BrowserWindow> {
+  rendererReady = false;
+  rendererDocumentReady = false;
+  notificationService?.resetContext();
+  const window = new BrowserWindow({
+    ...resolveDesktopWindowChrome(process.platform),
+    width: 1440,
+    height: 960,
+    minWidth: 960,
+    minHeight: 640,
+    show: false,
+    title: displayName,
+    // macOS gets the liquid-glass frame: a fully transparent base over the
+    // system under-window vibrancy; the renderer's --bg-frame carries the
+    // theme tint at the user's opacity. Other platforms keep the
+    // theme-matched opaque flash color.
+    backgroundColor: process.platform === 'darwin' ? '#00000000' : windowBackground(),
+    ...(process.platform === 'darwin'
+      // Initial material; the renderer corrects both material and
+      // nativeTheme.themeSource to the resolved theme via
+      // desktop:set-frame-vibrancy right after load.
+      ? { vibrancy: 'under-window' as const, visualEffectState: 'active' as const }
+      : {}),
+    webPreferences: {
+      preload: preloadPath,
+      additionalArguments: [
+        `--gian-desktop-variant=${applicationIdentity.variant}`,
+        `--gian-desktop-signed-release=${signedProductionRelease ? 'true' : 'false'}`,
+        `--gian-desktop-version=${app.getVersion()}`,
+      ],
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      backgroundThrottling: false,
+      spellcheck: true,
+    },
+  });
+  window.on('page-title-updated', event => {
+    event.preventDefault();
+    window.setTitle(displayName);
+  });
+  mainWindow = window;
+  const controller = new BrowserController({
+    window,
+    hostUrl: targets.hostUrl,
+    desktopToken,
+    stateStore: new FileBrowserStateStore(join(app.getPath('userData'), 'browser-state.json')),
+    extensionStore: new FileBrowserExtensionStore(
+      join(app.getPath('userData'), 'browser-extensions.json'),
+    ),
+    pickExtensionDirectory: async () => {
+      const smokeExtension = resolveBrowserSmokeExtensionDirectory({
+        packaged: app.isPackaged,
+        userDataPath: app.getPath('userData'),
+        candidate: process.env.GIAN_DESKTOP_SMOKE_EXTENSION_DIR,
+      });
+      if (smokeExtension) return smokeExtension;
+      const result = await dialog.showOpenDialog(window, {
+        title: 'Load unpacked Browser extension',
+        properties: ['openDirectory'],
+      });
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    },
+    prepareDownload: (item, filename) => {
+      const smokeTarget = resolveBrowserSmokeDownloadDirectory({
+        packaged: app.isPackaged,
+        userDataPath: app.getPath('userData'),
+        candidate: process.env.GIAN_DESKTOP_SMOKE_DOWNLOAD_DIR,
+      });
+      if (smokeTarget) {
+        item.setSavePath(join(smokeTarget, filename));
+        return;
+      }
+      item.setSaveDialogOptions({
+        title: 'Save Download',
+        defaultPath: join(app.getPath('downloads'), filename),
+      });
+    },
+    revealPath: path => shell.showItemInFolder(path),
+    openExternalUrl: openExternal,
+    onTabsChanged: tabs => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:tabs', tabs);
+      }
+    },
+    onState: (tabId, state) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:state', tabId, state);
+      }
+    },
+    onFind: (tabId, result) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:find-result', tabId, result);
+      }
+    },
+    onFindRequested: tabId => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:find-requested', tabId);
+      }
+    },
+    onAddressRequested: tabId => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:address-requested', tabId);
+      }
+    },
+    onDownloadsChanged: snapshot => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:downloads', snapshot);
+      }
+    },
+    onPermissionsChanged: snapshot => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:permissions', snapshot);
+      }
+    },
+    onExtensionsChanged: snapshot => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:extensions', snapshot);
+      }
+    },
+    onPresentationRequested: tabId => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:presentation-requested', tabId);
+      }
+    },
+    onElement: (tabId, capture) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:element', tabId, capture);
+      }
+    },
+  });
+  browserController = controller;
+  browserAutomationService = new BrowserAutomationService(controller);
+
+  hardenWebContents(window.webContents);
+  installDesktopTitlebar(window.webContents);
+  window.webContents.on(
+    'did-start-navigation',
+    (_event, url, _isInPlace, isMainFrame) => {
+      if (
+        isMainFrame
+        && (isTrustedDesktopUrl(url, targets) || url.startsWith('file:'))
+      ) {
+        screenshotController?.invalidateTarget();
+      }
+      if (mainWindow === window && isMainFrame) {
+        rendererReady = false;
+        rendererDocumentReady = false;
+        notificationService?.resetContext();
+      }
+    },
+  );
+  window.webContents.on('dom-ready', () => {
+    if (mainWindow === window) rendererDocumentReady = true;
+  });
+  window.webContents.on('render-process-gone', () => {
+    screenshotController?.invalidateTarget();
+    if (mainWindow !== window) return;
+    rendererReady = false;
+    rendererDocumentReady = false;
+    notificationService?.setContext({ visibleSessionId: null });
+  });
+  window.on('unresponsive', () => {
+    if (mainWindow !== window) return;
+    notificationService?.setContext({ visibleSessionId: null });
+  });
+  window.webContents.on('did-create-window', child => {
+    hardenWebContents(child.webContents);
+  });
+  window.once('ready-to-show', () => window.show());
+  window.on('closed', () => {
+    screenshotController?.invalidateTarget();
+    controller.destroy();
+    if (browserAutomationService) browserAutomationService = null;
+    if (browserController === controller) browserController = null;
+    if (mainWindow === window) mainWindow = null;
+    if (mainWindow === null) {
+      rendererReady = false;
+      rendererDocumentReady = false;
+    }
+    notificationService?.setContext({ visibleSessionId: null });
+  });
+
+  await loadGianSurface(window);
+  if (!window.isVisible()) window.show();
+  return window;
+}
+
+ipcMain.handle('desktop:retry-connection', async event => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+  return loadGianSurface(mainWindow);
+});
+
+ipcMain.handle('desktop:open-logs', async event => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return 'denied';
+  return shell.openPath(logDirectory());
+});
+
+ipcMain.handle('desktop:restart-app', async event => {
+  if (!isMainWindowSender(event.sender)) {
+    console.error('[desktop] restart rejected from a non-main renderer');
+    return false;
+  }
+  return runAfterManagedHostExit(() => {
+    // Reply to the renderer before quitting. GianDev's Host is externally
+    // owned, so the drain above is an immediate no-op in development.
+    app.relaunch();
+    setTimeout(() => { app.quit(); }, 100);
+    return true;
+  });
+});
+
+ipcMain.handle('desktop:zoom:get', event => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return currentMainWindowZoom();
+});
+
+ipcMain.handle('desktop:zoom:set', (event, percent: unknown) => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return setMainWindowZoom(percent);
+});
+
+ipcMain.handle('desktop:resources:pick', async event => {
+  if (!mainWindow || !isMainWindowSender(event.sender)) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Add files and folders',
+    buttonLabel: 'Add',
+    properties: ['openFile', 'openDirectory', 'multiSelections', 'createDirectory'],
+  });
+  if (result.canceled) return { resources: [], rejectedFiles: [] };
+  return readPickedComposerResources(result.filePaths);
+});
+
+ipcMain.handle('desktop:screenshot:set-target', (event, value: unknown) => {
+  if (!isMainWindowSender(event.sender) || !screenshotController) return false;
+  if (value === null) {
+    screenshotController.setTarget(null);
+    return true;
+  }
+  const target = normalizeScreenshotTarget(value);
+  if (!target) return false;
+  screenshotController.setTarget(target);
+  return true;
+});
+
+ipcMain.handle('desktop:screenshot:start', event => {
+  if (!isMainWindowSender(event.sender) || !screenshotController) {
+    return { ok: false, error: 'capture-failed' };
+  }
+  return screenshotController.start();
+});
+
+ipcMain.handle('desktop:screenshot:get-state', event => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return screenshotController?.getState() ?? {
+    shortcut: screenshotShortcutForPlatform(process.platform),
+    shortcutRegistered: false,
+    capturing: false,
+  };
+});
+
+ipcMain.handle('desktop:screenshot:get-preferences', event => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return { ...screenshotPreferences };
+});
+
+ipcMain.handle('desktop:screenshot:set-preferences', (event, value: unknown) => {
+  if (!isMainWindowSender(event.sender) || !screenshotPreferencesStore) {
+    return { ...screenshotPreferences };
+  }
+  const previousShortcut = screenshotPreferences.shortcut;
+  screenshotPreferences = sanitizeScreenshotPreferences(value, screenshotPreferences);
+  screenshotPreferencesStore.save(screenshotPreferences);
+  // A remap (or reset to the platform default, null) rebinds the live
+  // controller; the renderer learns the outcome through getState().
+  if (screenshotController && screenshotPreferences.shortcut !== previousShortcut) {
+    screenshotController.setShortcut(
+      screenshotPreferences.shortcut ?? screenshotShortcutForPlatform(process.platform),
+    );
+  }
+  return { ...screenshotPreferences };
+});
+
+ipcMain.handle('desktop:screenshot-overlay:get-capture', event =>
+  screenshotController?.getOverlayCapture(event.sender.id) ?? null);
+
+ipcMain.on('desktop:screenshot-overlay:painted', event => {
+  screenshotController?.markOverlayPainted(event.sender.id);
+});
+
+ipcMain.handle('desktop:screenshot-overlay:claim', (event, captureId: unknown) =>
+  screenshotController?.claimFromOverlay(event.sender.id, captureId) ?? false);
+
+ipcMain.handle('desktop:screenshot-overlay:cancel', event =>
+  screenshotController?.cancelFromOverlay(event.sender.id) ?? false);
+
+ipcMain.handle(
+  'desktop:screenshot-overlay:complete',
+  (event, captureId: unknown, bytes: unknown) =>
+    screenshotController?.completeFromOverlay(event.sender.id, captureId, bytes) ?? false,
+);
+
+ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {
+  if (devArtifact) return false; // Keep the packaged DEV badge instead of the Web theme icon.
+  const dock = app.dock;
+  if (
+    process.platform !== 'darwin'
+    || !dock
+    || !mainWindow
+    || event.sender !== mainWindow.webContents
+    || typeof dataUrl !== 'string'
+    || dataUrl.length > 4_000_000
+    || !dataUrl.startsWith('data:image/png;base64,')
+  ) {
+    return false;
+  }
+
+  const icon = nativeImage.createFromDataURL(dataUrl);
+  if (icon.isEmpty()) return false;
+  dock.setIcon(icon);
+  return true;
+});
+
+// The glass frame's vibrancy follows the resolved APP theme, not the OS:
+// themeSource pins the window material's appearance (adaptive materials like
+// 'sidebar'/'under-window' otherwise track the OS — OS dark muddied
+// Light/Warm, OS light washed Dark to grey; Owner 2026-09-24), and 'sidebar'
+// gives Dark its deep glass while 'under-window' stays a light frost.
+// A System app theme is the exception: themeSource stays 'system' so the
+// renderer's prefers-color-scheme keeps tracking the OS.
+ipcMain.handle('desktop:set-frame-vibrancy', (event, theme: unknown, system: unknown) => {
+  if (
+    process.platform !== 'darwin'
+    || !mainWindow
+    || event.sender !== mainWindow.webContents
+    || (theme !== 'light' && theme !== 'warm' && theme !== 'dark')
+    || typeof system !== 'boolean'
+  ) {
+    return false;
+  }
+  nativeTheme.themeSource = system ? 'system' : theme === 'dark' ? 'dark' : 'light';
+  mainWindow.setVibrancy(theme === 'dark' ? 'sidebar' : 'under-window');
+  return true;
+});
+
+ipcMain.handle('desktop:navigation:ready', event => {
+  if (!isMainWindowSender(event.sender) || !rendererDocumentReady) return null;
+  rendererReady = true;
+  const delivered = pendingNavigationTarget;
+  // Returning this object is delivery. A newer pending target is a different
+  // object, so an older click cannot mark that newer generation read.
+  if (delivered) markDeliveredInboxRead(delivered);
+  return delivered;
+});
+
+ipcMain.handle('desktop:navigation:ack', (event, target: unknown) => {
+  if (!isMainWindowSender(event.sender)) return false;
+  if (navigationTargetsEqual(pendingNavigationTarget, target)) {
+    pendingNavigationTarget = null;
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('desktop:notifications:get-state', event => {
+  if (!isMainWindowSender(event.sender)) return DISABLED_NOTIFICATION_STATE;
+  return notificationService?.getState() ?? DISABLED_NOTIFICATION_STATE;
+});
+
+ipcMain.handle('desktop:notifications:update-preferences', (event, value: unknown) => {
+  if (!isMainWindowSender(event.sender)) return DISABLED_NOTIFICATION_STATE;
+  try {
+    return notificationService?.updatePreferences(value) ?? DISABLED_NOTIFICATION_STATE;
+  } catch {
+    console.warn('[desktop] failed to persist notification preferences');
+    return notificationService?.getState() ?? DISABLED_NOTIFICATION_STATE;
+  }
+});
+
+ipcMain.handle('desktop:notifications:set-context', (event, value: unknown) => {
+  if (
+    !isMainWindowSender(event.sender)
+    || !rendererReady
+    || !value
+    || typeof value !== 'object'
+  ) return false;
+  // Focus is computed here in the main process; the renderer only reports
+  // which Session is visible (a renderer-supplied focus flag would be dead
+  // state overwritten at this boundary).
+  notificationService?.setWindowFocused(mainWindow?.isFocused() ?? false);
+  const record = value as Record<string, unknown>;
+  // `locale` is additive on this existing channel. C sends SystemConfig.locale
+  // (`zh-CN` | `en`) with visibleSessionId. Omitted or invalid locale keeps
+  // the persisted choice; Main falls back to the OS locale only when no
+  // choice has arrived. OS Chinese must not replace a stored English choice.
+  notificationService?.setContext({
+    visibleSessionId: record.visibleSessionId,
+    ...(record.locale === 'zh-CN' || record.locale === 'en' ? { locale: record.locale } : {}),
+  });
+  return true;
+});
+
+ipcMain.handle('desktop:notifications:open-settings', async event => {
+  if (!isMainWindowSender(event.sender) || process.platform !== 'darwin') return false;
+  await shell.openExternal(
+    'x-apple.systempreferences:com.apple.Notifications-Settings.extension',
+  );
+  return true;
+});
+
+ipcMain.handle('desktop:updater:get-state', event => {
+  if (!isMainWindowSender(event.sender)) return DISABLED_UPDATE_STATE;
+  return appUpdateController?.getState() ?? DISABLED_UPDATE_STATE;
+});
+
+ipcMain.handle('desktop:updater:check', async event => {
+  if (!isMainWindowSender(event.sender)) {
+    return { trigger: 'manual', state: DISABLED_UPDATE_STATE };
+  }
+  return appUpdateController?.checkForUpdates('manual')
+    ?? { trigger: 'manual', state: DISABLED_UPDATE_STATE };
+});
+
+ipcMain.handle('desktop:updater:install', async event => {
+  if (!isMainWindowSender(event.sender)) return false;
+  const controller = appUpdateController;
+  if (!controller || controller.getState().status !== 'downloaded') return false;
+  return runAfterManagedHostExit(() => controller.install());
+});
+
+const EMPTY_BROWSER_STATE: GianBrowserState = {
+  url: '',
+  title: '',
+  loading: false,
+  canGoBack: false,
+  canGoForward: false,
+  canOpenExternal: false,
+  inspecting: false,
+  zoomFactor: 1,
+};
+
+ipcMain.handle('desktop:browser:get-state', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.getState(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:create-tab', (event, input: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserCreateTabInput(input)) return null;
+  return browserController?.createTab(input ?? {}) ?? null;
+});
+
+ipcMain.handle('desktop:browser:list-tabs', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, tabs: [] };
+  return browserController?.listTabs() ?? { revision: 0, tabs: [] };
+});
+
+ipcMain.handle('desktop:browser:list-downloads', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, downloads: [] };
+  return browserController?.listDownloads() ?? { revision: 0, downloads: [] };
+});
+
+ipcMain.handle('desktop:browser:cancel-download', (event, downloadId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(downloadId)) return false;
+  return browserController?.cancelDownload(downloadId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:reveal-download', (event, downloadId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(downloadId)) return false;
+  return browserController?.revealDownload(downloadId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:list-permission-requests', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, requests: [] };
+  return browserController?.listPermissionRequests() ?? { revision: 0, requests: [] };
+});
+
+ipcMain.handle(
+  'desktop:browser:respond-permission',
+  (event, requestId: unknown, decision: unknown) => {
+    if (!isMainWindowSender(event.sender)
+      || !isBrowserTabId(requestId)
+      || typeof decision !== 'string'
+      || !['allow_once', 'allow_always', 'deny'].includes(decision)) return false;
+    return browserController?.respondPermission(
+      requestId,
+      decision as import('@gian/shared').GianBrowserPermissionDecision,
+    ) ?? false;
+  },
+);
+
+ipcMain.handle('desktop:browser:list-extensions', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, extensions: [] };
+  return browserController?.listExtensions() ?? { revision: 0, extensions: [] };
+});
+
+ipcMain.handle('desktop:browser:install-extension', async event => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return browserController?.installExtension() ?? null;
+});
+
+ipcMain.handle(
+  'desktop:browser:set-extension-enabled',
+  async (event, extensionKey: unknown, enabled: unknown) => {
+    if (!isMainWindowSender(event.sender)
+      || !isBrowserTabId(extensionKey)
+      || typeof enabled !== 'boolean') return false;
+    return browserController?.setExtensionEnabled(extensionKey, enabled) ?? false;
+  },
+);
+
+ipcMain.handle('desktop:browser:remove-extension', async (event, extensionKey: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(extensionKey)) return false;
+  return browserController?.removeExtension(extensionKey) ?? false;
+});
+
+ipcMain.handle('desktop:browser:configure', (event, preferences: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserPreferences(preferences)) return false;
+  return browserController?.configure(preferences) ?? false;
+});
+
+ipcMain.handle('desktop:browser:navigate', async (event, tabId: unknown, url: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || typeof url !== 'string' || url.length > 16_384) {
+    return EMPTY_BROWSER_STATE;
+  }
+  return browserController?.navigate(tabId, url) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:open-project', async (event, tabId: unknown, target: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || !isBrowserProjectTarget(target)) {
+    return EMPTY_BROWSER_STATE;
+  }
+  return browserController?.openProject(tabId, target) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:back', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.goBack(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:forward', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.goForward(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:reload', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.reload(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:recover', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.recover(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:stop', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.stop(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.on('desktop:browser:find', (event, tabId: unknown, text: unknown, options: unknown) => {
+  if (!isMainWindowSender(event.sender)
+    || !isBrowserTabId(tabId)
+    || typeof text !== 'string'
+    || text.length > 2_048
+    || !isBrowserFindOptions(options)) return;
+  browserController?.findInPage(tabId, text, options ?? {});
+});
+
+ipcMain.handle('desktop:browser:stop-find', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.stopFindInPage(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:open-devtools', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.openDevTools(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:set-layout', (event, tabId: unknown, bounds: unknown, visible: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || !isBrowserBounds(bounds) || typeof visible !== 'boolean') {
+    return false;
+  }
+  return browserController?.setLayout(tabId, bounds, visible) ?? false;
+});
+
+ipcMain.handle('desktop:browser:capture-frame', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return null;
+  return browserController?.captureFrame(tabId) ?? null;
+});
+
+// Composer-context captures run through the Browser automation service so the
+// renderer receives the same bounded, main-sanitized artifacts the agent's
+// browser.snapshot / browser.screenshot tools produce (ADR-0039). Any failure
+// (no page, DevTools/inspection holding the page, capture error) becomes null.
+ipcMain.handle('desktop:browser:capture-page-snapshot', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return null;
+  if (!browserAutomationService) return null;
+  try {
+    const result = await browserAutomationService.call(
+      'browser.snapshot',
+      { tab_id: tabId },
+      { callerId: 'browser-panel', sessionId: null },
+    );
+    return {
+      url: result.url,
+      title: result.title,
+      tree: result.tree,
+      truncated: result.truncated,
+      snapshotId: result.snapshot_id,
+    };
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle('desktop:browser:capture-page-screenshot', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return null;
+  if (!browserAutomationService) return null;
+  try {
+    const result = await browserAutomationService.call(
+      'browser.screenshot',
+      { tab_id: tabId },
+      { callerId: 'browser-panel', sessionId: null },
+    );
+    return {
+      mimeType: result.mime_type,
+      base64: result.base64,
+      width: result.width,
+      height: result.height,
+    };
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle('desktop:browser:open-external', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.openExternal(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:set-background', (event, tabId: unknown, color: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  if (typeof color !== 'string' || color.length === 0 || color.length > 128) return false;
+  return browserController?.setBackground(tabId, color) ?? false;
+});
+
+ipcMain.handle('desktop:browser:set-zoom', (event, tabId: unknown, factor: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  if (typeof factor !== 'number' || !Number.isFinite(factor)) return EMPTY_BROWSER_STATE;
+  return browserController?.setZoom(tabId, factor) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:close-tab', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.closeTab(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:clear-data', async event => {
+  if (!isMainWindowSender(event.sender)) return false;
+  return browserController?.clearData() ?? false;
+});
+
+ipcMain.handle('desktop:browser:set-inspect-mode', async (event, tabId: unknown, enabled: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || typeof enabled !== 'boolean') {
+    return EMPTY_BROWSER_STATE;
+  }
+  return browserController?.setInspectMode(tabId, enabled) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:github-auth:get-state', async event => {
+  if (!isMainWindowSender(event.sender)) {
+    return { status: 'unavailable', reason: 'not_configured' };
+  }
+  return getGitHubAuthService().getState();
+});
+
+ipcMain.handle('desktop:github-auth:start', async event => {
+  if (!isMainWindowSender(event.sender)) {
+    return { ok: false, error: 'not_configured' };
+  }
+  const result = await getGitHubAuthService().start();
+  if (result.ok) {
+    await shell.openExternal(result.authorization.verificationUri);
+  }
+  return result;
+});
+
+ipcMain.handle('desktop:github-auth:finish', async event => {
+  if (!isMainWindowSender(event.sender)) {
+    return { ok: false, error: 'not_started' };
+  }
+  const result = await getGitHubAuthService().finish();
+  if (result.ok) remoteIdentityBroker?.resumeAccountSessions();
+  return result;
+});
+
+ipcMain.handle('desktop:github-auth:cancel', event => {
+  if (isMainWindowSender(event.sender)) getGitHubAuthService().cancel();
+});
+
+ipcMain.handle('desktop:github-auth:sign-out', async event => {
+  if (isMainWindowSender(event.sender)) {
+    try { await remoteIdentityBroker?.revokeAccountSessions(); }
+    finally { await getGitHubAuthService().signOut(); }
+  }
+});
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (desktopReplacementPending()) return;
+    if (!environmentSelected) return;
+    if (screenshotController?.getState().capturing) return;
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      void ensureMainWindow();
+      return;
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(async () => {
+    if (devArtifact) {
+      // Automated CI smoke never selects real production data.
+      if (process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1') {
+        const path = process.env['GIAN_DATA_DIR'];
+        if (!path || path === join(homedir(), '.gian') || path === join(homedir(), '.gian-dev')) {
+          throw new Error('GianDev smoke requires an isolated data directory');
+        }
+        environmentSelected = true;
+      } else {
+        while (!environmentSelected) {
+          const { response } = await dialog.showMessageBox({
+            type: 'question', title: 'GianDev', message: 'Choose a runtime',
+            detail: 'Prod reads and writes production data directly, including database upgrades.',
+            buttons: ['Dev: ~/.gian-dev', 'Prod: ~/.gian', 'Quit'],
+            defaultId: 0, cancelId: 2, noLink: true,
+          });
+          if (response === 2) { app.quit(); return; }
+          if (response === 1 && await productionHostIsOccupied()) {
+            await dialog.showMessageBox({ type: 'warning', message: 'Quit production Gian completely first', detail: 'Port 8990 is still in use, so Prod is unavailable.', buttons: ['Back'] });
+            continue;
+          }
+          const selected = environmentSettings(response === 1 ? 'prod' : 'dev', homedir());
+          process.env['GIAN_DATA_DIR'] = selected.dataDir;
+          displayName = selected.title;
+          productionDataSelected = response === 1;
+          environmentSelected = true;
+        }
+      }
+    }
+    installDesktopRequestBoundary();
+    initializeDesktopServices();
+    screenshotPreferencesStore = new FileScreenshotPreferenceStore(
+      join(app.getPath('userData'), 'screenshot-preferences.json'),
+    );
+    screenshotPreferences = screenshotPreferencesStore.load();
+    screenshotController = createScreenshotController();
+    buildApplicationMenu();
+    await ensureMainWindow();
+    screenshotController.registerShortcut();
+    void screenshotController.warmUp().catch(error => {
+      console.warn('[desktop] screenshot overlay warm-up failed', error);
+    });
+    attentionClient?.start();
+
+    app.on('activate', () => {
+      // Do not recreate windows or restart the Host during native staging.
+      if (desktopReplacementPending()) return;
+      if (screenshotController?.getState().capturing) return;
+      if (!mainWindow || mainWindow.isDestroyed()) void ensureMainWindow();
+    });
+  }).catch(error => {
+    console.error('[desktop] failed to start', error);
+    app.quit();
+  });
+}
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', event => {
+  // An OS quit arriving while a restart/update preflight is draining must not
+  // start a second shutdown path. Once armed, the Host is already confirmed
+  // gone and the replacement-triggered quit may proceed normally.
+  if (managedHostReplacementGate.isDraining()) {
+    event.preventDefault();
+    return;
+  }
+  stopDesktopServicesForExit();
+  const disposeDesktopResources = () => {
+    disposeScreenshotController();
+    const broker = githubReleaseBroker;
+    githubReleaseBroker = null;
+    if (broker) void broker.close();
+    const browserBroker = browserUseBroker;
+    browserUseBroker = null;
+    if (browserBroker) void browserBroker.close();
+  };
+  const preventQuit = managedHostQuitGate.intercept(managedHost, {
+    onReleased: () => {
+      disposeDesktopResources();
+      app.quit();
+    },
+    onBlocked: () => {
+      console.error('[desktop] managed Host did not exit; cancelling unsafe quit');
+      attentionClient?.start();
+      appUpdateController?.start();
+      dialog.showErrorBox(
+        'Gian could not quit safely',
+        'The managed Host and CLI processes did not finish shutting down. Gian cancelled the quit to avoid starting a replacement against the same data and port. Wait a moment, then quit again.',
+      );
+    },
+  });
+  if (preventQuit) event.preventDefault();
+  else disposeDesktopResources();
+});
+
+app.on('will-quit', () => {
+  // before-quit can still be cancelled and then resumes this service.
+  // Handles close only once quit actually proceeds.
+  notificationService?.close();
+  appUpdateController?.confirmInstallQuit();
+});
+
+function isBrowserBounds(value: unknown): value is GianBrowserBounds {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<GianBrowserBounds>;
+  return typeof candidate.x === 'number'
+    && typeof candidate.y === 'number'
+    && typeof candidate.width === 'number'
+    && typeof candidate.height === 'number';
+}
+
+function navigationTargetsEqual(
+  expected: DesktopNavigationTarget | null,
+  actual: unknown,
+): boolean {
+  if (!expected || !actual || typeof actual !== 'object') return false;
+  const candidate = actual as Record<string, unknown>;
+  if (expected.type !== candidate.type) return false;
+  if (expected.type === 'settings') return candidate.section === expected.section;
+  return desktopNavigationTargetsEqual(expected, actual);
+}
+
+function isBrowserTabId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value === value.trim()
+    && value.length > 0
+    && value.length <= 256;
+}
+
+function isBrowserCreateTabInput(
+  value: unknown,
+): value is import('@gian/shared').GianBrowserCreateTabInput | undefined {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => !['tabId', 'activate', 'sourceSessionId'].includes(key))) return false;
+  if (input.tabId !== undefined && !isBrowserTabId(input.tabId)) return false;
+  if (input.activate !== undefined && typeof input.activate !== 'boolean') return false;
+  return input.sourceSessionId === undefined
+    || input.sourceSessionId === null
+    || isBrowserTabId(input.sourceSessionId);
+}
+
+function isBrowserFindOptions(
+  value: unknown,
+): value is import('@gian/shared').GianBrowserFindOptions | undefined {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const options = value as Record<string, unknown>;
+  if (Object.keys(options).some(key => !['forward', 'findNext', 'matchCase'].includes(key))) return false;
+  return Object.values(options).every(item => typeof item === 'boolean');
+}
+
+function isBrowserPreferences(
+  value: unknown,
+): value is import('@gian/shared').GianBrowserPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const preferences = value as Record<string, unknown>;
+  if (Object.keys(preferences).some(key => ![
+    'home_page',
+    'restore_last_page',
+    'external_links',
+  ].includes(key))) return false;
+  return typeof preferences.home_page === 'string'
+    && preferences.home_page.length <= 4_096
+    && typeof preferences.restore_last_page === 'boolean'
+    && (preferences.external_links === 'gian' || preferences.external_links === 'system');
+}
+
+function isBrowserProjectTarget(value: unknown): value is GianBrowserProjectTarget {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.absolutePath === 'string') {
+    return candidate.absolutePath.length > 0
+      && candidate.absolutePath.length <= 16_384
+      && candidate.absolutePath.startsWith('/')
+      && candidate.workingTreeId === undefined
+      && candidate.path === undefined;
+  }
+  return typeof candidate.workingTreeId === 'string'
+    && candidate.workingTreeId.length > 0
+    && candidate.workingTreeId.length <= 512
+    && typeof candidate.path === 'string'
+    && candidate.path.length > 0
+    && candidate.path.length <= 16_384;
+}
+
+function isScreenshotText(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && value.length <= maxLength;
+}
+
+function normalizeScreenshotTarget(value: unknown): GianScreenshotTarget | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (!isScreenshotText(candidate['label'], 256)) return null;
+
+  if (candidate['kind'] === 'session') {
+    if (!isScreenshotText(candidate['sessionId'], 512)) return null;
+    return {
+      kind: 'session',
+      sessionId: candidate['sessionId'],
+      label: candidate['label'],
+    };
+  }
+
+  if (
+    candidate['kind'] !== 'new-session'
+    || !candidate['scope']
+    || typeof candidate['scope'] !== 'object'
+    || Array.isArray(candidate['scope'])
+  ) return null;
+  const scope = candidate['scope'] as Record<string, unknown>;
+  if (
+    (scope['kind'] !== 'workspace' && scope['kind'] !== 'task')
+    || !isScreenshotText(scope['id'], 512)
+    || (scope['environmentId'] !== undefined && !isScreenshotText(scope['environmentId'], 128))
+  ) return null;
+  return {
+    kind: 'new-session',
+    scope: { kind: scope['kind'], id: scope['id'],
+      ...(typeof scope['environmentId'] === 'string' ? { environmentId: scope['environmentId'] } : {}) },
+    label: candidate['label'],
+  };
+}

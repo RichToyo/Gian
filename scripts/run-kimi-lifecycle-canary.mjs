@@ -1,0 +1,550 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+import {
+  activateDefaultKimiStore,
+  JsonLineProxyClient,
+  resolveProviderBinary,
+} from './run-provider-attachment-canary.mjs';
+
+const execFileAsync = promisify(execFile);
+const rootDir = join(fileURLToPath(new URL('.', import.meta.url)), '..');
+const defaultProxyPath = join(rootDir, 'packages/proxies/kimi-proxy/dist/src/cli/spawn.js');
+const authorizationEnvironment = 'GIAN_ALLOW_REAL_AGENT_TURN';
+const defaultTimeoutMs = 120_000;
+const defaultBackgroundObservationMs = 45_000;
+const defaultDetachedObservationMs = 60_000;
+const defaultRssGrowthBudgetMiB = 640;
+
+function requireExplicitModelTurnAuthorization(options) {
+  const allowed = options.allowRealAgentTurn
+    ?? process.env[authorizationEnvironment] === '1';
+  if (!allowed) {
+    throw new Error(
+      `Refusing to send quota-consuming Kimi model turns. Set ${authorizationEnvironment}=1 only after explicit authorization.`,
+    );
+  }
+}
+
+function positiveNumber(value, fallback, label) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative number.`);
+  }
+  return parsed;
+}
+
+function sleep(ms) {
+  return new Promise(resolveWait => setTimeout(resolveWait, ms));
+}
+
+function optionValues(option) {
+  const choices = option?.choices ?? option?.options ?? [];
+  if (!Array.isArray(choices)) return [];
+  return choices
+    .map(item => item?.value)
+    .filter(value => typeof value === 'string' && value.length > 0);
+}
+
+function optionCurrentValue(option) {
+  return option?.currentValue ?? option?.defaultValue;
+}
+
+function chooseMutableConfig(configOptions) {
+  const ordered = [...(configOptions ?? [])].sort((left, right) => (
+    Number(right?.id === 'mode') - Number(left?.id === 'mode')
+  ));
+  for (const option of ordered) {
+    const values = optionValues(option);
+    const current = optionCurrentValue(option);
+    const alternate = values.find(value => value !== current);
+    if (typeof option?.id === 'string' && alternate) {
+      return {
+        id: option.id,
+        originalValue: current,
+        alternateValue: alternate,
+      };
+    }
+  }
+  throw new Error('Kimi did not expose a mutable select configuration option.');
+}
+
+function configCurrentValue(session, configId) {
+  const turnOption = session?.turnConfigOptions?.find(option => option?.id === configId);
+  return turnOption?.defaultValue ?? session?.sessionConfig?.[configId];
+}
+
+function nativeSessionId(session) {
+  return session?.nativeSession?.id ?? session?.nativeSessionId;
+}
+
+function turnStatus(notification) {
+  return notification?.params?.data?.stopReason ?? notification?.params?.data?.status;
+}
+
+class NotificationJournal {
+  constructor(client, timeoutMs) {
+    this.client = client;
+    this.timeoutMs = timeoutMs;
+    this.notifications = [];
+    this.onNotification = notification => this.notifications.push(notification);
+    client.on('notification', this.onNotification);
+  }
+
+  mark() {
+    return this.notifications.length;
+  }
+
+  slice(from = 0) {
+    return this.notifications.slice(from);
+  }
+
+  async waitFor(predicate, label, from = 0) {
+    const deadline = Date.now() + this.timeoutMs;
+    while (Date.now() < deadline) {
+      const relevant = this.notifications.slice(from);
+      const runtimeFailure = relevant.find(notification => notification?.method === 'runtime.error');
+      if (runtimeFailure) throw new Error(`Kimi runtime failed: ${JSON.stringify(runtimeFailure)}`);
+      const approval = relevant.find(notification => (
+        notification?.method === 'interaction.requested' || notification?.method === 'approval.requested'
+      ));
+      if (approval) {
+        throw new Error(`Kimi lifecycle canary unexpectedly requested approval: ${JSON.stringify(approval)}`);
+      }
+      const turnFailure = relevant.find(notification => notification?.method === 'turn.failed');
+      if (turnFailure) throw new Error(`Kimi turn failed: ${JSON.stringify(turnFailure)}`);
+      const match = relevant.find(predicate);
+      if (match) return match;
+      await sleep(25);
+    }
+    throw new Error(`Timed out waiting for ${label} after ${this.timeoutMs}ms.`);
+  }
+
+  waitForTurn(sessionId, turnId, from = 0) {
+    return this.waitFor(
+      notification => (
+        notification?.method === 'turn.completed'
+        && notification?.params?.sessionId === sessionId
+        && notification?.params?.turnId === turnId
+      ),
+      `Kimi turn ${turnId}`,
+      from,
+    );
+  }
+
+  close() {
+    this.client.off('notification', this.onNotification);
+  }
+}
+
+export class KimiLifecycleClient extends JsonLineProxyClient {
+  get processGroupId() {
+    return this.child?.pid ?? null;
+  }
+
+  async crash(timeoutMs = 5_000) {
+    const child = this.child;
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      throw new Error('Kimi proxy is not running and cannot be crashed.');
+    }
+    const stopped = new Promise((resolveStopped, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Timed out waiting for crashed Kimi proxy after ${timeoutMs}ms.`)),
+        timeoutMs,
+      );
+      this.once('runtimeStopped', () => {
+        clearTimeout(timer);
+        resolveStopped();
+      });
+    });
+    if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
+    else child.kill('SIGKILL');
+    await stopped;
+  }
+}
+
+export async function sampleProcessGroupRss(processGroupId, stage, options = {}) {
+  assert.ok(Number.isInteger(processGroupId) && processGroupId > 0, 'Kimi proxy has no process group id.');
+  const run = options.execFileImpl ?? execFileAsync;
+  const result = await run('ps', ['-axo', 'pid=,pgid=,rss='], {
+    timeout: 5_000,
+    maxBuffer: 1024 * 1024,
+  });
+  const processes = String(result.stdout ?? '')
+    .split('\n')
+    .map(line => line.trim().split(/\s+/).map(Number))
+    .filter(parts => parts.length === 3 && parts.every(Number.isFinite))
+    .filter(([, pgid]) => pgid === processGroupId);
+  assert.ok(processes.length > 0, `No live process found for Kimi process group ${processGroupId}.`);
+  return {
+    stage,
+    processGroupId,
+    processCount: processes.length,
+    rssKiB: processes.reduce((sum, [, , rss]) => sum + rss, 0),
+    sampledAt: new Date().toISOString(),
+  };
+}
+
+function proxyClientOptions(options, binaryPath, timeoutMs) {
+  return {
+    provider: 'kimi',
+    proxyPath: options.proxyPath ?? defaultProxyPath,
+    binaryPath,
+    requestTimeoutMs: timeoutMs,
+    environment: options.proxyEnvironment,
+  };
+}
+
+async function createWorkspaceSession(client, cwd, extras = {}) {
+  const sessionId = extras.sessionId ?? randomUUID();
+  const created = await client.request('session.create', {
+    sessionId,
+    workspace: { cwd, roots: [cwd] },
+    config: extras.config ?? {},
+    ...(extras.nativeSession ? { nativeSession: extras.nativeSession } : {}),
+  });
+  assert.equal(created?.session?.id, sessionId, 'Kimi session.create must echo the Host session id.');
+  assert.equal(typeof created?.session?.streamId, 'string', 'Kimi session.create returned no streamId.');
+  return created.session;
+}
+
+async function startTextTurn(client, session, text, config) {
+  const turnId = randomUUID();
+  const started = await client.request('turn.start', {
+    sessionId: session.id,
+    streamId: session.streamId,
+    turnId,
+    input: [{ type: 'text', text }],
+    config: config ?? {},
+  });
+  assert.equal(started?.accepted, true, 'Kimi turn.start was not accepted.');
+  assert.equal(started?.turnId, turnId, 'Kimi turn.start must echo the Host turn id.');
+  return turnId;
+}
+
+async function waitForMarker(journal, sessionId, turnId, marker, from) {
+  const completion = await journal.waitForTurn(sessionId, turnId, from);
+  assert.equal(turnStatus(completion), 'completed', `Kimi turn ${turnId} did not complete.`);
+  const turnNotifications = journal.slice(from).filter(notification => (
+    notification?.params?.sessionId === sessionId
+    && notification?.params?.turnId === turnId
+  ));
+  const returnedText = turnNotifications
+    .filter(notification => (
+      notification?.method === 'content.delta'
+      && notification?.params?.data?.kind === 'text'
+    ))
+    .map(notification => String(notification?.params?.data?.delta ?? ''))
+    .join('');
+  assert.ok(
+    returnedText.includes(marker),
+    `Kimi turn ${turnId} did not return marker ${marker}: ${returnedText}`,
+  );
+}
+
+export async function runKimiLifecycleCanary(options = {}) {
+  // Keep authorization first: the default command must not resolve a binary,
+  // mutate the Kimi store, allocate temp data, or start a provider process.
+  requireExplicitModelTurnAuthorization(options);
+  const timeoutMs = positiveNumber(options.timeoutMs, defaultTimeoutMs, 'timeoutMs');
+  const detachedObservationMs = positiveNumber(
+    options.detachedObservationMs ?? process.env.KIMI_DETACHED_OBSERVE_MS,
+    defaultDetachedObservationMs,
+    'detached observation duration',
+  );
+  const backgroundObservationMs = positiveNumber(
+    options.backgroundObservationMs ?? process.env.KIMI_BACKGROUND_OBSERVE_MS,
+    defaultBackgroundObservationMs,
+    'background Agent observation duration',
+  );
+  const rssGrowthBudgetMiB = positiveNumber(
+    options.rssGrowthBudgetMiB ?? process.env.KIMI_RSS_GROWTH_BUDGET_MIB,
+    defaultRssGrowthBudgetMiB,
+    'RSS growth budget',
+  );
+  const binaryPath = await resolveProviderBinary('kimi', options.binaryPath);
+  const activationImpl = options.activationImpl ?? activateDefaultKimiStore;
+  const activation = await activationImpl(binaryPath);
+  assert.equal(activation?.compatible, true, 'Kimi session store activation did not pass.');
+  assert.equal(activation?.activationRecorded, true, 'Kimi session store activation was not recorded.');
+
+  const canaryRoot = await mkdtemp(join(tmpdir(), 'gian-kimi-lifecycle-'));
+  const backgroundFixturePath = join(canaryRoot, 'background-agent-fixture.txt');
+  const stopMarker = `GIAN_KIMI_STOP_${randomUUID()}`;
+  const concurrentMarkerA = `GIAN_KIMI_CONCURRENT_A_${randomUUID()}`;
+  const concurrentMarkerB = `GIAN_KIMI_CONCURRENT_B_${randomUUID()}`;
+  const backgroundMarker = `GIAN_KIMI_BACKGROUND_${randomUUID()}`;
+  const postCrashMarker = `GIAN_KIMI_POST_CRASH_${randomUUID()}`;
+  await writeFile(backgroundFixturePath, `${backgroundMarker}\n`, 'utf8');
+
+  const ClientClass = options.ClientClass ?? KimiLifecycleClient;
+  const rssSampler = options.rssSampler ?? sampleProcessGroupRss;
+  const clients = [];
+  const rssSamples = [];
+  let client;
+  let journal;
+  let sessionA;
+  let sessionB;
+  let survivorSession;
+  let modelTurnsSent = 0;
+  let crashed = false;
+
+  const sample = async stage => {
+    const value = await rssSampler(client.processGroupId, stage);
+    assert.equal(typeof value?.rssKiB, 'number', `RSS sampler returned no rssKiB for ${stage}.`);
+    rssSamples.push(value);
+  };
+
+  try {
+    client = new ClientClass(proxyClientOptions(options, binaryPath, timeoutMs));
+    clients.push(client);
+    journal = new NotificationJournal(client, timeoutMs);
+    await client.ensureStarted();
+    const initialized = await client.request('initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
+      host: { name: 'Gian', version: 'canary' },
+    });
+    assert.equal(initialized?.protocol?.version, '2.1', 'Kimi canary must negotiate gian.proxy/2.1.');
+    assert.ok(initialized?.capabilities, 'Kimi initialize returned no capabilities.');
+    await sample('initialized');
+
+    const catalog = await client.request('catalog.list', {});
+    const mutableConfig = chooseMutableConfig(catalog.configOptions);
+    sessionA = await createWorkspaceSession(client, canaryRoot);
+    sessionB = await createWorkspaceSession(client, canaryRoot);
+    assert.ok(sessionA?.id && nativeSessionId(sessionA), 'Kimi session A has no proxy/native id.');
+    assert.ok(sessionB?.id && nativeSessionId(sessionB), 'Kimi session B has no proxy/native id.');
+    assert.notEqual(sessionA.id, sessionB.id, 'Kimi returned duplicate proxy session ids.');
+    assert.notEqual(nativeSessionId(sessionA), nativeSessionId(sessionB), 'Kimi returned duplicate native session ids.');
+
+    const stopStart = journal.mark();
+    const stopTurnId = await startTextTurn(
+      client,
+      sessionA,
+      `Reply with ${stopMarker}, but do not finish until explicitly interrupted.`,
+      { [mutableConfig.id]: mutableConfig.alternateValue },
+    );
+    const changed = await client.request('session.get', { sessionId: sessionA.id });
+    sessionA = changed.session;
+    assert.equal(
+      configCurrentValue(sessionA, mutableConfig.id),
+      mutableConfig.alternateValue,
+      'Kimi dynamic configuration did not round-trip the alternate value.',
+    );
+    modelTurnsSent += 1;
+    await assert.rejects(
+      startTextTurn(client, sessionA, 'This second prompt must be rejected as busy.'),
+      error => error?.code === 'SESSION_BUSY',
+    );
+    await client.request('turn.interrupt', {
+      sessionId: sessionA.id,
+      streamId: sessionA.streamId,
+      turnId: stopTurnId,
+    });
+    const stopped = await journal.waitForTurn(sessionA.id, stopTurnId, stopStart);
+    assert.equal(turnStatus(stopped), 'interrupted', 'Interrupted Kimi turn did not report interrupted.');
+
+    const concurrentStart = journal.mark();
+    const [turnA, turnB] = await Promise.all([
+      startTextTurn(
+        client,
+        sessionA,
+        `Reply with exactly ${concurrentMarkerA}`,
+        mutableConfig.originalValue === undefined ? undefined : { [mutableConfig.id]: mutableConfig.originalValue },
+      ),
+      startTextTurn(client, sessionB, `Reply with exactly ${concurrentMarkerB}`),
+    ]);
+    if (mutableConfig.originalValue !== undefined) {
+      const restored = await client.request('session.get', { sessionId: sessionA.id });
+      sessionA = restored.session;
+      assert.equal(
+        configCurrentValue(sessionA, mutableConfig.id),
+        mutableConfig.originalValue,
+        'Kimi dynamic configuration did not restore its original value.',
+      );
+    }
+    modelTurnsSent += 2;
+    await Promise.all([
+      waitForMarker(journal, sessionA.id, turnA, concurrentMarkerA, concurrentStart),
+      waitForMarker(journal, sessionB.id, turnB, concurrentMarkerB, concurrentStart),
+    ]);
+    await sample('dual-session-completed');
+
+    const backgroundStart = journal.mark();
+    const backgroundTurnId = await startTextTurn(
+      client,
+      sessionA,
+      [
+        'Use the Agent tool exactly once with subagent_type="coder" and run_in_background=true.',
+        `Tell that child to read ${backgroundFixturePath} and return the complete file contents.`,
+        'Do not read the file in the parent. Finish the parent response after launching the child.',
+      ].join(' '),
+    );
+    modelTurnsSent += 1;
+    const backgroundParent = await journal.waitForTurn(
+      sessionA.id,
+      backgroundTurnId,
+      backgroundStart,
+    );
+    assert.equal(
+      turnStatus(backgroundParent),
+      'completed',
+      'Kimi background Agent parent turn did not complete.',
+    );
+    // Newer Kimi versions complete a detached child through an autonomous
+    // native turn after the parent has already ended. Those updates have no
+    // Host turn identity, so validate the drain through native replay after a
+    // bounded observation window instead of depending on transient tool-card
+    // shapes.
+    if (backgroundObservationMs > 0) await sleep(backgroundObservationMs);
+    await sample('background-agent-drained');
+
+    const nativeSessionIdA = nativeSessionId(sessionA);
+    journal.close();
+    await client.crash();
+    crashed = true;
+
+    client = new ClientClass(proxyClientOptions(options, binaryPath, timeoutMs));
+    clients.push(client);
+    journal = new NotificationJournal(client, timeoutMs);
+    await client.ensureStarted();
+    await client.request('initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
+      host: { name: 'Gian', version: 'canary' },
+    });
+    sessionA = await createWorkspaceSession(client, canaryRoot, {
+      nativeSession: { id: nativeSessionIdA, history: 'replay' },
+    });
+    assert.equal(nativeSessionId(sessionA), nativeSessionIdA, 'Kimi crash recovery adopted a different native session.');
+    const replay = await client.request('session.replay', {
+      sessionId: sessionA.id,
+      streamId: sessionA.streamId,
+      cursor: null,
+      limit: 100,
+    });
+    assert.ok(
+      JSON.stringify(replay?.events ?? []).includes(concurrentMarkerA),
+      'Kimi native load replay did not contain pre-crash history.',
+    );
+    assert.ok(
+      JSON.stringify(replay?.events ?? []).includes(backgroundMarker),
+      'Kimi native load replay did not contain the drained background Agent result.',
+    );
+    await sample('crash-recovered');
+
+    const postCrashStart = journal.mark();
+    const postCrashTurnId = await startTextTurn(
+      client,
+      sessionA,
+      `Reply with exactly ${postCrashMarker}`,
+    );
+    modelTurnsSent += 1;
+    await waitForMarker(journal, sessionA.id, postCrashTurnId, postCrashMarker, postCrashStart);
+
+    survivorSession = await createWorkspaceSession(client, canaryRoot);
+    assert.ok(survivorSession?.id, 'Kimi returned no survivor session id.');
+    await client.request('session.close', { sessionId: sessionA.id, streamId: sessionA.streamId });
+    sessionA = null;
+    const survivorSnapshot = await client.request('session.get', {
+      sessionId: survivorSession.id,
+    });
+    assert.equal(
+      survivorSnapshot?.session?.id,
+      survivorSession.id,
+      'Closing one Kimi session stopped or detached another live session.',
+    );
+
+    await sample('detached-observation-start');
+    if (detachedObservationMs > 0) await sleep(detachedObservationMs / 2);
+    await sample('detached-observation-midpoint');
+    if (detachedObservationMs > 0) await sleep(detachedObservationMs / 2);
+    await sample('detached-observation-end');
+
+    const rssValues = rssSamples.map(entry => entry.rssKiB);
+    const rssDeltaKiB = Math.max(...rssValues) - Math.min(...rssValues);
+    const rssGrowthBudgetKiB = rssGrowthBudgetMiB * 1024;
+    assert.ok(
+      rssDeltaKiB <= rssGrowthBudgetKiB,
+      `Kimi process-group RSS range ${rssDeltaKiB} KiB exceeded budget ${rssGrowthBudgetKiB} KiB: ${JSON.stringify(rssSamples)}`,
+    );
+
+    await client.request('session.close', { sessionId: survivorSession.id, streamId: survivorSession.streamId });
+    survivorSession = null;
+    await client.stop();
+
+    return {
+      provider: 'kimi',
+      quotaConsuming: true,
+      modelTurnsSent,
+      sessionStoreActivated: true,
+      createSendStop: true,
+      dynamicConfig: {
+        configId: mutableConfig.id,
+        alternateValue: mutableConfig.alternateValue,
+        restored: mutableConfig.originalValue !== undefined,
+      },
+      sameSessionBusyRejected: true,
+      interruptedTurnStopped: true,
+      dualSessionConcurrent: true,
+      backgroundAgent: {
+        requested: true,
+        parentTurnCompleted: true,
+        drainedAfterParentTurn: true,
+        replayObserved: true,
+      },
+      crashResume: {
+        proxyCrashed: crashed,
+        nativeSessionReused: true,
+        replayObserved: true,
+        postCrashTurnCompleted: true,
+      },
+      closeSemantics: {
+        nativeClosed: false,
+        detached: true,
+        survivorSessionRemainedUsable: true,
+      },
+      rss: {
+        detachedObservationMs,
+        growthBudgetMiB: rssGrowthBudgetMiB,
+        rangeKiB: rssDeltaKiB,
+        decision: 'mitigated-by-bounded-process-group-rss-and-explicit-global-shutdown',
+        samples: rssSamples,
+      },
+      runtimeStopped: true,
+    };
+  } finally {
+    journal?.close();
+    if (client && sessionA?.id) {
+      await client.request('turn.interrupt', { sessionId: sessionA.id, streamId: sessionA.streamId }).catch(() => {});
+      await client.request('session.close', { sessionId: sessionA.id, streamId: sessionA.streamId }).catch(() => {});
+    }
+    if (client && sessionB?.id && client === clients[0] && !crashed) {
+      await client.request('turn.interrupt', { sessionId: sessionB.id, streamId: sessionB.streamId }).catch(() => {});
+      await client.request('session.close', { sessionId: sessionB.id, streamId: sessionB.streamId }).catch(() => {});
+    }
+    if (client && survivorSession?.id) {
+      await client.request('session.close', { sessionId: survivorSession.id, streamId: survivorSession.streamId }).catch(() => {});
+    }
+    for (const ownedClient of clients.reverse()) await ownedClient.stop().catch(() => {});
+    await rm(canaryRoot, { recursive: true, force: true });
+  }
+}
+
+export async function main() {
+  const summary = await runKimiLifecycleCanary();
+  process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch(error => {
+    process.stderr.write(`Kimi lifecycle canary failed: ${error?.message ?? error}\n`);
+    process.exitCode = 1;
+  });
+}

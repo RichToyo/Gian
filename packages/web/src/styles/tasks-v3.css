@@ -1,0 +1,166 @@
+/* ============================================================================
+ * tasks-v3.css — Tasks mode visuals, ported 1:1 from the design prototype
+ * (design/gian-design-v2). The shared V2 vocabulary (.sidebar, .sb-*, .rail-item,
+ * .ri-*, .main, .main-head, .main-scroll, .transcript, .composer*, .btn,
+ * .session-status) is already supplied by gian-v2.css / shell-v2.css — this file
+ * only adds the Tasks-specific pieces: task group rows (open + done), the
+ * subtask completion treatment, the task placeholder chrome, and the inline
+ * new-task form. The subtask status indicator reuses the Sessions sidebar
+ * `.ri-status` (CodingView StatusIcon), so it is NOT styled here. No shared
+ * tokens or global rules touched.
+ * ==========================================================================*/
+
+/* Subtask (child) rows are plain `.session-row`s — identical to Sessions
+   session rows by construction (components.css), so nothing is styled here,
+   EXCEPT the Tasks rail drops the row-end time stamp (T4, 2026-09-06): with
+   no always-on glyph there, the 38px reservation goes too, and the hover
+   actions get their opaque backdrop only while hovered. */
+.tasks-rail .session-row .ri-row1 { padding-right: 0; }
+/* …but the status glyph (running spinner / pending / error) IS an always-on
+   absolutely-positioned overlay at the row end (`.ri-status`, shell-v2.css),
+   so a glyph-carrying row must reserve its space or a long title runs under
+   the glyph (2026-09-08 owner report: text/glyph overlap). */
+.tasks-rail .session-row.has-status .ri-row1 { padding-right: 26px; }
+/* Row-action cluster in the Tasks rail: no backdrop tile — the complete/
+   reopen check and lock glyphs read straight off the row tint beneath
+   (Owner 2026-09-23: inline icons always have a transparent background). The per-button hover veil
+   stays on .ri-act itself (gian-v2.css). */
+.tasks-rail .session-row:hover .ri-acts {
+  background: transparent;
+  border-radius: var(--r-1);
+}
+.tasks-rail .session-row.active:hover .ri-acts { background: transparent; }
+
+/* T2: while a row from another list is dragged, task group headers (and the
+   Untasked section header for task-bound rows) hint that they accept the drop
+   as an assign (session.assignTask). */
+.task-group.dnd-assign-target,
+.sb-section.dnd-assign-target {
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  background: var(--surface);
+}
+
+/* Task group header — modeled on the Sessions rail's `.sb-group` (gian-v2.css):
+   the pin glyph stays faint (text-3) while collapsed and goes dark once the
+   group is open (transparent while collapsed, dark while expanded). */
+.task-group .task-group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-group.open .sb-group-ico { color: var(--text); }
+
+/* Done task row (Done section, 2026-08-03): same group-header look as an open
+   task, but struck + greyed and not selectable. */
+.sb-group.done-task-group { cursor: default; }
+.done-task-group .task-group-name {
+  text-decoration: line-through;
+  color: var(--text-3);
+}
+
+/* The task ⋯ menu popover is portaled to <body> since 2026-08-14 (the rail
+   clipped absolute overflow), so no descendant selector here can reach it —
+   its sizing lives on `.ws-kebab-pop--fixed` in coding.css. */
+
+/* ---- Subtask done toggle ------------------------------------------------
+ * A subtask IS a session; completing it (POST /api/sessions/:id/complete) is
+ * reversible via /reopen — the row's hover check button toggles both ways. */
+
+/* ---- Manager main pane chrome (prototype: .manager-task-name) ----
+ * The class name predates the manager removal (2026-08): the task-name style
+ * is reused by the Tasks placeholder panels. (The Subtask eyebrow was dropped
+ * when the chat header was reduced to the branch-diff badge.) */
+.manager-task-name {
+  font: 600 var(--fz-13)/1.3 var(--font-sans);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60ch;
+}
+
+/* Tasks status label is sentence-case ("open" / "running"), matching the
+   prototype — overrides gian-v2.css's uppercase treatment, scoped to Tasks. */
+
+/* ---- Empty detail state + task placeholder ---- */
+.main.tasks-detail-empty {
+  align-items: center;
+  justify-content: center;
+}
+.main.tasks-detail-empty p {
+  margin: 0;
+  font: var(--fz-13)/1.5 var(--font-sans);
+  color: var(--text-3);
+}
+.main.tasks-detail-empty .tasks-detail-task-name {
+  font: 600 var(--fz-13)/1.3 var(--font-sans);
+  color: var(--text);
+}
+
+/* ---- Inline new-task form (sidebar) ---- */
+.tasks-new-form {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 8px 2px 10px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+}
+.tasks-new-input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  padding: 6px 8px;
+  font: var(--fz-12)/1.4 var(--font-sans);
+  color: var(--text);
+  outline: 0;
+  transition: border-color 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+.tasks-new-input::placeholder { color: var(--text-3); }
+.tasks-new-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+.tasks-new-form-actions {
+  display: flex; gap: 6px; justify-content: flex-end;
+  margin-top: 2px;
+}
+
+/* Inline rename input inside a task row / group header: shrink to the row. */
+.task-rename-input { flex: 1 1 auto; min-width: 0; padding: 2px 6px; }
+
+/* Running subtask row: the complete toggle is not rendered while a turn
+   runs (a check next to the spinner read as "done"), and the ring stays
+   visible (2026-08-05; the pin button left the Tasks rail 2026-09-06). */
+.session-row.is-running:hover .ri-status { opacity: 1; }
+
+.tasks-list-empty {
+  margin: 16px 8px;
+  font: var(--fz-12)/1.5 var(--font-sans);
+  color: var(--text-3);
+}
+
+/* ============================================================
+   Tasks redesign (spec 2026-06-28 §B/§E)
+   ============================================================ */
+
+/* §B — user-completed subtask (completed_at set via "Mark complete"): struck
+   through + greyed. This is the *user completion* flag only — a finished TURN
+   (status-done) is NOT struck; subtask rows no longer carry a `status-*`
+   class at all. */
+.rail-item.subtask-done { opacity: 0.6; }
+.rail-item.subtask-done .ri-title {
+  text-decoration: line-through;
+  color: var(--text-3);
+}
+
+/* §E — parent task "needs you" rollup: a solid accent dot, no gradient,
+   distinct from the subtask status glyphs. */
+.task-attn-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: task-attn-pulse 2.2s ease-in-out infinite;
+}
+@keyframes task-attn-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--accent-soft); }
+  50%      { box-shadow: 0 0 0 5px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-attn-dot { animation: none; }
+}

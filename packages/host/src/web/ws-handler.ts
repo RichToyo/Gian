@@ -1,0 +1,610 @@
+import { randomUUID } from 'node:crypto';
+import type { ClientToServerMessage, InboxSyncSnapshot, StateSyncMessage } from '@gian/shared';
+import { isAttentionLookupMessage } from '@gian/shared';
+import type { WSContext, WSMessageReceive } from 'hono/ws';
+import type { SessionManager } from '../session/manager.js';
+import type { TaskManager } from '../task/manager.js';
+import type { WsBroadcaster } from './ws-broadcast.js';
+import type { ApprovalManager } from '../approval/index.js';
+import type { WorkbenchTerminalManager } from '../term/manager.js';
+import type { Db } from '../storage/db.js';
+import { getUsernameForToken } from '../auth/tokens.js';
+import { AUTH_REQUIRED } from '../auth/middleware.js';
+import { loadConfig } from '../storage/config.js';
+import { deleteTaskCascade } from '../task/delete-cascade.js';
+import { updateTaskWithSessionArchive } from '../task/update-with-session-archive.js';
+import { redactErrorForLog } from '../logging/redact.js';
+import type { RemoteControllerHub } from '../remote/controller-hub.js';
+
+interface WsMessageEvent {
+  data: WSMessageReceive;
+}
+
+interface WsCloseEvent {
+  code: number;
+  reason: string;
+  wasClean: boolean;
+}
+
+export interface WsHandlerDeps {
+  remoteController?: RemoteControllerHub;
+  sessions: SessionManager;
+  tasks?: TaskManager;
+  broadcaster: WsBroadcaster;
+  approvals?: ApprovalManager;
+  term?: WorkbenchTerminalManager;
+  db?: Db;
+  inbox?: {
+    syncSnapshot(): InboxSyncSnapshot;
+    attentionControl(refs: readonly { id: string; generation: number }[]): Array<{
+      id: string;
+      generation: number;
+      revision: number;
+      read: boolean;
+      terminal: boolean;
+    }>;
+  };
+}
+
+interface ClientState {
+  authed: boolean;
+  clientId: string;
+  mode: 'full' | 'attention';
+}
+
+export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db, remoteController, inbox }: WsHandlerDeps) {
+  const states = new WeakMap<WSContext, ClientState>();
+
+  async function sendStateSync(ws: WSContext): Promise<void> {
+    if (!db) return;
+    const config = loadConfig(db);
+    const sync: StateSyncMessage = {
+      type: 'state_sync',
+      runner: {
+        host: config.host || '127.0.0.1',
+        latency: 0,
+        started_ago: '0s',
+        agents: 0,
+        disk: '?',
+        codex_version: '?',
+        cc_version: '?',
+        ws_root: config.workspace_root,
+      },
+      sessions: sessions.listSessions(),
+      sidechats: sessions.listSidechats(),
+      tasks: tasks?.listTasks() ?? [],
+      workspaces: db.prepare('SELECT * FROM workspaces ORDER BY sort_order, name').all() as StateSyncMessage['workspaces'],
+      approvals: (approvals?.listPending() ?? []).map(r => ({
+        id: r.id,
+        session_id: r.sessionId,
+        turn_id: r.turnId,
+        ...(r.turnNumber !== undefined ? { turn_number: r.turnNumber } : {}),
+        category: r.category,
+        title: r.description,
+        command: typeof r.subject === 'string' ? r.subject : '',
+        reason: null,
+        status: r.status,
+        resolved_by: r.resolvedBy ?? null,
+        resolved_at: r.resolvedAt ? new Date(r.resolvedAt).toISOString() : null,
+        created_at: new Date(r.createdAt).toISOString(),
+        ...(r.nativeOptions ? { native_options: r.nativeOptions } : {}),
+      })),
+      config,
+      ...(inbox ? { inbox: inbox.syncSnapshot() } : {}),
+    };
+    broadcaster.send(ws, sync);
+  }
+
+  return {
+    onOpen(_evt: Event, ws: WSContext) {
+      states.set(ws, { authed: false, clientId: randomUUID(), mode: 'full' });
+    },
+
+    onClose(_evt: WsCloseEvent, ws: WSContext) {
+      broadcaster.remove(ws);
+      states.delete(ws);
+    },
+
+    async onMessage(evt: WsMessageEvent, ws: WSContext) {
+      const state = states.get(ws);
+      if (!state) return;
+
+      let parsed: ClientToServerMessage;
+      try {
+        const raw = typeof evt.data === 'string' ? evt.data : evt.data.toString();
+        parsed = JSON.parse(raw) as ClientToServerMessage;
+      } catch {
+        ws.close(4002, 'invalid_json');
+        return;
+      }
+
+      if (!state.authed) {
+        if (parsed.type !== 'auth') {
+          ws.close(4001, 'auth_required');
+          return;
+        }
+        if (!parsed.token || parsed.token.length === 0) {
+          ws.close(4001, 'auth_failed');
+          return;
+        }
+        if (parsed.client !== undefined && parsed.client !== 'attention') {
+          ws.close(4002, 'invalid_client_mode');
+          return;
+        }
+        if (AUTH_REQUIRED) {
+          const username = getUsernameForToken(parsed.token);
+          if (!username) {
+            ws.close(4001, 'auth_failed');
+            return;
+          }
+          state.authed = true;
+          state.mode = parsed.client === 'attention' ? 'attention' : 'full';
+          broadcaster.add(ws, state.mode);
+          broadcaster.send(ws, { type: 'auth_ok', user: username });
+        } else {
+          state.authed = true;
+          state.mode = parsed.client === 'attention' ? 'attention' : 'full';
+          broadcaster.add(ws, state.mode);
+          broadcaster.send(ws, { type: 'auth_ok', user: 'dev' });
+        }
+        // Send authoritative state immediately after auth so the client can
+        // skip REST fetches and re-sync after reconnect.
+        if (state.mode === 'full') await sendStateSync(ws);
+        return;
+      }
+
+      if (state.mode === 'attention') {
+        const kind = (parsed as { type?: unknown }).type;
+        if (kind === 'attention:lookup') {
+          if (!isAttentionLookupMessage(parsed)) {
+            ws.close(4002, 'invalid_attention_lookup');
+            broadcaster.remove(ws);
+            return;
+          }
+          broadcaster.send(ws, {
+            type: 'attention:control',
+            items: inbox?.attentionControl(parsed.refs) ?? [],
+          });
+          return;
+        }
+        ws.close(4003, 'attention_read_only');
+        broadcaster.remove(ws);
+        return;
+      }
+
+      // Correlation id for the UI Operation Layer (spec §4.4). Only
+      // non-empty strings correlate; pre-correlation clients omit the field
+      // and must see no behavior change.
+      const rawRequestId = (parsed as { request_id?: unknown }).request_id;
+      const requestId = typeof rawRequestId === 'string' && rawRequestId.length > 0
+        ? rawRequestId
+        : null;
+      try {
+        const dispatched = await dispatch(parsed, sessions, tasks, broadcaster, ws, term, remoteController);
+        // §4.4 success result. ORDERING CONTRACT: the result must never
+        // arrive before the canonical broadcast caused by the command.
+        // `dispatch` is awaited, and the domain managers broadcast
+        // synchronously inside their methods — verified:
+        //   session:rename → SessionManager.renameSession broadcasts
+        //     session:updated synchronously (session/manager.ts:546-553);
+        //   task:update → the dispatch arm itself broadcasts task:updated
+        //     synchronously (below);
+        //   queue:add → SessionManager.enqueueMessage broadcasts
+        //     queue:updated synchronously (session/manager.ts:614-617);
+        //   message:send → SessionManager.sendMessage broadcasts
+        //     session:updated (running) and the user_message echo at
+        //     session/manager.ts:347/353, both BEFORE its final
+        //     `await client.startTurn`, so the echo precedes the promise
+        //     resolving — no async-after-return broadcast found.
+        // Sending the result immediately after the awaited dispatch
+        // therefore satisfies the contract for every command family.
+        if (requestId && isMutatingCommand(parsed.type)) {
+          broadcaster.send(ws, {
+            type: 'operation:result',
+            request_id: requestId,
+            request_type: parsed.type,
+            ok: true,
+            ...(dispatched?.result ? { result: dispatched.result } : {}),
+          });
+        }
+      } catch (err) {
+        console.error('[ws] dispatch error', redactErrorForLog(err));
+        // Surface the failure to the client. Without this, errors inside
+        // sendMessage / respondApproval / etc. are invisible — the user sees
+        // "no reply" with no clue why.
+        const sessionIdField = (parsed as { session_id?: unknown }).session_id;
+        // Prefer an explicit error code when the domain layer provides one.
+        const explicitCode = (err && typeof err === 'object'
+          && typeof (err as { code?: unknown }).code === 'string')
+          ? (err as { code: string }).code
+          : null;
+        const code = explicitCode ?? dispatchErrorCode(parsed.type);
+        const message = err instanceof Error ? err.message : String(err);
+        // The `error` envelope goes first: existing clients' toast behavior
+        // is driven by it. The operation:result then settles operation state
+        // (§4.4) with the same code/message.
+        broadcaster.send(ws, {
+          type: 'error',
+          request_type: parsed.type,
+          ...(typeof sessionIdField === 'string' ? { session_id: sessionIdField } : {}),
+          ...(requestId ? { request_id: requestId } : {}),
+          code,
+          message,
+        });
+        if (requestId && isMutatingCommand(parsed.type)) {
+          broadcaster.send(ws, {
+            type: 'operation:result',
+            request_id: requestId,
+            request_type: parsed.type,
+            ok: false,
+            error: { code, message },
+          });
+        }
+      }
+    },
+  };
+}
+
+/**
+ * UI Operation Layer (spec §4.4): every ClientToServerMessage type is a
+ * mutating command EXCEPT these protocol-level exemptions — auth handshake,
+ * event subscription, and the high-frequency terminal I/O frames. Only
+ * mutating commands ever receive an `operation:result`.
+ */
+const NON_MUTATING_TYPES: ReadonlySet<ClientToServerMessage['type']> = new Set([
+  'auth',
+  'events:subscribe',
+  'term:input',
+  'term:resize',
+  'term:replay-request',
+]);
+
+function isMutatingCommand(type: ClientToServerMessage['type']): boolean {
+  return !NON_MUTATING_TYPES.has(type);
+}
+
+function dispatchErrorCode(messageType: string): string {
+  switch (messageType) {
+    case 'message:send':
+      return 'MESSAGE_SEND_FAILED';
+    case 'message:steer':
+      return 'MESSAGE_STEER_FAILED';
+    case 'approval:resolve':
+      return 'APPROVAL_RESOLVE_FAILED';
+    case 'session:create':
+      return 'SESSION_CREATE_FAILED';
+    case 'session:stop':
+      return 'SESSION_STOP_FAILED';
+    case 'session:assign_task':
+      return 'SESSION_ASSIGN_TASK_FAILED';
+    case 'queue:send_now':
+      return 'QUEUE_SEND_NOW_FAILED';
+    case 'task:delete':
+      return 'TASK_DELETE_FAILED';
+    default:
+      return 'DISPATCH_FAILED';
+  }
+}
+
+async function dispatch(
+  msg: ClientToServerMessage,
+  sessions: SessionManager,
+  tasks: TaskManager | undefined,
+  broadcaster: WsBroadcaster,
+  ws: WSContext,
+  term?: WorkbenchTerminalManager,
+  remoteController?: RemoteControllerHub,
+): Promise<{ result?: import('@gian/shared').OperationResultMessage['result'] } | void> {
+  if (msg.type === 'events:subscribe') broadcaster.subscribeToEvents(ws, msg.session_id);
+  // A seen Inbox occurrence is rejected before a remote-owned session can
+  // forward its live interaction revision. Remote handleMessage returns
+  // before respondApproval, so this assert has to run first.
+  if (msg.type === 'approval:resolve' && msg.expected_inbox !== undefined) {
+    sessions.assertExpectedInbox(msg.session_id, msg.approval_id, msg.expected_inbox);
+  }
+  if (remoteController && await remoteController.handleMessage(msg)) return;
+  switch (msg.type) {
+    case 'events:subscribe': {
+      broadcaster.subscribeToEvents(ws, msg.session_id);
+      if (msg.session_id) await sessions.activateSession(msg.session_id);
+      return;
+    }
+    case 'session:create': {
+      if (msg.remote_environment_id) {
+        if (!remoteController || !msg.agent_id) throw new Error('remote execution unavailable');
+        const session = msg.remote_session_id ? await remoteController.takeOver(msg.remote_environment_id, msg.remote_session_id)
+          : await remoteController.create({ environment_id: msg.remote_environment_id,
+          workspace_id: msg.workspace_id, agent_id: msg.agent_id, name: msg.name,
+          model: msg.model, thinking_effort: msg.thinking_effort, service_tier: msg.service_tier,
+          approval_mode: msg.approval_mode, session_config: msg.session_config,
+          turn_config: msg.turn_config }, msg.request_id ?? randomUUID());
+        broadcaster.send(ws, { type: 'session:created', session, origin: 'interactive-create' });
+        return;
+      }
+      if (msg.agent_id === undefined && msg.executor === undefined) {
+        throw Object.assign(
+          new Error('session:create requires agent_id'),
+          { code: 'AGENT_REQUIRED' },
+        );
+      }
+      const session = await sessions.createSession({
+        workspace_id: msg.workspace_id,
+        ...(msg.agent_id !== undefined ? { agent_id: msg.agent_id } : {}),
+        ...(msg.executor !== undefined ? { executor: msg.executor } : {}),
+        model: msg.model,
+        approval_mode: msg.approval_mode,
+        ...(msg.thinking_effort !== undefined ? { thinking_effort: msg.thinking_effort } : {}),
+        ...(msg.service_tier !== undefined ? { service_tier: msg.service_tier } : {}),
+        ...(msg.name !== undefined ? { name: msg.name } : {}),
+        ...(msg.session_config ? { session_config: msg.session_config } : {}),
+        ...(msg.turn_config ? { turn_config: msg.turn_config } : {}),
+      });
+      broadcaster.send(ws, {
+        type: 'session:created',
+        session,
+        origin: 'interactive-create',
+      });
+      return;
+    }
+    case 'session:rename': {
+      sessions.renameSession(msg.session_id, msg.name);
+      return;
+    }
+    case 'session:archive': {
+      await sessions.archiveSession(msg.session_id, msg.archived);
+      return;
+    }
+    case 'session:assign_task': {
+      sessions.assignTask(msg.session_id, msg.task_id);
+      return;
+    }
+    case 'session:pin': {
+      sessions.setPinned(msg.session_id, msg.pinned);
+      return;
+    }
+    case 'session:delete': {
+      await sessions.deleteSession(msg.session_id, msg.confirmed_sidechat_ids);
+      return;
+    }
+    case 'sidechat:create': {
+      const sidechat = await sessions.createSidechat(msg.parent_session_id, msg.sidechat_id);
+      return { result: { sidechat_id: sidechat.id } };
+    }
+    case 'sidechat:resume': {
+      const sidechat = await sessions.resumeSidechat(msg.sidechat_id, msg.parent_session_id);
+      return { result: { sidechat_id: sidechat.id } };
+    }
+    case 'sidechat:close': {
+      const result = await sessions.closeSidechat(msg.sidechat_id);
+      return { result };
+    }
+    case 'sidechat:set_turn_config': {
+      sessions.setSidechatTurnConfigValue(msg.sidechat_id, msg.option_id, msg.value);
+      return;
+    }
+    case 'session:fork': {
+      const result = await sessions.forkSession({
+        sourceSessionId: msg.source_session_id,
+        ...(msg.session_id ? { sessionId: msg.session_id } : {}),
+        anchor: msg.anchor.type === 'head'
+          ? { type: 'head' }
+          : { type: 'turn', turnId: msg.anchor.turn_id, sourceTurnId: msg.anchor.source_turn_id },
+      });
+      return { result: { session_id: result.sessionId, origin: result.origin } };
+    }
+    case 'session:set_unread': {
+      sessions.setUnread(msg.session_id, msg.unread);
+      return;
+    }
+    case 'task:create': {
+      if (!tasks) return;
+      const task = tasks.createTask({
+        name: msg.name,
+        ...(msg.description !== undefined ? { description: msg.description } : {}),
+      });
+      broadcaster.broadcast({ type: 'task:created', task });
+      return;
+    }
+    case 'task:update': {
+      if (!tasks) return;
+      const patch: import('../task/manager.js').UpdateTaskInput = {};
+      if (msg.name !== undefined) patch.name = msg.name;
+      if (msg.description !== undefined) patch.description = msg.description;
+      if (msg.status !== undefined) patch.status = msg.status;
+      // Pin is a separate, updated_at-neutral path (setTaskPinned); a content
+      // patch (if any) runs first, then the pin, and the final row is broadcast.
+      let task = Object.keys(patch).length > 0
+        ? updateTaskWithSessionArchive(tasks, sessions, msg.task_id, patch)
+        : undefined;
+      if (msg.pinned !== undefined) task = tasks.setTaskPinned(msg.task_id, msg.pinned);
+      if (task) broadcaster.broadcast({ type: 'task:updated', task });
+      return;
+    }
+    case 'task:delete': {
+      if (!tasks) return;
+      await deleteTaskCascade(tasks, sessions, msg.task_id);
+      broadcaster.broadcast({ type: 'task:deleted', task_id: msg.task_id });
+      return;
+    }
+    case 'message:send': {
+      await sessions.sendMessage(
+        msg.session_id,
+        msg.text,
+        msg.items,
+        msg.oneShotBypass,
+        undefined,
+        msg.context_items,
+        msg.composer_document,
+        msg.turn_config,
+        undefined,
+        msg.translation_id,
+      );
+      return;
+    }
+    case 'message:steer': {
+      await sessions.steerMessage(
+        msg.session_id,
+        msg.text,
+        msg.items,
+        msg.context_items,
+        msg.composer_document,
+      );
+      return;
+    }
+    case 'approval:resolve': {
+      await sessions.respondApproval(
+        msg.session_id,
+        msg.approval_id,
+        msg.decision,
+        msg.answers,
+        msg.native_option_id,
+        'web',
+        msg.expected_inbox,
+      );
+      return;
+    }
+    case 'session:stop': {
+      await sessions.stopTurn(msg.session_id);
+      return;
+    }
+    case 'session:recover': {
+      await sessions.forceRecover(msg.session_id);
+      return;
+    }
+    case 'session:set_mode': {
+      sessions.setApprovalMode(msg.session_id, msg.approval_mode);
+      return;
+    }
+    case 'session:set_effort': {
+      sessions.setEffort(msg.session_id, msg.effort);
+      return;
+    }
+    case 'session:set_service_tier': {
+      sessions.setServiceTier(msg.session_id, msg.service_tier);
+      return;
+    }
+    case 'session:set_model': {
+      await sessions.setModel(msg.session_id, msg.model);
+      return;
+    }
+    case 'session:set_native_config': {
+      await sessions.setNativeConfig(msg.session_id, msg.config_id, msg.value);
+      return;
+    }
+    case 'session:set_turn_config': {
+      await sessions.setTurnConfigValue(msg.session_id, msg.option_id, msg.value);
+      return;
+    }
+    case 'queue:add': {
+      sessions.enqueueMessage(
+        msg.session_id,
+        msg.text,
+        msg.items,
+        undefined,
+        msg.context_items,
+        msg.composer_document,
+      );
+      return;
+    }
+    case 'queue:remove': {
+      sessions.removeFromQueue(msg.session_id, msg.queue_id);
+      return;
+    }
+    case 'queue:update': {
+      sessions.updateQueueMessage(msg.session_id, msg.queue_id, msg.text);
+      return;
+    }
+    case 'queue:clear': {
+      sessions.clearQueue(msg.session_id);
+      return;
+    }
+    case 'queue:send_now': {
+      await sessions.sendQueuedNow(msg.session_id);
+      return;
+    }
+    case 'term:spawn': {
+      if (!term) return;
+      if (msg.target !== undefined && (
+        msg.target.kind !== 'agent_cli'
+        || typeof msg.target.agent_id !== 'string'
+        || msg.target.agent_id.length === 0
+        || msg.target.agent_id.length > 128
+        || msg.target.agent_id.includes('\0')
+        || (msg.target.action !== undefined && msg.target.action !== 'login')
+      )) {
+        throw Object.assign(
+          new Error('Agent CLI terminal target is invalid.'),
+          { code: 'TERMINAL_TARGET_INVALID' },
+        );
+      }
+      if (msg.target && (msg.cwd !== undefined || msg.shell !== undefined)) {
+        throw Object.assign(
+          new Error('Agent CLI terminals do not accept cwd or shell overrides.'),
+          { code: 'TERMINAL_TARGET_INVALID' },
+        );
+      }
+      const spawnOpts: import('../term/manager.js').SpawnOptions = {
+        termId: msg.term_id,
+        cols: msg.cols,
+        rows: msg.rows,
+      };
+      if (msg.cwd !== undefined) spawnOpts.cwd = msg.cwd;
+      if (msg.shell !== undefined) spawnOpts.shell = msg.shell;
+      if (msg.target?.kind === 'agent_cli') {
+        spawnOpts.target = {
+          kind: 'agent_cli',
+          agentId: msg.target.agent_id,
+          ...(msg.target.action ? { action: msg.target.action } : {}),
+        };
+      }
+      const result = await term.spawn(spawnOpts);
+      broadcaster.send(ws, {
+        type: 'term:replay',
+        term_id: msg.term_id,
+        chunks: result.replay,
+        alive: result.alive,
+        code: null,
+        signal: null,
+      });
+      return;
+    }
+    case 'term:input': {
+      if (!term) return;
+      term.input(msg.term_id, msg.data);
+      return;
+    }
+    case 'term:resize': {
+      if (!term) return;
+      term.resize(msg.term_id, msg.cols, msg.rows);
+      return;
+    }
+    case 'term:replay-request': {
+      if (!term) return;
+      const result = term.replay(msg.term_id);
+      broadcaster.send(ws, {
+        type: 'term:replay',
+        term_id: msg.term_id,
+        chunks: result.chunks,
+        alive: result.alive,
+        code: result.code,
+        signal: result.signal,
+      });
+      return;
+    }
+    case 'term:close': {
+      if (!term) return;
+      await term.kill(msg.term_id);
+      return;
+    }
+    case 'auth':
+      // already handled
+      return;
+    default:
+      console.log('[ws] ignoring message type', (msg as { type: string }).type);
+  }
+}
+// Note: session:reset/takeover, slash:execute, transcript:load_more are
+// intentionally not yet handled — added by M2 (slash + load_more).
+//
+// `_broadcaster` parameter and `_ws` retained on dispatch for future use by
+// per-client responses; treat as the WS sender for ack/error replies.

@@ -1,0 +1,482 @@
+import type { Hono } from 'hono';
+import type {
+  ExternalEditor,
+  KeymapPreferences,
+  LayoutPreferences,
+  NotificationPreferences,
+  OpenAppPrefs,
+  ShortcutMap,
+  SystemConfig,
+  TerminalPreferences,
+  ToolPreferences,
+} from '@gian/shared';
+import {
+  FRAME_OPACITY_MAX,
+  FRAME_OPACITY_MIN,
+  KEYMAP_COMMANDS,
+  MAX_CHAT_FONT_SIZE,
+  MIN_CHAT_FONT_SIZE,
+  SHORTCUT_ACTIONS,
+  SYSTEM_LIGHT_THEMES,
+  isValidKeymapBinding,
+  isValidShortcutCombo,
+} from '@gian/shared';
+import { loadConfig, saveConfig } from '../../storage/config.js';
+import { parseTranslationPreferences } from '@gian/shared';
+import type { Db } from '../../storage/db.js';
+import { isAvailableTerminalShell, terminalOptions } from '../../term/manager.js';
+
+type EditableSettingsKey =
+  | 'translation'
+  | 'port'
+  | 'theme'
+  | 'accent'
+  | 'system_light_theme'
+  | 'frame_opacity'
+  | 'density'
+  | 'font_scale_chrome'
+  | 'font_scale_chat'
+  | 'font_scale_code'
+  | 'chat_font_size'
+  | 'chat_font_family'
+  | 'shortcuts'
+  | 'keymap'
+  | 'layout'
+  | 'tools'
+  | 'notifications'
+  | 'terminal'
+  | 'locale'
+  | 'external_editors'
+  | 'open_apps';
+
+type EditableSettingsPatch = Partial<Pick<SystemConfig, EditableSettingsKey>>;
+type FieldParser = (value: unknown, field: string) => unknown;
+
+const MAX_EDITORS = 64;
+const MAX_EDITOR_ID_LENGTH = 128;
+const MAX_EDITOR_NAME_LENGTH = 64;
+const MAX_EDITOR_COMMAND_LENGTH = 4_096;
+const MAX_EDITOR_ARGS = 128;
+const MAX_EDITOR_ARG_LENGTH = 4_096;
+const MAX_OPEN_APP_LENGTH = 256;
+const MAX_TERMINAL_SHELL_LENGTH = 4_096;
+
+const EDITOR_FIELDS = new Set(['id', 'name', 'command', 'args']);
+const OPEN_APP_CATEGORIES = new Set(['code', 'web', 'images', 'pdf', 'other']);
+const SHORTCUT_ACTION_SET = new Set<string>(SHORTCUT_ACTIONS);
+const KEYMAP_COMMAND_SET = new Set<string>(KEYMAP_COMMANDS);
+const TERMINAL_FIELDS = new Set([
+  'font_family',
+  'font_size',
+  'line_height',
+  'cursor_style',
+  'cursor_blink',
+  'scrollback_lines',
+  'shell',
+  'start_directory',
+]);
+
+function parseString(
+  value: unknown,
+  field: string,
+  options: { maxLength: number; allowEmpty?: boolean },
+): string {
+  if (typeof value !== 'string') throw new Error(`${field} must be a string`);
+  if (!options.allowEmpty && value.trim().length === 0) {
+    throw new Error(`${field} must not be empty`);
+  }
+  if (value.length > options.maxLength) {
+    throw new Error(`${field} must be at most ${options.maxLength} characters`);
+  }
+  return value;
+}
+
+function parseEnum(value: unknown, field: string, allowed: readonly string[]): string {
+  if (typeof value !== 'string' || !allowed.includes(value)) {
+    throw new Error(`${field} must be one of: ${allowed.join(', ')}`);
+  }
+  return value;
+}
+
+function parseEditors(value: unknown): ExternalEditor[] {
+  if (!Array.isArray(value)) throw new Error('external_editors must be an array');
+  if (value.length > MAX_EDITORS) {
+    throw new Error(`external_editors must contain at most ${MAX_EDITORS} entries`);
+  }
+
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const field = `external_editors[${index}]`;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new Error(`${field} must be an object`);
+    }
+    const record = entry as Record<string, unknown>;
+    const unknownField = Object.keys(record).find(key => !EDITOR_FIELDS.has(key));
+    if (unknownField) throw new Error(`${field}.${unknownField} is not allowed`);
+
+    const id = parseString(record.id, `${field}.id`, { maxLength: MAX_EDITOR_ID_LENGTH });
+    const name = parseString(record.name, `${field}.name`, { maxLength: MAX_EDITOR_NAME_LENGTH });
+    const command = parseString(record.command, `${field}.command`, {
+      maxLength: MAX_EDITOR_COMMAND_LENGTH,
+    });
+    if (!Array.isArray(record.args)) throw new Error(`${field}.args must be an array`);
+    if (record.args.length > MAX_EDITOR_ARGS) {
+      throw new Error(`${field}.args must contain at most ${MAX_EDITOR_ARGS} entries`);
+    }
+    const args = record.args.map((arg, argIndex) => parseString(
+      arg,
+      `${field}.args[${argIndex}]`,
+      { maxLength: MAX_EDITOR_ARG_LENGTH, allowEmpty: true },
+    ));
+    if (seen.has(id)) throw new Error(`${field}.id must be unique`);
+    seen.add(id);
+    return { id, name, command, args };
+  });
+}
+
+function parseShortcuts(value: unknown): ShortcutMap {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('shortcuts must be an object');
+  }
+  const parsed: ShortcutMap = {};
+  for (const [action, combo] of Object.entries(value)) {
+    if (!SHORTCUT_ACTION_SET.has(action)) {
+      throw new Error(`shortcuts.${action} is not a remappable action`);
+    }
+    if (!isValidShortcutCombo(combo)) {
+      throw new Error(`shortcuts.${action} is not a valid key combo`);
+    }
+    parsed[action as keyof ShortcutMap] = combo;
+  }
+  return parsed;
+}
+
+function strictRecord(
+  value: unknown,
+  field: string,
+  allowed: readonly string[],
+  required: readonly string[] = allowed,
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const unknown = Object.keys(record).find(key => !allowed.includes(key));
+  if (unknown) throw new Error(`${field}.${unknown} is not allowed`);
+  const missing = required.find(key => !Object.hasOwn(record, key));
+  if (missing) throw new Error(`${field}.${missing} is required`);
+  return record;
+}
+
+function parseKeymap(value: unknown): KeymapPreferences {
+  const record = strictRecord(value, 'keymap', ['preset', 'bindings']);
+  if (record.preset !== 'default') throw new Error('keymap.preset must be default');
+  const bindings = strictRecord(record.bindings, 'keymap.bindings', [...KEYMAP_COMMANDS], []);
+  const parsed: KeymapPreferences['bindings'] = {};
+  for (const [command, binding] of Object.entries(bindings)) {
+    if (!KEYMAP_COMMAND_SET.has(command)) {
+      throw new Error(`keymap.bindings.${command} is not a remappable command`);
+    }
+    if (binding !== null && !isValidKeymapBinding(binding)) {
+      throw new Error(`keymap.bindings.${command} is not a valid key combo`);
+    }
+    parsed[command as keyof KeymapPreferences['bindings']] = binding as string | null;
+  }
+  return { preset: 'default', bindings: parsed };
+}
+
+function parseLayout(value: unknown): LayoutPreferences {
+  const record = strictRecord(value, 'layout', [
+    'sidebar_width', 'sidebar_start_collapsed', 'main_panel_ratio',
+    'inspector_width', 'inspector_auto_open', 'remember_sizes',
+  ]);
+  const number = (key: string, min: number, max: number) => {
+    const candidate = record[key];
+    if (typeof candidate !== 'number' || !Number.isFinite(candidate)
+      || candidate < min || candidate > max) {
+      throw new Error(`layout.${key} must be between ${min} and ${max}`);
+    }
+    return candidate;
+  };
+  const boolean = (key: string) => {
+    if (typeof record[key] !== 'boolean') throw new Error(`layout.${key} must be a boolean`);
+    return record[key] as boolean;
+  };
+  return {
+    sidebar_width: number('sidebar_width', 200, 480),
+    sidebar_start_collapsed: boolean('sidebar_start_collapsed'),
+    main_panel_ratio: number('main_panel_ratio', 0.25, 0.75),
+    inspector_width: number('inspector_width', 220, 500),
+    inspector_auto_open: boolean('inspector_auto_open'),
+    remember_sizes: boolean('remember_sizes'),
+  };
+}
+
+function parseTools(value: unknown): ToolPreferences {
+  const record = strictRecord(value, 'tools', [
+    'files', 'diffs', 'history', 'side_chat', 'browser', 'terminal',
+  ]);
+  const files = strictRecord(record.files, 'tools.files', [
+    'compact_folders', 'show_hidden_files', 'show_ignored_files',
+    'reveal_active_file', 'open_on', 'word_wrap',
+  ]);
+  const diffs = strictRecord(record.diffs, 'tools.diffs', [
+    'layout', 'word_wrap', 'default_scope',
+  ]);
+  const history = strictRecord(record.history, 'tools.history', [
+    'show_graph', 'default_ref', 'date_format', 'single_click_preview',
+  ]);
+  const sideChat = strictRecord(record.side_chat, 'tools.side_chat', [
+    'open_after_create', 'confirm_before_close',
+  ]);
+  const browser = strictRecord(record.browser, 'tools.browser', [
+    'home_page', 'restore_last_page', 'external_links',
+  ]);
+  const terminal = strictRecord(record.terminal, 'tools.terminal', [
+    'option_as_meta', 'copy_on_selection', 'bell', 'shell_integration',
+  ]);
+  const boolean = (owner: Record<string, unknown>, field: string, key: string) => {
+    if (typeof owner[key] !== 'boolean') throw new Error(`${field}.${key} must be a boolean`);
+    return owner[key] as boolean;
+  };
+  return {
+    files: {
+      compact_folders: boolean(files, 'tools.files', 'compact_folders'),
+      show_hidden_files: boolean(files, 'tools.files', 'show_hidden_files'),
+      show_ignored_files: boolean(files, 'tools.files', 'show_ignored_files'),
+      reveal_active_file: boolean(files, 'tools.files', 'reveal_active_file'),
+      open_on: parseEnum(files.open_on, 'tools.files.open_on', ['single-click', 'double-click']) as ToolPreferences['files']['open_on'],
+      word_wrap: boolean(files, 'tools.files', 'word_wrap'),
+    },
+    diffs: {
+      layout: parseEnum(diffs.layout, 'tools.diffs.layout', ['split', 'stacked']) as ToolPreferences['diffs']['layout'],
+      word_wrap: boolean(diffs, 'tools.diffs', 'word_wrap'),
+      default_scope: parseEnum(diffs.default_scope, 'tools.diffs.default_scope', ['all', 'last-turn']) as ToolPreferences['diffs']['default_scope'],
+    },
+    history: {
+      show_graph: boolean(history, 'tools.history', 'show_graph'),
+      default_ref: parseEnum(history.default_ref, 'tools.history.default_ref', ['current', 'all']) as ToolPreferences['history']['default_ref'],
+      date_format: parseEnum(history.date_format, 'tools.history.date_format', ['relative', 'absolute']) as ToolPreferences['history']['date_format'],
+      single_click_preview: boolean(history, 'tools.history', 'single_click_preview'),
+    },
+    side_chat: {
+      open_after_create: boolean(sideChat, 'tools.side_chat', 'open_after_create'),
+      confirm_before_close: boolean(sideChat, 'tools.side_chat', 'confirm_before_close'),
+    },
+    browser: {
+      home_page: parseString(browser.home_page, 'tools.browser.home_page', { maxLength: 4_096, allowEmpty: true }),
+      restore_last_page: boolean(browser, 'tools.browser', 'restore_last_page'),
+      external_links: parseEnum(browser.external_links, 'tools.browser.external_links', ['gian', 'system']) as ToolPreferences['browser']['external_links'],
+    },
+    terminal: {
+      option_as_meta: boolean(terminal, 'tools.terminal', 'option_as_meta'),
+      copy_on_selection: boolean(terminal, 'tools.terminal', 'copy_on_selection'),
+      bell: boolean(terminal, 'tools.terminal', 'bell'),
+      shell_integration: boolean(terminal, 'tools.terminal', 'shell_integration'),
+    },
+  };
+}
+
+function parseNotificationPreferences(value: unknown): NotificationPreferences {
+  const record = strictRecord(value, 'notifications', [
+    'enabled', 'session_done', 'approval_needed', 'errors',
+  ]);
+  const boolean = (key: keyof NotificationPreferences) => {
+    if (typeof record[key] !== 'boolean') {
+      throw new Error(`notifications.${key} must be a boolean`);
+    }
+    return record[key] as boolean;
+  };
+  return {
+    enabled: boolean('enabled'),
+    session_done: boolean('session_done'),
+    approval_needed: boolean('approval_needed'),
+    errors: boolean('errors'),
+  };
+}
+
+function parseOpenApps(value: unknown): OpenAppPrefs {  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('open_apps must be an object');
+  }
+  const parsed: Record<string, string> = {};
+  for (const [category, target] of Object.entries(value)) {
+    if (!OPEN_APP_CATEGORIES.has(category)) {
+      throw new Error(`open_apps.${category} is not allowed`);
+    }
+    parsed[category] = parseString(target, `open_apps.${category}`, {
+      maxLength: MAX_OPEN_APP_LENGTH,
+      allowEmpty: true,
+    });
+  }
+  return parsed as OpenAppPrefs;
+}
+
+function parseTerminalPreferences(value: unknown): TerminalPreferences {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('terminal must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  const unknownField = Object.keys(record).find(key => !TERMINAL_FIELDS.has(key));
+  if (unknownField) throw new Error(`terminal.${unknownField} is not allowed`);
+  const missingField = [...TERMINAL_FIELDS].find(key => !Object.hasOwn(record, key));
+  if (missingField) throw new Error(`terminal.${missingField} is required`);
+
+  if (typeof record.font_size !== 'number'
+    || !Number.isInteger(record.font_size)
+    || record.font_size < 10
+    || record.font_size > 22) {
+    throw new Error('terminal.font_size must be an integer between 10 and 22');
+  }
+  if (typeof record.line_height !== 'number'
+    || !Number.isFinite(record.line_height)
+    || record.line_height < 1
+    || record.line_height > 1.6) {
+    throw new Error('terminal.line_height must be between 1 and 1.6');
+  }
+  if (typeof record.cursor_blink !== 'boolean') {
+    throw new Error('terminal.cursor_blink must be a boolean');
+  }
+  if (typeof record.scrollback_lines !== 'number'
+    || ![1_000, 5_000, 10_000, 50_000].includes(record.scrollback_lines)) {
+    throw new Error('terminal.scrollback_lines must be one of: 1000, 5000, 10000, 50000');
+  }
+  const shell = parseString(record.shell, 'terminal.shell', {
+    maxLength: MAX_TERMINAL_SHELL_LENGTH,
+    allowEmpty: true,
+  }).trim();
+  if (shell && !isAvailableTerminalShell(shell)) {
+    throw new Error('terminal.shell must be an available login shell');
+  }
+
+  return {
+    font_family: parseEnum(record.font_family, 'terminal.font_family', [
+      'jetbrains-mono', 'system-mono', 'sf-mono', 'menlo',
+    ]) as TerminalPreferences['font_family'],
+    font_size: record.font_size,
+    line_height: record.line_height,
+    cursor_style: parseEnum(record.cursor_style, 'terminal.cursor_style', [
+      'block', 'bar', 'underline',
+    ]) as TerminalPreferences['cursor_style'],
+    cursor_blink: record.cursor_blink,
+    scrollback_lines: record.scrollback_lines as TerminalPreferences['scrollback_lines'],
+    shell,
+    start_directory: parseEnum(record.start_directory, 'terminal.start_directory', [
+      'context', 'home',
+    ]) as TerminalPreferences['start_directory'],
+  };
+}
+
+const SETTINGS_PATCH_SCHEMA = {
+  translation: parseTranslationPreferences,
+  port(value: unknown) {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) {
+      throw new Error('port must be an integer between 1 and 65535');
+    }
+    return value;
+  },
+  theme: (value: unknown, field: string) => parseEnum(value, field, ['light', 'warm', 'dark', 'system']),
+  accent: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    ['rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum'],
+  ),
+  system_light_theme: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    SYSTEM_LIGHT_THEMES,
+  ),
+  frame_opacity(value: unknown) {
+    if (typeof value !== 'number' || !Number.isInteger(value)
+      || value < FRAME_OPACITY_MIN || value > FRAME_OPACITY_MAX) {
+      throw new Error(
+        `frame_opacity must be an integer between ${FRAME_OPACITY_MIN} and ${FRAME_OPACITY_MAX}`,
+      );
+    }
+    return value;
+  },
+  density: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    ['compact', 'cozy', 'roomy'],
+  ),
+  font_scale_chrome: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    ['sm', 'md', 'lg', 'xl'],
+  ),
+  font_scale_chat: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    ['sm', 'md', 'lg', 'xl'],
+  ),
+  chat_font_size(value: unknown) {
+    if (typeof value !== 'number' || !Number.isInteger(value)
+      || value < MIN_CHAT_FONT_SIZE || value > MAX_CHAT_FONT_SIZE) {
+      throw new Error(
+        `chat_font_size must be an integer between ${MIN_CHAT_FONT_SIZE} and ${MAX_CHAT_FONT_SIZE}`,
+      );
+    }
+    return value;
+  },
+  chat_font_family: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    ['system', 'manrope', 'serif', 'mono'],
+  ),
+  shortcuts: parseShortcuts,
+  keymap: parseKeymap,
+  layout: parseLayout,
+  tools: parseTools,
+  notifications: parseNotificationPreferences,
+  font_scale_code: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    ['sm', 'md', 'lg', 'xl'],
+  ),
+  terminal: parseTerminalPreferences,
+  locale: (value: unknown, field: string) => {
+    parseEnum(value, field, ['zh-CN', 'en']);
+    return 'en';
+  },
+  external_editors: parseEditors,
+  open_apps: parseOpenApps,
+} satisfies Record<EditableSettingsKey, FieldParser>;
+
+function parseSettingsPatch(value: unknown): EditableSettingsPatch {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('settings patch must be an object');
+  }
+
+  // Validate the complete body into a separate object before saving anything.
+  // This makes a mixed valid + malicious payload an atomic rejection.
+  const parsed: Record<string, unknown> = {};
+  for (const [field, fieldValue] of Object.entries(value)) {
+    if (!Object.hasOwn(SETTINGS_PATCH_SCHEMA, field)) {
+      throw new Error(`setting ${field} is not editable`);
+    }
+    const parser = SETTINGS_PATCH_SCHEMA[field as EditableSettingsKey];
+    parsed[field] = parser(fieldValue, field);
+  }
+  return parsed as EditableSettingsPatch;
+}
+
+export function registerSettingsRoutes(app: Hono, db: Db): void {
+  app.get('/api/settings/terminal-options', c => c.json(terminalOptions()));
+  app.get('/api/settings', c => c.json(loadConfig(db)));
+  app.patch('/api/settings', async c => {
+    let body: unknown;
+    try {
+      body = await c.req.json<unknown>();
+    } catch {
+      return c.json({ error: 'invalid JSON body' }, 400);
+    }
+    let patch: EditableSettingsPatch;
+    try {
+      patch = parseSettingsPatch(body);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : 'invalid settings patch' }, 400);
+    }
+    saveConfig(db, patch);
+    return c.json(loadConfig(db));
+  });
+}

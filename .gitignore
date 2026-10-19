@@ -1,0 +1,65 @@
+node_modules/
+dist/
+build/
+.DS_Store
+*.log
+.env
+.env.local
+.env.*.local
+
+coverage/
+.nyc_output/
+
+.vite/
+.turbo/
+
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+
+gian.db
+gian.db-journal
+gian.db-shm
+gian.db-wal
+
+.rvc-attachments/
+.obsidian/
+.claude/settings.local.json
+.claude/*.lock
+.pnpm-store/
+
+CLAUDE.md
+AGENTS.md
+
+# Playwright
+.playwright-cli/
+test-results/
+playwright-report/
+playwright/.cache/
+output/playwright/
+output/quality/
+output/proxy-real-acceptance/
+output/proxy-certification/
+.DS_Store
+
+# Desktop packaging
+/packages/desktop/release/
+/packages/desktop/runtime/
+/artifacts/
+
+# Local debug-driver runtime output (logs / pids / driver script)
+.gian-runtime/
+
+# Gian-maintained per-workspace AI context (runtime scaffold; see workspace/ai-scaffold.ts)
+.ai/
+CLAUDE.local.md
+.ai/sessions/
+.ai/log/
+.ai/.history/
+.ai/STATE.view.md
+.ai/gian-task/
+
+# DSH probe scratch (WP0 runtime installs; never committed)
+/.dsh-probe-tgz/
+/.dsh-probe-tgz2/
+/packages/proxies/dsh-bridge/.dsh-runtime/

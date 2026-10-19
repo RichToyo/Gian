@@ -1,0 +1,974 @@
+import { createHash } from 'node:crypto';
+
+import {
+  assertCatalogImageMagic,
+  CATALOG_DOCUMENT_KEYS,
+  isApprovedRuntimeAssetUrl,
+  readCatalogLocalizations,
+  type CatalogLocalizations,
+  type CatalogLocale,
+  type CompiledCatalogEntryV1,
+} from '@gian/proxy-catalog-contract';
+import type { ManifestV4 } from '@gian/proxy-protocol';
+import {
+  parseProxyPluginId,
+  type ManagedRuntimeInstallPlan,
+  type ManagedRuntimePlatform,
+  type OfficialCatalogSourcePolicy,
+  type ProxyCatalogItem,
+  type ProxyCatalogList,
+  type ProxyCatalogSourceState,
+} from '@gian/shared';
+
+import type { CatalogSourceClient } from './source-client.js';
+import type { CatalogStore } from './store.js';
+import type { CatalogSnapshot } from './types.js';
+import { classifyCatalogCompatibility, hostProtocolVersions } from './compatibility.js';
+import type { PluginInstallReceipt } from '../plugin-store/receipt.js';
+import { compareSemver } from '../plugin-store/semver.js';
+import type { PluginStore } from '../plugin-store/store.js';
+import type { InstalledPackageView, PluginCurrentLaunch, PluginInstallCoordinate } from '../plugin-store/types.js';
+import {
+  INTEGRATION_UPDATE_CHANNEL,
+  type CatalogInboxObserver,
+  type CatalogUpdateCandidate,
+} from '../inbox/catalog-update-producer.js';
+import { PluginStoreError } from '../plugin-store/errors.js';
+import type { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
+import { readDevelopmentProxyLogo, type OfficialPresence, type TrustedLaunch } from '../runtime/trusted-launch.js';
+import type { RuntimeKind } from '../runtime/resolver.js';
+
+export type OfficialBundledLaunch = OfficialPresence;
+
+export class CatalogService {
+  private localizedFiles: Map<string, Buffer> | null = null;
+  private localizedContent: CatalogLocalizations | null = null;
+  private inboxObserver: CatalogInboxObserver | null = null;
+  private inboxObservationClosed = false;
+  private inboxObservationGeneration = 0;
+  private readonly inboxObservationFlights = new Set<Promise<void>>();
+  private inboxRecoveryToken = 0;
+  private inboxImmediateRecovery: Promise<void> | null = null;
+  private inboxDelayedCancel: (() => void) | null = null;
+  private inboxRecoveryScheduler: ((run: () => Promise<void>) => () => void) | null = null;
+
+  setInboxObserver(observer: CatalogInboxObserver): void {
+    this.inboxObserver = observer;
+  }
+
+  /**
+   * Stop Inbox observation and wait until the in-flight read leaves the
+   * database. Catalog projection, install, update, and rollback stay available.
+   */
+  async closeInboxObservation(): Promise<void> {
+    this.inboxObservationClosed = true;
+    this.inboxObservationGeneration += 1;
+    this.inboxRecoveryToken += 1;
+    this.inboxDelayedCancel?.();
+    this.inboxDelayedCancel = null;
+    await Promise.allSettled([...this.inboxObservationFlights]);
+  }
+
+  /** Wait for observation already in flight. Does not cancel a delayed retry. */
+  async settleInboxObservation(): Promise<void> {
+    await Promise.allSettled([...this.inboxObservationFlights]);
+  }
+
+  /**
+   * Test seam for the delayed Inbox retry. Production uses one unref'd timer.
+   * A waiting timer is left in place so a stream of stale writes cannot starve it.
+   */
+  setInboxRecoveryScheduler(
+    scheduler: ((run: () => Promise<void>) => () => void) | null,
+  ): void {
+    this.inboxRecoveryScheduler = scheduler;
+  }
+
+  /** Startup snapshot. Development proxies have no release update channel. */
+  reconcileInbox(): void {
+    void this.observeInbox();
+  }
+
+  private beginInboxObservation(): number | null {
+    if (!this.inboxObserver || this.inboxObservationClosed) return null;
+    this.inboxObservationGeneration += 1;
+    return this.inboxObservationGeneration;
+  }
+
+  private inboxObservationCurrent(generation: number): boolean {
+    return !this.inboxObservationClosed && generation === this.inboxObservationGeneration;
+  }
+
+  private trackInboxObservation(run: Promise<unknown>): void {
+    const flight = run.then(() => undefined, () => undefined);
+    this.inboxObservationFlights.add(flight);
+    void flight.finally(() => {
+      this.inboxObservationFlights.delete(flight);
+    });
+  }
+
+  private localizedEntry(pluginId: string, snapshot = this.options.store.snapshot()) {
+    if (!snapshot.files || !snapshot.index) return undefined;
+    if (this.localizedFiles !== snapshot.files) {
+      this.localizedContent = readCatalogLocalizations(snapshot.files, snapshot.index);
+      this.localizedFiles = snapshot.files;
+    }
+    return this.localizedContent?.plugins.find(plugin => plugin.pluginId === pluginId)?.locales;
+  }
+
+  private projectedLocalizations(pluginId: string, snapshot: CatalogSnapshot): ProxyCatalogItem['localizations'] {
+    const translations = this.localizedEntry(pluginId, snapshot);
+    return translations ? Object.fromEntries(
+      Object.entries(translations).map(([locale, translation]) => [locale, {
+        displayName: translation.displayName,
+        tagline: translation.tagline,
+        documentation: Object.fromEntries(CATALOG_DOCUMENT_KEYS.map(key => [key,
+          `/api/proxies/${pluginId}/docs/${key}?locale=${locale}`])) as ProxyCatalogItem['documentation'],
+      }]),
+    ) : undefined;
+  }
+
+  constructor(
+    private readonly options: {
+      store: CatalogStore;
+      plugins: PluginStore;
+      policy: OfficialCatalogSourcePolicy;
+      sourceClient?: CatalogSourceClient;
+      hostVersions?: readonly string[];
+      platform?: string;
+      readinessCache?: RuntimeReadinessCache;
+      managedRuntimeStatus?: (pluginId: string) => Promise<import('@gian/shared').ManagedRuntimeStatus>;
+      officialPresence?: (pluginId: string) => Promise<OfficialBundledLaunch | null>;
+      developmentProxies?: () => Promise<readonly TrustedLaunch[]>;
+      developmentRuntime?: (pluginId: string) => Promise<ProxyCatalogItem['runtime'] | null>;
+      onPluginGenerationChanged?: (pluginId: string) => void;
+    },
+  ) {}
+
+  async list(): Promise<ProxyCatalogList> {
+    return this.observeCatalog('user');
+  }
+
+  private async observeCatalog(
+    recovery: 'user' | 'immediate' | 'delayed',
+  ): Promise<ProxyCatalogList> {
+    if (this.options.developmentProxies) return this.listDevelopment();
+    const generation = this.beginInboxObservation();
+    const fence = generation === null ? undefined : this.inboxObserver?.begin();
+    const run = this.projectCatalog(generation, fence, recovery);
+    if (generation !== null) this.trackInboxObservation(run);
+    return run;
+  }
+
+  private async projectCatalog(
+    generation: number | null,
+    fence: number | undefined,
+    recovery: 'user' | 'immediate' | 'delayed',
+  ): Promise<ProxyCatalogList> {
+    const snapshot = this.options.store.snapshot();
+    const installed = await this.options.plugins.listInstalled();
+    const installedById = new Map(installed.map((item) => [item.pluginId, item]));
+    const items: ProxyCatalogItem[] = [];
+    const candidates: CatalogUpdateCandidate[] = [];
+    const seen = new Set<string>();
+    for (const entry of snapshot.index?.plugins ?? []) {
+      const installedPackage = installedById.get(entry.pluginId) ?? null;
+      const item = await this.project(entry, installedPackage, snapshot);
+      items.push(item);
+      seen.add(entry.pluginId);
+      const candidate = this.integrationCandidate(entry.pluginId, item, installedPackage, snapshot.sequence);
+      if (candidate) candidates.push(candidate);
+    }
+    for (const local of installed) {
+      if (seen.has(local.pluginId)) continue;
+      items.push(await this.projectInstalledOnly(local));
+    }
+    if (generation !== null && fence !== undefined) {
+      await this.publishIntegrationUpdates(
+        generation,
+        fence,
+        snapshot,
+        installed,
+        candidates,
+        recovery,
+      );
+    }
+    return {
+      source: sourceState(snapshot.state, snapshot.sequence, snapshot.error, this.options.policy.sourceId),
+      items,
+    };
+  }
+
+  async get(pluginId: string): Promise<ProxyCatalogItem | null> {
+    const id = parseProxyPluginId(pluginId);
+    const list = await this.list();
+    return list.items.find((item) => item.pluginId === id) ?? null;
+  }
+
+  async sync(): Promise<ProxyCatalogList> {
+    if (this.options.developmentProxies) return this.listDevelopment();
+    if (!this.options.sourceClient) {
+      throw new PluginStoreError('CATALOG_SYNC_UNAVAILABLE', 'Catalog source client is not configured.');
+    }
+    await this.options.sourceClient.sync();
+    return this.list();
+  }
+
+  async install(pluginId: string): Promise<PluginInstallReceipt> {
+    this.assertReleaseProxyOperations();
+    const view = await this.captureView();
+    const item = await this.requireProjectedFrom(view, pluginId);
+    const replaceUntrusted = item.installation.state === 'quarantined'
+      || item.installation.state === 'invalid';
+    if (
+      item.compatibility.state !== 'compatible'
+      || (item.installation.state !== 'not_installed' && !replaceUntrusted)
+    ) {
+      throw new PluginStoreError(
+        'CATALOG_INSTALL_FORBIDDEN',
+        `${item.pluginId} can be installed only when compatible and not already trusted.`,
+      );
+    }
+    const receipt = await this.options.plugins.install(
+      this.coordinateFrom(view, pluginId),
+      { replaceUntrustedCurrent: replaceUntrusted },
+    );
+    this.retirePluginGeneration(item.pluginId);
+    await this.observeInbox();
+    return receipt;
+  }
+
+  async update(pluginId: string): Promise<PluginInstallReceipt> {
+    this.assertReleaseProxyOperations();
+    const view = await this.captureView();
+    const item = await this.requireProjectedFrom(view, pluginId);
+    const installed = item.installation.installedVersion;
+    const latest = item.installation.latestVersion;
+    if (
+      item.compatibility.state !== 'compatible'
+      || item.installation.state !== 'installed'
+      || !installed
+      || !latest
+      || compareSemver(latest, installed) <= 0
+    ) {
+      throw new PluginStoreError(
+        'CATALOG_UPDATE_FORBIDDEN',
+        `${item.pluginId} can be updated only when compatible, installed, and strictly newer.`,
+      );
+    }
+    const receipt = await this.options.plugins.install(this.coordinateFrom(view, pluginId));
+    this.retirePluginGeneration(item.pluginId);
+    await this.observeInbox();
+    return receipt;
+  }
+
+  async rollback(pluginId: string, pluginVersion?: string): Promise<PluginInstallReceipt> {
+    this.assertReleaseProxyOperations();
+    const id = parseProxyPluginId(pluginId);
+    const receipt = await this.options.plugins.rollback(id, pluginVersion);
+    this.retirePluginGeneration(id);
+    await this.observeInbox();
+    return receipt;
+  }
+
+  async managedRuntimePlan(
+    pluginId: string,
+    externalEntryPath?: string,
+  ): Promise<ManagedRuntimeInstallPlan> {
+    const view = await this.captureView();
+    const id = parseProxyPluginId(pluginId);
+    const entry = view.snapshot.index?.plugins.find(item => item.pluginId === id) ?? null;
+    const combination = entry?.stable.combination;
+    if (!entry || !combination) {
+      throw new PluginStoreError(
+        'RUNTIME_COMBINATION_MISSING',
+        `${id} has no certified Runtime combination in the trusted Catalog.`,
+      );
+    }
+    const runtimePrefixes = this.options.policy.runtimeAssetPrefixes
+      ?? this.options.policy.artifactRepositories.map(
+        repository => `https://github.com/${repository}/releases/download/`,
+      );
+    const managedDistributions = [
+      ...(combination.runtime?.kind === 'native-binary' ? [combination.runtime] : []),
+      ...combination.companions.map(companion => companion.distribution),
+    ];
+    if (managedDistributions.some(distribution => (
+      !isApprovedRuntimeAssetUrl(distribution.asset.url, runtimePrefixes)
+    ))) {
+      throw new PluginStoreError(
+        'RUNTIME_SOURCE_FORBIDDEN',
+        `${id} Runtime asset is outside the App-pinned official channels.`,
+      );
+    }
+    const installed = view.installedById.get(id) ?? null;
+    const current = installed?.versions.find(item => item.version === installed.currentVersion) ?? null;
+    const receipt = current?.state === 'valid' ? current.receipt : null;
+    const launch = receipt ? await this.options.plugins.currentLaunch(id) : null;
+    const platform = this.platform();
+    const archive = entry.stable.artifacts[platform as keyof typeof entry.stable.artifacts];
+    if (
+      !receipt
+      || !launch
+      || !entry.stable.manifest
+      || !archive
+      || launch.pluginVersion !== entry.stable.pluginVersion
+      || receipt.manifestSha256 !== entry.stable.manifest.sha256
+      || receipt.archiveSha256 !== archive.sha256
+    ) {
+      throw new PluginStoreError(
+        'RUNTIME_PROXY_NOT_READY',
+        `${id} must have the exact trusted Catalog Proxy installed before its Runtime.`,
+      );
+    }
+    if (!['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'].includes(platform)) {
+      throw new PluginStoreError('RUNTIME_PLATFORM', `Managed Runtime platform is unsupported: ${platform}.`);
+    }
+    const runtime = combination.runtime?.kind === 'external-app'
+      ? {
+        ...combination.runtime,
+        entryPath: externalEntryPath ?? (() => {
+          throw new PluginStoreError(
+            'RUNTIME_EXTERNAL_NOT_FOUND',
+            `${id} external application Runtime was not found on this machine.`,
+          );
+        })(),
+      }
+      : combination.runtime;
+    return {
+      generationId: combination.generationId,
+      pluginId: id,
+      platform: platform as ManagedRuntimePlatform,
+      proxy: {
+        pluginVersion: launch.pluginVersion,
+        manifestSha256: receipt.manifestSha256,
+        artifactSha256: receipt.archiveSha256,
+        entryPath: launch.entryPath,
+        processScope: launch.processScope,
+        protocolRange: launch.protocolRange,
+      },
+      runtime,
+      companions: combination.companions.map(companion => ({
+        id: companion.id,
+        distribution: { ...companion.distribution },
+      })),
+      certificate: { ...combination.certificate },
+    };
+  }
+
+  managedRuntimeKind(pluginId: string): 'native-binary' | 'external-app' | null {
+    const id = parseProxyPluginId(pluginId);
+    return this.catalogEntry(id)?.stable.combination?.runtime?.kind ?? null;
+  }
+
+  private retirePluginGeneration(pluginId: string): void {
+    this.options.readinessCache?.invalidate(pluginId);
+    this.options.onPluginGenerationChanged?.(pluginId);
+  }
+
+  private async observeInbox(
+    recovery: 'user' | 'immediate' | 'delayed' = 'user',
+  ): Promise<void> {
+    if (!this.inboxObserver || this.inboxObservationClosed) return;
+    try {
+      await this.observeCatalog(recovery);
+    } catch (error) {
+      console.error('[catalog-inbox] observation failed', error);
+    }
+  }
+
+  /**
+   * One immediate reconciliation for the user observation that noticed the
+   * gap, then one delayed retry. A retry that is already waiting is not
+   * replaced. Nested retries do not start another immediate pass, so a
+   * continuous stale fence cannot grow the flight set or busy-loop.
+   */
+  private recoverInbox(allowImmediate: boolean): void {
+    if (this.inboxObservationClosed || !this.inboxObserver) return;
+    if (allowImmediate && this.inboxImmediateRecovery === null) {
+      const run = this.observeInbox('immediate');
+      this.inboxImmediateRecovery = run;
+      this.trackInboxObservation(run);
+      void run.finally(() => {
+        if (this.inboxImmediateRecovery === run) this.inboxImmediateRecovery = null;
+      });
+    }
+    this.scheduleDelayedInboxRecovery();
+  }
+
+  private scheduleDelayedInboxRecovery(): void {
+    if (this.inboxObservationClosed || !this.inboxObserver || this.inboxDelayedCancel) return;
+    const token = this.inboxRecoveryToken;
+    let started = false;
+    const run = async (): Promise<void> => {
+      if (started || token !== this.inboxRecoveryToken || this.inboxObservationClosed) return;
+      started = true;
+      this.inboxDelayedCancel = null;
+      if (token !== this.inboxRecoveryToken || this.inboxObservationClosed || !this.inboxObserver) return;
+      await this.observeInbox('delayed');
+    };
+    const schedule = this.inboxRecoveryScheduler ?? scheduleCatalogInboxRecovery;
+    this.inboxDelayedCancel = schedule(run);
+  }
+
+  private async publishIntegrationUpdates(
+    generation: number,
+    fence: number,
+    snapshot: CatalogSnapshot,
+    installed: InstalledPackageView[],
+    candidates: CatalogUpdateCandidate[],
+    recovery: 'user' | 'immediate' | 'delayed',
+  ): Promise<void> {
+    const observer = this.inboxObserver;
+    if (!observer || !this.inboxObservationCurrent(generation)) return;
+    let stable = false;
+    let moved = false;
+    let receiptsChanged = false;
+    try {
+      const installedAfter = await this.options.plugins.listInstalled();
+      if (!this.inboxObservationCurrent(generation)) return;
+      const again = this.options.store.snapshot();
+      moved = again !== snapshot || again.sequence !== snapshot.sequence;
+      receiptsChanged = !sameInstalledReceipts(installed, installedAfter);
+      stable = !moved
+        && !receiptsChanged
+        && snapshot.state === 'ready'
+        && snapshot.index !== null
+        && snapshot.sequence !== null
+        && snapshot.sequence >= 1
+        && again.state === 'ready'
+        && again.index !== null;
+    } catch (error) {
+      console.error('[catalog-inbox] installed receipts changed while they were read', error);
+    }
+    if (!this.inboxObservationCurrent(generation)) return;
+    if (moved || receiptsChanged) {
+      this.recoverInbox(recovery === 'user');
+      return;
+    }
+    let outcome: 'applied' | 'stale' | 'ignored';
+    try {
+      outcome = observer.finish(fence, {
+        mode: stable ? 'complete' : 'ignore',
+        catalogSequence: snapshot.sequence,
+        candidates: stable ? candidates : [],
+      });
+    } catch (error) {
+      console.error('[catalog-inbox] observation failed', error);
+      return;
+    }
+    if (outcome === 'stale' && this.inboxObservationCurrent(generation)) {
+      this.recoverInbox(recovery === 'user');
+    }
+  }
+
+  private integrationCandidate(
+    pluginId: string,
+    item: ProxyCatalogItem,
+    installed: InstalledPackageView | null,
+    sequence: number | null,
+  ): CatalogUpdateCandidate | null {
+    const version = item.installation.latestVersion;
+    if (
+      sequence === null
+      || sequence < 1
+      || !version
+      || !item.availableActions.includes('update_proxy')
+    ) {
+      return null;
+    }
+    const failed = installed?.versions.some(entry => (
+      entry.version === version && entry.state === 'quarantined'
+    )) === true;
+    return {
+      pluginId,
+      displayName: item.displayName,
+      version,
+      channel: INTEGRATION_UPDATE_CHANNEL,
+      phase: failed ? 'failed' : 'available',
+      catalogSequence: sequence,
+    };
+  }
+
+  async logo(
+    pluginId: string,
+    variant: 'light' | 'dark',
+  ): Promise<{ bytes: Buffer; mediaType: 'image/png' | 'image/webp'; sha256: string } | null> {
+    const id = parseProxyPluginId(pluginId);
+    if (this.options.developmentProxies) {
+      const launch = (await this.options.developmentProxies()).find(item => item.pluginId === id);
+      return launch ? readDevelopmentProxyLogo(launch, variant) : null;
+    }
+    const entry = this.catalogEntry(id);
+    if (!entry) return null;
+    const ref = entry.branding[variant];
+    const bytes = this.cachedAsset(ref.path, ref.sha256, ref.size);
+    if (!bytes) return null;
+    assertCatalogImageMagic(bytes, ref.mediaType);
+    return { bytes, mediaType: ref.mediaType, sha256: ref.sha256 };
+  }
+
+  async documentation(
+    pluginId: string,
+    document: (typeof CATALOG_DOCUMENT_KEYS)[number],
+    locale?: CatalogLocale,
+  ): Promise<{ bytes: Buffer; mediaType: 'text/markdown; charset=utf-8' } | null> {
+    const id = parseProxyPluginId(pluginId);
+    const entry = this.catalogEntry(id);
+    if (!entry) return null;
+    const ref = (locale ? this.localizedEntry(id)?.[locale]?.documentation[document] : undefined)
+      ?? entry.documentation[document];
+    const bytes = this.cachedAsset(ref.path, ref.sha256, ref.size);
+    if (!bytes) return null;
+    return { bytes, mediaType: 'text/markdown; charset=utf-8' };
+  }
+
+  private async captureView(): Promise<CatalogActionView> {
+    const snapshot = this.options.store.snapshot();
+    const installed = await this.options.plugins.listInstalled();
+    return {
+      snapshot,
+      installedById: new Map(installed.map((item) => [item.pluginId, item])),
+    };
+  }
+
+  private async requireProjectedFrom(view: CatalogActionView, pluginId: string) {
+    const id = parseProxyPluginId(pluginId);
+    const entry = view.snapshot.index?.plugins.find((item) => item.pluginId === id) ?? null;
+    if (!entry) {
+      throw new PluginStoreError('CATALOG_ENTRY_MISSING', `${pluginId} is not present in the trusted Catalog.`);
+    }
+    return this.project(entry, view.installedById.get(id) ?? null, view.snapshot);
+  }
+
+  private coordinateFrom(view: CatalogActionView, pluginId: string): PluginInstallCoordinate {
+    const id = parseProxyPluginId(pluginId);
+    const entry = view.snapshot.index?.plugins.find((item) => item.pluginId === id) ?? null;
+    if (!entry) {
+      throw new PluginStoreError('CATALOG_ENTRY_MISSING', `${id} is not present in the trusted Catalog.`);
+    }
+    const platform = this.platform();
+    const archive = entry.stable.artifacts[platform as keyof typeof entry.stable.artifacts];
+    if (!entry.stable.manifest || !archive) {
+      throw new PluginStoreError('PLUGIN_PLATFORM', `${id} has no artifact for ${platform}.`);
+    }
+    return {
+      pluginId: id,
+      pluginVersion: entry.stable.pluginVersion,
+      platform,
+      manifest: entry.stable.manifest,
+      archive,
+      sourceId: this.options.policy.sourceId === 'giandev' ? 'giandev' : 'gian-official',
+      catalogSequence: view.snapshot.sequence,
+      protocolRange: entry.stable.protocolRange,
+      processScope: entry.stable.processScope,
+      runtime: entry.stable.runtime as ManifestV4['runtime'] | null,
+    };
+  }
+
+  private catalogEntry(pluginId: string): CompiledCatalogEntryV1 | null {
+    return this.options.store.snapshot().index?.plugins.find((item) => item.pluginId === pluginId) ?? null;
+  }
+
+  private cachedAsset(path: string, sha256: string, size: number): Buffer | null {
+    const files = this.options.store.snapshot().files;
+    const bytes = files?.get(path);
+    if (!bytes || bytes.byteLength !== size) return null;
+    if (createHash('sha256').update(bytes).digest('hex') !== sha256) return null;
+    return bytes;
+  }
+
+  private assertReleaseProxyOperations(): void {
+    if (this.options.developmentProxies) {
+      throw new PluginStoreError('DEVELOPMENT_PROXY_SOURCE', 'GianDev uses source Proxies, not release package installation.');
+    }
+  }
+
+  private async listDevelopment(): Promise<ProxyCatalogList> {
+    const launches = await this.options.developmentProxies!();
+    const snapshot = this.options.store.snapshot();
+    const hostVersions = [...(this.options.hostVersions ?? hostProtocolVersions())];
+    const items: ProxyCatalogItem[] = [];
+    for (const launch of launches) {
+      const published = snapshot.index?.plugins.find(entry => entry.pluginId === launch.pluginId);
+      const compatibility = classifyCatalogCompatibility(launch.protocolRange, hostVersions);
+      const runtime = await this.projectRuntime(launch.pluginId, launch.runtime, launch, 'installed');
+      items.push({
+        localizations: this.projectedLocalizations(launch.pluginId, snapshot),
+        pluginId: launch.pluginId,
+        displayName: launch.displayName ?? launch.pluginId,
+        tagline: published?.tagline ?? '',
+        logo: {
+          light: `/api/proxies/${launch.pluginId}/logo/light`,
+          dark: `/api/proxies/${launch.pluginId}/logo/dark`,
+        },
+        documentation: {
+          overview: `/api/proxies/${launch.pluginId}/docs/overview`,
+          setup: `/api/proxies/${launch.pluginId}/docs/setup`,
+          usage: `/api/proxies/${launch.pluginId}/docs/usage`,
+          troubleshooting: `/api/proxies/${launch.pluginId}/docs/troubleshooting`,
+        },
+        compatibility: { state: compatibility.state, hostVersions,
+          protocolRange: launch.protocolRange, reason: compatibility.reason },
+        installation: {
+          state: 'installed',
+          installedVersion: launch.pluginVersion,
+          latestVersion: launch.pluginVersion,
+          updateAvailable: false,
+          source: 'giandev',
+        },
+        runtime,
+        availableActions: catalogProxyActions({
+          compatibility: compatibility.state,
+          installation: 'installed',
+          updateAvailable: false,
+          runtime: runtime.state,
+          runtimeRepairable: runtime.readinessIssue?.repairable,
+          canRollback: false,
+          installable: false,
+          runtimeInstallable: false,
+        }),
+      });
+    }
+    return { source: { id: 'giandev', sequence: null, state: 'ready', error: null }, items };
+  }
+
+  private async project(
+    entry: CompiledCatalogEntryV1,
+    installed: InstalledPackageView | null,
+    snapshot: CatalogSnapshot,
+  ): Promise<ProxyCatalogItem> {
+    const hostVersions = [...(this.options.hostVersions ?? hostProtocolVersions())];
+    const compatibility = classifyCatalogCompatibility(entry.stable.protocolRange, hostVersions);
+    const current = installed?.versions.find((item) => item.version === installed.currentVersion);
+    const installationState = !installed || installed.currentPointer === 'absent'
+      ? 'not_installed'
+      : installed.currentPointer === 'unmanaged'
+        ? 'quarantined'
+        : current?.state === 'valid'
+          ? 'installed'
+          : 'quarantined';
+    const installedVersion = installationState === 'installed' ? installed?.currentVersion ?? null : (
+      installationState === 'quarantined' ? installed?.currentVersion ?? null : null
+    );
+    const latestVersion = entry.stable.pluginVersion;
+    const updateAvailable = Boolean(
+      installedVersion
+      && latestVersion
+      && compareSemver(latestVersion, installedVersion) > 0,
+    );
+    const bundled = await this.options.officialPresence?.(entry.pluginId) ?? null;
+    const effectiveInstallation = bundled && installationState === 'not_installed'
+      ? 'installed' as const
+      : installationState;
+    const effectiveInstalledVersion = bundled && !installedVersion
+      ? bundled.pluginVersion
+      : installedVersion;
+    const currentLaunch = installationState === 'installed'
+      ? await this.options.plugins.currentLaunch(entry.pluginId)
+      : bundled;
+    const runtime = await this.projectRuntime(
+      entry.pluginId,
+      entry.stable.runtime && entry.stable.runtime.kind === 'external'
+        ? {
+          kind: 'external',
+          id: entry.stable.runtime.id,
+          displayName: entry.stable.runtime.displayName,
+          verifiedVersions: entry.stable.runtime.verifiedVersions,
+        }
+        : entry.stable.runtime?.kind === 'none'
+          ? { kind: 'none' }
+          : bundled?.runtime ?? { kind: 'none' },
+      currentLaunch,
+      effectiveInstallation,
+    );
+    const localizations = this.projectedLocalizations(entry.pluginId, snapshot);
+    return {
+      ...(localizations ? { localizations } : {}),
+      pluginId: entry.pluginId,
+      displayName: entry.displayName,
+      tagline: entry.tagline,
+      logo: {
+        light: `/api/proxies/${entry.pluginId}/logo/light`,
+        dark: `/api/proxies/${entry.pluginId}/logo/dark`,
+      },
+      documentation: {
+        overview: `/api/proxies/${entry.pluginId}/docs/overview`,
+        setup: `/api/proxies/${entry.pluginId}/docs/setup`,
+        usage: `/api/proxies/${entry.pluginId}/docs/usage`,
+        troubleshooting: `/api/proxies/${entry.pluginId}/docs/troubleshooting`,
+      },
+      compatibility: {
+        state: compatibility.state,
+        hostVersions,
+        protocolRange: entry.stable.protocolRange,
+        reason: compatibility.reason,
+      },
+      installation: {
+        state: effectiveInstallation,
+        installedVersion: effectiveInstalledVersion,
+        latestVersion,
+        updateAvailable: bundled ? false : updateAvailable,
+        source: installed?.versions.find((item) => item.receipt)?.receipt?.sourceId
+          ?? (bundled ? 'gian-official' : null),
+      },
+      runtime,
+      availableActions: catalogProxyActions({
+        compatibility: compatibility.state,
+        installation: effectiveInstallation,
+        updateAvailable: bundled ? false : updateAvailable,
+        runtime: runtime.state,
+        runtimeRepairable: runtime.state === 'invalid' && runtime.readinessIssue?.repairable === true,
+        canRollback: Boolean(!bundled && installed && installed.versions.filter((item) => item.state === 'valid').length > 1),
+        installable: !bundled && this.entryIsInstallable(entry),
+        runtimeInstallable: Boolean(entry.stable.combination),
+      }),
+    };
+  }
+
+  private async projectInstalledOnly(installed: InstalledPackageView): Promise<ProxyCatalogItem> {
+    const current = installed.versions.find((item) => item.version === installed.currentVersion);
+    const receipt = current?.receipt;
+    const hostVersions = [...(this.options.hostVersions ?? hostProtocolVersions())];
+    const compatibility = receipt
+      ? classifyCatalogCompatibility(`=${receipt.negotiatedProtocol}`, hostVersions)
+      : { state: 'invalid' as const, reason: 'Installed package has no trusted Catalog projection.' };
+    const launch = current?.state === 'valid'
+      ? await this.options.plugins.currentLaunch(installed.pluginId)
+      : null;
+    const runtime = current?.state === 'valid'
+      ? await this.projectRuntime(
+        installed.pluginId,
+        launch?.runtime ?? { kind: 'none' },
+        launch,
+        'installed',
+      )
+      : { state: 'setup_required' as const, displayName: null };
+    return {
+      pluginId: installed.pluginId,
+      displayName: installed.pluginId,
+      tagline: 'Installed locally without a trusted Catalog entry.',
+      logo: {
+        light: `/api/proxies/${installed.pluginId}/logo/light`,
+        dark: `/api/proxies/${installed.pluginId}/logo/dark`,
+      },
+      documentation: {
+        overview: `/api/proxies/${installed.pluginId}/docs/overview`,
+        setup: `/api/proxies/${installed.pluginId}/docs/setup`,
+        usage: `/api/proxies/${installed.pluginId}/docs/usage`,
+        troubleshooting: `/api/proxies/${installed.pluginId}/docs/troubleshooting`,
+      },
+      compatibility: {
+        state: compatibility.state,
+        hostVersions,
+        protocolRange: receipt?.negotiatedProtocol ?? '',
+        reason: compatibility.reason,
+      },
+      installation: {
+        state: current?.state === 'valid' ? 'installed' : 'quarantined',
+        installedVersion: installed.currentVersion,
+        latestVersion: null,
+        updateAvailable: false,
+        source: receipt?.sourceId ?? null,
+      },
+      runtime,
+      availableActions: current?.state === 'valid'
+        ? catalogProxyActions({
+          compatibility: compatibility.state,
+          installation: 'installed',
+          updateAvailable: false,
+          runtime: runtime.state,
+          runtimeRepairable: runtime.state === 'invalid' && runtime.readinessIssue?.repairable === true,
+          canRollback: true,
+          installable: false,
+          runtimeInstallable: false,
+          official: false,
+        })
+        : [],
+    };
+  }
+
+  private async projectRuntime(
+    pluginId: string,
+    runtime: {
+      kind: RuntimeKind;
+      id?: string;
+      displayName?: string;
+      verifiedVersions?: readonly string[];
+    },
+    launch: PluginCurrentLaunch | OfficialBundledLaunch | null | undefined,
+    installation: ProxyCatalogItem['installation']['state'],
+  ): Promise<ProxyCatalogItem['runtime']> {
+    if (this.options.developmentProxies) {
+      const provisioned = await this.options.developmentRuntime?.(pluginId);
+      if (provisioned) return provisioned;
+    }
+    const managed = this.options.developmentProxies
+      ? undefined : await this.options.managedRuntimeStatus?.(pluginId);
+    if (managed?.active) {
+      return managed.active.runtime
+        ? {
+          state: 'ready',
+          displayName: runtime.displayName
+            ?? (launch?.runtime.kind === 'external' ? launch.runtime.displayName : null)
+            ?? null,
+        }
+        : { state: 'not_required', displayName: null };
+    }
+    if (runtime.kind === 'none' || launch?.runtime.kind === 'none') {
+      return { state: 'not_required', displayName: null };
+    }
+    const displayName = runtime.displayName
+      ?? (launch?.runtime.kind === 'external' ? launch.runtime.displayName : null)
+      ?? null;
+    if (installation !== 'installed' || !launch) {
+      return { state: 'setup_required', displayName };
+    }
+    const snapshot = this.options.readinessCache?.get(pluginId, launch.pluginVersion);
+    if (!snapshot) {
+      return { state: 'setup_required', displayName };
+    }
+    return {
+      state: snapshot.state,
+      displayName: snapshot.displayName ?? displayName,
+      ...(snapshot.readinessIssue ? { readinessIssue: snapshot.readinessIssue } : {}),
+    };
+  }
+
+  private entryIsInstallable(entry: CompiledCatalogEntryV1): boolean {
+    return Boolean(entry.stable.manifest && entry.stable.artifacts[this.platform() as keyof typeof entry.stable.artifacts]);
+  }
+
+  private platform(): string {
+    return this.options.platform
+      ?? `${process.platform}-${process.arch}`;
+  }
+}
+
+interface CatalogActionView {
+  snapshot: CatalogSnapshot;
+  installedById: Map<string, InstalledPackageView>;
+}
+
+const CATALOG_INBOX_RECOVERY_DELAY_MS = 1_000;
+
+/** A zero delay would busy-loop while Inbox writes keep the collection fence stale. */
+function scheduleCatalogInboxRecovery(run: () => Promise<void>): () => void {
+  const timer = setTimeout(() => {
+    void run();
+  }, CATALOG_INBOX_RECOVERY_DELAY_MS);
+  timer.unref();
+  return () => {
+    clearTimeout(timer);
+  };
+}
+
+function sameInstalledReceipts(
+  before: readonly InstalledPackageView[],
+  after: readonly InstalledPackageView[],
+): boolean {
+  return receiptSignature(before) === receiptSignature(after);
+}
+
+function receiptSignature(installed: readonly InstalledPackageView[]): string {
+  return installed
+    .map(item => {
+      const versions = item.versions
+        .map(version => `${version.version}:${version.state}`)
+        .sort()
+        .join(',');
+      return `${item.pluginId}|${item.currentPointer}|${item.currentVersion ?? ''}|${versions}`;
+    })
+    .sort()
+    .join('\n');
+}
+
+function sourceState(
+  state: ProxyCatalogSourceState['state'],
+  sequence: number | null,
+  error: { code: string; message: string } | null,
+  sourceId: string,
+): ProxyCatalogSourceState {
+  return {
+    id: sequence === null && state === 'empty' ? null : sourceId,
+    sequence,
+    state,
+    error,
+  };
+}
+
+export function catalogProxyActions(input: {
+  compatibility: ProxyCatalogItem['compatibility']['state'];
+  installation: ProxyCatalogItem['installation']['state'];
+  updateAvailable: boolean;
+  runtime: ProxyCatalogItem['runtime']['state'];
+  runtimeRepairable?: boolean;
+  canRollback: boolean;
+  installable: boolean;
+  runtimeInstallable?: boolean;
+  official?: boolean;
+}): ProxyCatalogItem['availableActions'] {
+  const result: ProxyCatalogItem['availableActions'] = [];
+  if (
+    input.runtimeInstallable === true
+    && input.compatibility === 'compatible'
+    && (
+      input.installation !== 'installed'
+      || input.updateAvailable
+      || (input.runtime !== 'ready' && input.runtime !== 'not_required')
+    )
+  ) {
+    result.push('install_runtime');
+  }
+  if (
+    input.installable
+    && input.runtimeInstallable !== true
+    && input.compatibility === 'compatible'
+    && (
+      input.installation === 'not_installed'
+      || input.installation === 'quarantined'
+      || input.installation === 'invalid'
+    )
+  ) {
+    result.push('install_proxy');
+  }
+  if (
+    input.installable
+    && input.runtimeInstallable !== true
+    && input.compatibility === 'compatible'
+    && input.installation === 'installed'
+    && input.updateAvailable
+  ) {
+    result.push('update_proxy');
+  }
+  if (input.canRollback && input.runtimeInstallable !== true) result.push('rollback_proxy');
+  if (
+    input.runtimeInstallable !== true
+    && input.installation === 'installed'
+    && input.runtime === 'setup_required'
+  ) {
+    result.push('open_setup', 'select_runtime');
+  }
+  if (
+    input.runtimeInstallable !== true
+    && input.installation === 'installed'
+    && input.runtime === 'invalid'
+    && input.runtimeRepairable === true
+  ) {
+    result.push('open_setup', 'select_runtime');
+  }
+  if (
+    input.compatibility === 'compatible'
+    && input.installation === 'installed'
+    && (input.runtime === 'not_required' || input.runtime === 'ready' || input.runtime === 'unverified')
+  ) {
+    result.push('create_agent');
+  }
+  return result;
+}
+
+export function isCatalogDocumentKey(
+  value: string,
+): value is (typeof CATALOG_DOCUMENT_KEYS)[number] {
+  return (CATALOG_DOCUMENT_KEYS as readonly string[]).includes(value);
+}
