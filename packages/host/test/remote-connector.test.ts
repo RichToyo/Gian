@@ -401,9 +401,10 @@ test('state.refresh carries the Host locale only after negotiating wire.host_loc
       connector.close();
       return (result.message as { data?: { host?: Record<string, unknown> } }).data?.host;
     };
-    // Harness config leaves the default locale: zh-CN.
+    // The Host resolves product copy to English; the legacy wire field is
+    // still gated so strict older peers do not receive an unknown property.
     const negotiated = await refreshHost(createRemoteHello(device.id, 'test'));
-    assert.equal(negotiated?.['locale'], 'zh-CN');
+    assert.equal(negotiated?.['locale'], 'en');
     const legacy = await refreshHost(null);
     assert.equal(legacy !== undefined && 'locale' in legacy, false,
       'a legacy no-hello client parses snapshots closed and must not receive locale');
