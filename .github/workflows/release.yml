@@ -190,6 +190,14 @@ jobs:
           xcrun stapler validate packages/desktop/release/mac-arm64/Gian.app
           spctl --assess --type execute --verbose=2 packages/desktop/release/mac-arm64/Gian.app
 
+      - name: Package the external Gian Tool Skill
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          SKILL_ROOT="${RUNNER_TEMP}/gian-tool-skill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          node scripts/package-gian-tool-skill.mjs "${SKILL_ROOT}/gian-tool"
+          tar -czf "packages/desktop/release/gian-tool-skill-${VERSION}.tar.gz" -C "${SKILL_ROOT}" gian-tool
+
       - name: Create complete update checksums
         working-directory: packages/desktop/release
         shell: bash
@@ -200,7 +208,8 @@ jobs:
             "Gian-${VERSION}-arm64.dmg.blockmap" \
             "Gian-${VERSION}-arm64.zip" \
             "Gian-${VERSION}-arm64.zip.blockmap" \
-            latest-mac.yml > SHA256SUMS
+            latest-mac.yml \
+            "gian-tool-skill-${VERSION}.tar.gz" > SHA256SUMS
 
       - name: Stage draft GitHub Release
         env:
@@ -215,6 +224,7 @@ jobs:
             "${RELEASE_DIR}/Gian-${VERSION}-arm64.zip"
             "${RELEASE_DIR}/Gian-${VERSION}-arm64.zip.blockmap"
             "${RELEASE_DIR}/latest-mac.yml"
+            "${RELEASE_DIR}/gian-tool-skill-${VERSION}.tar.gz"
             "${RELEASE_DIR}/SHA256SUMS"
           )
           gh release create "${GIAN_RELEASE_TAG}" \
@@ -237,6 +247,7 @@ jobs:
             if node scripts/verify-update-artifacts.mjs \
               --release-dir packages/desktop/release \
               --version "${VERSION}" \
+              --skill-archive "gian-tool-skill-${VERSION}.tar.gz" \
               --app-update-config packages/desktop/release/mac-arm64/Gian.app/Contents/Resources/app-update.yml \
               --github-release-json "${RELEASE_JSON}"; then
               VERIFIED=true

@@ -230,6 +230,7 @@ export async function verifyGithubReleaseAssets({
   releaseDir,
   version,
   releaseJsonPath,
+  skillArchive,
   productName = 'Gian',
   arch = 'arm64',
 }) {
@@ -242,6 +243,12 @@ export async function verifyGithubReleaseAssets({
     `${productName}-${version}-${arch}.zip.blockmap`,
     'latest-mac.yml',
   ];
+  if (skillArchive !== undefined) {
+    if (skillArchive !== `gian-tool-skill-${version}.tar.gz`) {
+      throw new Error('Skill archive must match the App version');
+    }
+    expectedArtifactNames.push(skillArchive);
+  }
   const expectedReleaseNames = [...expectedArtifactNames, 'SHA256SUMS'];
 
   const release = JSON.parse(await readFile(resolve(releaseJsonPath), 'utf8'));
@@ -320,6 +327,7 @@ function parseArgs(argv) {
       '--manifest',
       '--github-release-json',
       '--app-update-config',
+      '--skill-archive',
     ].includes(flag)) {
       throw new Error(`unknown argument: ${flag}`);
     }
@@ -333,6 +341,7 @@ function parseArgs(argv) {
     if (flag === '--manifest') options.manifestName = value;
     if (flag === '--github-release-json') options.releaseJsonPath = value;
     if (flag === '--app-update-config') options.appUpdateConfigPath = value;
+    if (flag === '--skill-archive') options.skillArchive = value;
   }
   return options;
 }

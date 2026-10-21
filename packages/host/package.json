@@ -28,7 +28,7 @@
     "semver": "7.7.2"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@gian/cc-proxy": "workspace:*",
     "@gian/codex-proxy": "workspace:*",
     "@gian/dsh-bridge": "workspace:*",

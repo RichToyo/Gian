@@ -31,6 +31,8 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 
 ### Fixed
 
+- Bound MCP HTTP request bytes, nesting and element counts before SDK
+  validation, and update the bundled MCP SDK to 1.32.0.
 - Keep Remote translated sends aligned with their original messages and
   transcript order without duplicate optimistic echoes.
 - Follow the Sidechat scroller, show Proxy-advertised extra options and model

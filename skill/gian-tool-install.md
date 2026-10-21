@@ -18,6 +18,19 @@ developer checkout.
 Packaging copies those files. It leaves MCP client configuration, Gian
 settings, and the running app unchanged. Installing the skill does not configure MCP.
 
+## Versions and updates
+
+The external Skill archive is published with Gian as
+`gian-tool-skill-<App-version>.tar.gz`. Its manifest records that App version.
+Updating Gian replaces the bundled CLI and MCP implementation; restart an
+external MCP connection to use the new adapter. There is no separate public
+MCP Release.
+
+Gian does not overwrite an externally installed `gian-tool` Skill directory.
+Install the new Skill bundle when its instructions or helper scripts change.
+The separate Gian-managed `gian-session` Skill follows its supporting Proxy
+and is reconciled only at Gian-owned installation paths.
+
 ## Skill-local helpers
 
 Run `scripts/gianctl` and `scripts/gian-tool-mcp` from the skill directory.

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { releaseAssets } from './delivery-certificate.mjs';
 
 import {
   parseLatestMacManifest,
@@ -262,6 +263,9 @@ test('desktop release build requires credentials and generates public latest met
 
 test('RichToyo publication and metadata broker agree with the embedded feed', async () => {
   const release = await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  assert.match(release, /node scripts\/package-gian-tool-skill\.mjs/);
+  assert.match(release, /--skill-archive "gian-tool-skill-\$\{VERSION\}\.tar\.gz"/);
+  assert.match(release, /"gian-tool-skill-\$\{VERSION\}\.tar\.gz" > SHA256SUMS/);
   const promote = await readFile(new URL('../.github/workflows/release-promote.yml', import.meta.url), 'utf8');
   for (const workflow of [release, promote]) {
     assert.match(workflow, /github.repository == 'RichToyo\/Gian' && github.ref == 'refs\/heads\/main'/);
@@ -278,7 +282,7 @@ test('RichToyo publication and metadata broker agree with the embedded feed', as
   assert.doesNotMatch(mainSource, /setFeedURL\(/);
 });
 
-async function withDraftReleaseFixture(run) {
+async function withDraftReleaseFixture(run, { skill = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'gian-update-release-'));
   const files = new Map([
     [zipName, Buffer.from('signed zip fixture')],
@@ -289,6 +293,7 @@ async function withDraftReleaseFixture(run) {
   const zip = files.get(zipName);
   const dmg = files.get(dmgName);
   files.set('latest-mac.yml', Buffer.from(manifestFor(zip, dmg)));
+  if (skill) files.set(`gian-tool-skill-${version}.tar.gz`, Buffer.from('skill archive fixture'));
   const checksums = [...files]
     .map(([name, content]) => `${sha256(content)}  ${name}`)
     .join('\n');
@@ -325,6 +330,26 @@ test('verifies an exact draft release asset set before publication', async () =>
     assert.equal(result.tag, `v${version}`);
     assert.equal(result.artifacts.length, 6);
   });
+});
+
+test('Skill delivery is version-bound, checksum-verified and included in immutable promotion evidence', async () => {
+  await withDraftReleaseFixture(async ({ directory, release }) => {
+    const skillArchive = `gian-tool-skill-${version}.tar.gz`;
+    const options = { releaseDir: directory, releaseJsonPath: join(directory, 'release.json'), version, skillArchive };
+    assert.equal((await verifyGithubReleaseAssets(options)).artifacts.length, 7);
+    assert.ok(releaseAssets(directory).some(asset => asset.name === skillArchive));
+    await assert.rejects(verifyGithubReleaseAssets({ ...options, skillArchive: '../skill.tar.gz' }), /match the App version/);
+    await assert.rejects(verifyGithubReleaseAssets({ ...options, skillArchive: 'gian-tool-skill-9.9.9.tar.gz' }), /match the App version/);
+    await writeFile(join(directory, 'release.json'), JSON.stringify({
+      ...release, assets: release.assets.filter(asset => asset.name !== skillArchive),
+    }));
+    await assert.rejects(verifyGithubReleaseAssets(options), /asset set mismatch/);
+    await writeFile(join(directory, 'release.json'), JSON.stringify(release));
+    const before = releaseAssets(directory);
+    await writeFile(join(directory, skillArchive), 'modified skill bytes');
+    assert.notDeepEqual(releaseAssets(directory), before);
+    await assert.rejects(verifyGithubReleaseAssets(options), /release (size|digest) mismatch/);
+  }, { skill: true });
 });
 
 test('fails closed on public, missing, or changed draft release assets', async () => {

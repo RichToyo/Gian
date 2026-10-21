@@ -9,35 +9,35 @@ const evidenceRoot = join(root, 'catalog/proxy-information/evidence');
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const write = (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-const repository = 'RichLogic/Gian-Proxies';
+const repository = 'RichToyo/Gian-Proxies';
 export const proxyReleaseNotes = {
   claude: {
     id: 'claude', directory: 'claude',
-    text: 'Update the managed Claude Code Runtime to 2.1.304 (promoted to /latest and /stable, npm latest and GitHub latest; SHA-256 and size verified against the official manifest). No documented headless spawn/wire compatibility changes were found in the official 2.1.304 changelog; the nine selected startup flags the adapter spawns or parses were verified on the new binary. Authenticated wire/Provider turns are NOT_RUN. The wire protocol range is unchanged. Artifacts pass hosted qualification.',
+    text: 'Publish an English-only Claude Proxy from RichToyo with MCP SDK 1.32.0 and bounded HTTP input before SDK validation. Retain Claude Code Runtime 2.1.304 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   codex: {
     id: 'codex', directory: 'codex',
-    text: 'Update the managed Codex CLI to 0.163.0 (first stable of the 0.163 line, published 2026-10-15; matching the official rust-v0.163.0 GitHub asset digest). Exact old/new app-server schema comparison shows additive-only changes across every Proxy-used protocol surface (optional fields, new read-state notifications), a byte-identical ServerRequest, and no removed or changed method the Proxy calls (unrelated realtime voice enums also changed; the Proxy does not use them); no-credential initialize handshakes are identical on 0.162.1 and 0.163.0. The wire contract is unchanged. Artifacts pass hosted qualification; real model turns were not run for this release.',
+    text: 'Publish an English-only Codex Proxy from RichToyo, including the managed gian-session Skill. Retain Codex CLI 0.163.0 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   dsh: {
     id: 'ai.deepseek.harness', directory: 'ai.deepseek.harness',
-    text: 'Update the managed DeepSeek Harness to 0.2.1-rc.2 (now the npm latest dist-tag; upstream tag dsh-v0.2.1-rc.2). Exact npm package-payload comparison of the bridge-used surfaces: SESSION_FORMAT_VERSION stays 4 (no data migration), KNOWN_SESSION_EVENT_TYPES only gains job/registered, job/settled and working-directory/change (unknown durable events already project through the generic activity path), and cordis moves patch-only. The bundled Bridge moves to 0.1.7 (its peer range now explicitly admits both the 0.2.0 and 0.2.1 RC lines). Artifacts pass hosted qualification; real model turns were not run for this release.',
+    text: 'Publish an English-only DeepSeek Harness Proxy from RichToyo with the existing Bridge 0.1.7. Retain Runtime 0.2.1-rc.2 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   kimi: {
     id: 'kimi', directory: 'kimi',
-    text: 'Update the Kimi Code Runtime to 2.2.0 (matching the official @moonshot-ai/kimi-code@2.2.0 GitHub asset digest). The published server-api reference diff from 2.1.1 to 2.2.0 is purely additive (Remote Control endpoints, optional fields), and a live 2.2.0 /openapi.json + /asyncapi.json probe confirmed every REST route and WebSocket message type this Proxy uses. The adapter and the wire protocol range are unchanged. Artifacts pass hosted qualification; real model turns were not run for this release.',
+    text: 'Publish an English-only Kimi Proxy from RichToyo. Retain Kimi Code Runtime 2.2.0 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   grok: {
     id: 'grok', directory: 'grok',
-    text: 'Update the managed Grok CLI to 1.0.62 (promoted to stable on x.ai/cli, the official GCS mirror and npm @xai-official/grok latest; bytes identical from x.ai and GCS). The spawn flags and ACP initialize contract are verified on the new binary (agentVersion 1.0.62, grokShell, unchanged capability shape; raw handshake evidence preserved); per-version notes for 1.0.53–1.0.62 are NOT_OBSERVED in the accessible official changelog, whose latest entry remains 1.0.52 — recorded honestly rather than blocking the promoted stable channel. Known limitation unchanged: native approval cards under auto/always_approve snapshots remain unverified (an authenticated session is required). The wire protocol range is unchanged. Artifacts pass hosted qualification; real model turns were not run for this release.',
+    text: 'Publish an English-only Grok Proxy from RichToyo. Retain Grok CLI 1.0.62 and the existing wire protocol. Native approval behavior under auto/always_approve remains unverified without an authenticated session. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   antigravity: {
     id: 'io.gian.antigravity', directory: 'io.gian.antigravity',
-    text: 'Update the upstream Antigravity ACP Runtime to 1.4.1 (the current ACP registry version; the official dl.google.com ZIP passes strict pair validation with pinned bytes). The ACP initialize contract is re-verified: core session/prompt/MCP/auth capabilities are unchanged; 1.4.1 newly advertises optional _meta.antigravity metadata (tier, systemPrompt.append) that is not adopted as a Gian capability. The wire protocol range is unchanged. Artifacts pass hosted qualification; real model turns were not run for this release.',
+    text: 'Publish an English-only Antigravity Proxy from RichToyo. Retain the official ACP Runtime 1.4.1 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   zcode: {
     id: 'com.zhipu.zcode', directory: 'com.zhipu.zcode',
-    text: "Update the managed Runtime to reviewed App-source 3.16.2 at immutable commit 3c5b227; CLI remains 0.17.0. The dependency lock, protocol entrypoint and database migration source are unchanged. Incorporate upstream temporary Bash-output preparation, fallback, cancellation and retention fixes, plugin-read concurrency improvements and read-only workflow children; retain the existing history-list fix and Gian capability boundaries. Selected source regressions pass and artifacts are hosted-qualified; real model turns were not run for this release.",
+    text: 'Publish an English-only ZCode Proxy from RichToyo, removing the remaining first-party localized fork comment. Retain reviewed App-source 3.16.2 at commit 3c5b227 and CLI 0.17.0 without altering original upstream source or notices. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
 };
 
@@ -61,6 +61,7 @@ function capture(sequence, certificatePath, baseIndexPath, releaseDir, providers
   assert.ok(providers.length > 0 && new Set(providers).size === providers.length);
   const certificateBytes = readFileSync(certificatePath);
   const certificate = JSON.parse(certificateBytes);
+  assert.equal(certificate.repository, repository);
   const ownerDirect = certificate.releaseMode === 'owner-authorized-no-tests';
   assert.equal(certificate.status, ownerDirect ? 'NOT_RUN' : 'PASS');
   if (ownerDirect) {
@@ -86,6 +87,7 @@ function capture(sequence, certificatePath, baseIndexPath, releaseDir, providers
     assert.equal(release.draft, false);
     assert.equal(release.prerelease, false);
     const releaseUrl = release.html_url;
+    assert.equal(releaseUrl, `https://github.com/${repository}/releases/tag/${record.tag}`);
     const asset = name => {
       const found = release.assets.find(item => item.name === name);
       assert.ok(found && found.digest?.startsWith('sha256:'));

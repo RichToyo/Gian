@@ -36,7 +36,9 @@ export function assertPublicSource(manifest) {
   }
 }
 export function releaseAssets(directory) {
-  return readdirSync(directory).filter(name => /\.(dmg|zip|blockmap)$/.test(name) || ['latest-mac.yml', 'SHA256SUMS'].includes(name)).sort().map(name => {
+  return readdirSync(directory).filter(name => /\.(dmg|zip|blockmap)$/.test(name)
+    || /^gian-tool-skill-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tar\.gz$/.test(name)
+    || ['latest-mac.yml', 'SHA256SUMS'].includes(name)).sort().map(name => {
     const bytes = readFileSync(join(directory, name));
     return { name, size: bytes.length, sha256: sha256(bytes) };
   });

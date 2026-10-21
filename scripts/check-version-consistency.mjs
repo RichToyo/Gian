@@ -11,6 +11,8 @@ export const APP_MANIFESTS = [
   'packages/chat-ui/package.json',
   'packages/desktop/package.json',
   'packages/host/package.json',
+  'packages/tool-cli/package.json',
+  'packages/tool-mcp/package.json',
   'packages/shared/package.json',
   'packages/web/package.json',
 ];

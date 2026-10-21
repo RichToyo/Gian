@@ -1,4 +1,5 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { createRequire } from 'node:module';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
@@ -14,6 +15,8 @@ import {
   GIAN_MCP_TOOL_DEFINITIONS,
 } from './adapter.js';
 import { gianMcpToolDefinitions } from './schemas.js';
+
+const packageVersion = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 
 export function createGianToolMcpServer(options: {
   dataDir: string;
@@ -40,7 +43,7 @@ export function createGianToolMcpServer(options: {
     );
   }
   const server = new Server(
-    { name: 'gian-tool', version: '0.5.4' },
+    { name: 'gian-tool', version: packageVersion },
     {
       capabilities: { tools: {} },
       ...(instructions.length > 0 ? { instructions: instructions.join('\n') } : {}),

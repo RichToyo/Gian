@@ -21,6 +21,15 @@ test('version gate keeps app manifests aligned while allowing independent Proxy 
   }), []);
 });
 
+test('bundled Tool CLI and MCP follow the App version rather than independent releases', () => {
+  for (const path of ['packages/tool-cli/package.json', 'packages/tool-mcp/package.json']) {
+    assert.ok(APP_MANIFESTS.includes(path));
+    const values = { ...manifests(), [path]: '0.6.1' };
+    assert.ok(validateVersionConsistency({ manifests: values, changelog: '## [1.2.3]\n' })
+      .some(error => error.includes(path)));
+  }
+});
+
 test('version gate accepts exact Dev Proxy suffixes without accepting prerelease protocol versions', () => {
   const values = manifests();
   values['packages/proxies/grok-proxy/package.json'] = '0.3.8-Dev';

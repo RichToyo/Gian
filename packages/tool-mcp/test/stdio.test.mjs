@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +50,8 @@ test('stdio MCP lists and calls Gian tools against the Host socket', async t => 
   const client = new Client({ name: 'gian-tool-test', version: '1.0.0' });
   await client.connect(transport);
   t.after(() => client.close());
+  const packageVersion = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+  assert.deepEqual(client.getServerVersion(), { name: 'gian-tool', version: packageVersion });
 
   const listed = await client.listTools();
   assert.equal(listed.tools.length, GIAN_TOOL_METHODS.length + 1);

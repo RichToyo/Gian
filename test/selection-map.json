@@ -212,6 +212,7 @@
         "kimi-proxy",
         "proxy-protocol",
         "shared",
+        "tool-mcp",
         "web",
         "zcode-proxy",
         "chat-ui"
