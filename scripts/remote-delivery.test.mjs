@@ -55,6 +55,7 @@ test('export is reproducible, verifies dependencies and never overwrites an exis
   put('pnpm-workspace.yaml', "packages:\n  - 'packages/*'\n  - 'packages/proxies/*'\n\nonlyBuiltDependencies:\n  - better-sqlite3\n");
   put('delivery/remote/release.json', { product: 'Gian Remote', repository: 'RichToyo/Gian-Remote', version: '1.0.0' });
   put('delivery/remote/protocol-package.json', protocolFixture());
+  put('packages/remote-protocol/package.json', { name: '@gian/remote-protocol', version: protocolFixture().version });
   put('pnpm-lock.yaml', protocolLockFixture());
   for (const name of remotePackages) put(`packages/${name}/package.json`, { name: `@gian/${name}`, version: '1.0.0' });
   for (const name of ['remote-server', 'remote-web']) {
@@ -94,6 +95,12 @@ test('export is reproducible, verifies dependencies and never overwrites an exis
   for (const file of manifest.files) assert.equal(createHash('sha256').update(readFileSync(join(first.output, file.path))).digest('hex'), file.sha256);
   assert.match(readFileSync(join(first.output, 'pnpm-workspace.yaml'), 'utf8'), /packages\/remote-server/);
   assert.equal(verifySource(first.output).sourceCommit, first.commit);
+  put('packages/remote-protocol/package.json', { name: '@gian/remote-protocol', version: '1.4.0' });
+  assert.throws(() => exportRemote({ source, output: join(temporary, 'stale-protocol'), workingTree: true }), /selected Remote Protocol source version/);
+  assert.equal(existsSync(join(temporary, 'stale-protocol')), false);
+  assert.throws(() => exportRemote({ source, output: join(temporary, 'stale-override'), workingTree: true, protocolCoordinate: protocolFixture() }), /selected Remote Protocol source version/);
+  assert.equal(existsSync(join(temporary, 'stale-override')), false);
+  put('packages/remote-protocol/package.json', { name: '@gian/remote-protocol', version: protocolFixture().version });
   writeFileSync(join(source, 'packages/remote-server/src/note.ts'), `export const label = '${String.fromCodePoint(0x4e2d)}';\n`);
   for (const args of [['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'han']]) {
     const result = spawnSync('git', args, { cwd: source, encoding: 'utf8' });

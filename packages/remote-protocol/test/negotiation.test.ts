@@ -6,9 +6,10 @@ test('business hello is bound to the authenticated device, connection and genera
   const identity = { deviceId: generateCanonicalId(), connectionId: generateCanonicalId(), hostGeneration: generateCanonicalId(), hostVersion: 'test-host' };
   const offer = createRemoteHello(identity.deviceId, 'test-web');
   const reply = acceptRemoteHello(offer, identity, 123);
-  assert.equal(reply.negotiated_minor_version, 2);
+  assert.equal(reply.negotiated_minor_version, 3);
   assert.ok(reply.negotiated_capabilities.includes('wire.transcript_page'));
   assert.ok(reply.negotiated_capabilities.includes('wire.host_locale'));
+  assert.ok(reply.negotiated_capabilities.includes('wire.conversation_translation'));
   assert.deepEqual(validateRemoteHelloReply(reply, offer, identity.connectionId, identity.hostGeneration), reply);
   assert.throws(() => acceptRemoteHello({ ...offer, device_id: generateCanonicalId() }, identity), /authenticated route/);
   assert.throws(() => validateRemoteHelloReply(reply, offer, generateCanonicalId(), identity.hostGeneration), /authenticated connection/);
@@ -36,4 +37,18 @@ test('a minor-1 client without wire.host_locale negotiates minor 1 and no locale
   const reply = acceptRemoteHello(offer, identity);
   assert.equal(reply.negotiated_minor_version, 1);
   assert.ok(!reply.negotiated_capabilities.includes('wire.host_locale'));
+});
+
+test('a minor-2 client without wire.conversation_translation keeps its features and never sees translation', () => {
+  const identity = { deviceId: generateCanonicalId(), connectionId: generateCanonicalId(), hostGeneration: generateCanonicalId(), hostVersion: 'test-host' };
+  const offer = {
+    ...createRemoteHello(identity.deviceId, 'test-web'),
+    min_minor_version: 1,
+    max_minor_version: 2,
+    capabilities: ['wire.snapshot_parts', 'wire.content_resume', 'wire.transcript_page', 'wire.execution_v1', 'wire.host_locale'],
+  };
+  const reply = acceptRemoteHello(offer, identity);
+  assert.equal(reply.negotiated_minor_version, 2);
+  assert.ok(reply.negotiated_capabilities.includes('wire.host_locale'));
+  assert.ok(!reply.negotiated_capabilities.includes('wire.conversation_translation'));
 });

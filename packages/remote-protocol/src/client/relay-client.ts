@@ -108,6 +108,9 @@ export interface DeviceRelayHandlers {
 }
 export interface DeviceRelayLike {
   readonly isOpen: boolean;
+  /** Negotiated wire features after connect(); null when the peer is a
+   *  legacy (no-hello) Host that never answered the offer. */
+  readonly negotiatedCapabilities: readonly string[] | null;
   connect(): Promise<void>;
   sendControl(message: object): Promise<void>;
   sendContent(message: object): Promise<void>;
@@ -150,6 +153,7 @@ export class DeviceRelayClient implements DeviceRelayLike {
   private helloTimer: ReturnType<typeof setTimeout> | null = null;
   private protocolReady = false;
   private readonly deferredControl: Array<{ type?: string; [key: string]: unknown }> = [];
+  private capabilities: readonly string[] | null = null;
   protocolMode: 'pending' | 'legacy' | 'negotiated' = 'pending';
 
   constructor(private readonly input: DeviceRelayClientOptions) {}
@@ -159,6 +163,8 @@ export class DeviceRelayClient implements DeviceRelayLike {
   }
 
   get hostGeneration(): string { return this.helloGeneration; }
+
+  get negotiatedCapabilities(): readonly string[] | null { return this.capabilities; }
 
   private async sign(bytes: Uint8Array): Promise<string> {
     if (this.input.identity.sign) return this.input.identity.sign(bytes);
@@ -268,6 +274,7 @@ export class DeviceRelayClient implements DeviceRelayLike {
         throw new RemoteProtocolError('PROTOCOL_VERSION_UNSUPPORTED', 'Host does not support native remote execution');
       }
       this.protocolMode = result.reply ? 'negotiated' : 'legacy';
+      this.capabilities = result.reply ? result.reply.negotiated_capabilities : null;
       this.protocolReady = true;
       for (const message of this.deferredControl.splice(0)) await this.input.handlers.onControl(message);
     } catch (error) {

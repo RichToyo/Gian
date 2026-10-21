@@ -321,8 +321,6 @@ describe('composer format toolbar clear formatting', () => {
 
 describe('composer format shortcuts', () => {
   const SHORTCUTS: Array<[string, KeyboardEventInit, string]> = [
-    ['bold', { key: 'b', metaKey: true }, '**hello**'],
-    ['italic', { key: 'i', metaKey: true }, '*hello*'],
     ['inline code', { key: 'e', metaKey: true }, '`hello`'],
     ['strikethrough', { key: 'X', metaKey: true, shiftKey: true }, '~~hello~~'],
   ];
@@ -361,6 +359,10 @@ describe('composer format shortcuts', () => {
     Object.defineProperty(composing, 'isComposing', { value: true });
     const cases: KeyboardEvent[] = [
       new KeyboardEvent('keydown', { key: 'b', cancelable: true }),
+      // ⌘B/⌘I stay unhandled here: the browser's beforeinput (formatBold /
+      // formatItalic) owns them — see the double-toggle regression test below.
+      new KeyboardEvent('keydown', { key: 'b', metaKey: true, cancelable: true }),
+      new KeyboardEvent('keydown', { key: 'i', metaKey: true, cancelable: true }),
       new KeyboardEvent('keydown', { key: 'k', metaKey: true, cancelable: true }),
       new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true }),
       composing,
@@ -372,5 +374,77 @@ describe('composer format shortcuts', () => {
       });
       expect(handled).toBe(false);
     }
+  });
+
+  it('ignores Ctrl shortcuts on macOS so emacs text bindings keep working', () => {
+    const original = Object.getOwnPropertyDescriptor(window.navigator, 'platform');
+    Object.defineProperty(window.navigator, 'platform', { configurable: true, value: 'MacIntel' });
+    try {
+      renderComposer('hello');
+      const editor = renderedEditor();
+      for (const init of [
+        { key: 'e', ctrlKey: true },
+        { key: 'b', ctrlKey: true },
+        { key: 'i', ctrlKey: true },
+        { key: 'X', ctrlKey: true, shiftKey: true },
+      ] satisfies KeyboardEventInit[]) {
+        selectWholeFirstBlock(editor);
+        let handled = true;
+        act(() => {
+          handled = editor.dispatchCommand(
+            KEY_MODIFIER_COMMAND,
+            new KeyboardEvent('keydown', { ...init, cancelable: true }),
+          );
+        });
+        expect(handled).toBe(false);
+      }
+    } finally {
+      if (original) Object.defineProperty(window.navigator, 'platform', original);
+    }
+  });
+
+  it('keeps Ctrl shortcuts on non-Apple platforms', async () => {
+    const original = Object.getOwnPropertyDescriptor(window.navigator, 'platform');
+    Object.defineProperty(window.navigator, 'platform', { configurable: true, value: 'Win32' });
+    try {
+      const { onChange } = renderComposer('hello');
+      const editor = renderedEditor();
+      selectWholeFirstBlock(editor);
+      let handled = false;
+      act(() => {
+        handled = editor.dispatchCommand(
+          KEY_MODIFIER_COMMAND,
+          new KeyboardEvent('keydown', { key: 'e', ctrlKey: true, cancelable: true }),
+        );
+      });
+      expect(handled).toBe(true);
+      await waitFor(() => expect(lastUserText(onChange)).toBe('`hello`'));
+    } finally {
+      if (original) Object.defineProperty(window.navigator, 'platform', original);
+    }
+  });
+
+  // Real browser entry for ⌘B/⌘I: the plugin must NOT toggle at keydown (the
+  // browser then emits beforeinput formatBold/formatItalic, which Lexical core
+  // maps to exactly one FORMAT_TEXT_COMMAND). With the plugin also handling
+  // keydown the two toggles cancel — the regression this guards.
+  it.each([
+    ['b', 'formatBold', '**hello**'],
+    ['i', 'formatItalic', '*hello*'],
+  ])('⌘%s toggles exactly once via the DOM event path', async (key, inputType, expectedMarkdown) => {
+    const { onChange } = renderComposer('hello');
+    const editor = renderedEditor();
+    selectWholeFirstBlock(editor);
+    const root = editor.getRootElement();
+    expect(root).not.toBeNull();
+
+    act(() => {
+      fireEvent.keyDown(root!, { key, metaKey: true });
+      const beforeinput = new Event('beforeinput', { bubbles: true, cancelable: true });
+      Object.defineProperty(beforeinput, 'inputType', { value: inputType });
+      fireEvent(root!, beforeinput);
+    });
+
+    await waitFor(() => expect(lastUserText(onChange)).toBe(expectedMarkdown));
   });
 });

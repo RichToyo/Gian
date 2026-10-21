@@ -82,6 +82,12 @@ export interface MsgItem extends ChatMsgItem {
   sendCanonical?: boolean;
   /** Re-dispatch payload for the failed echo's retry affordance. */
   sendRetry?: MessageSendPayload;
+  /** Submission id retained after the send's operation confirmed (the rest of
+   *  the correlation metadata is dropped). A remote translated send's
+   *  canonical `user_message` can lag its operation result; the id lets that
+   *  late event still reconcile this echo in place. Carries no retry
+   *  affordance — retry requires `failed` plus the full `sendRetry`. */
+  sendId?: string;
   /** Marks the optimistic echo of a translated send that is still awaiting
    *  its translation: the transcript renders the inline Translating row under
    *  the bubble instead of dispatching anything. Cleared when the real send

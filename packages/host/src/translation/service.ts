@@ -14,6 +14,22 @@ export interface TranslationInput {
   document?: ComposerDocument;
 }
 
+/**
+ * Lightweight change notification owned by the Host translation service. The
+ * service persists FIRST and notifies after, so a subscriber can always read
+ * the canonical state back. Local HTTP views and Remote connections share
+ * this single entry point — neither polls to stay in sync.
+ */
+export interface TranslationNotification {
+  sessionId: string;
+  /** The session's automatic switch was persisted to a new value. */
+  enabled?: boolean;
+  /** Automatic reading-translation progress/failure for one source. */
+  automatic?: { sourceId: string; pending: boolean; error?: string };
+  /** A record was just persisted (any purpose). */
+  result?: TranslationRecord;
+}
+
 export type TranslateModel = (
   preferences: TranslationPreferences, prompt: string, signal: AbortSignal,
 ) => Promise<string>;
@@ -49,9 +65,47 @@ export class TranslationService {
   private jobs = new Map<string, { controller: AbortController; promise: Promise<TranslationRecord>; users: Set<string> }>();
   private requests = new Map<string, () => void>();
   readonly automatic = new Map<string, { pending: boolean; error?: string }>();
+  /** Per-session monotonic version for the automatic-progress map; every
+   *  progress write/clear bumps it, so a wholesale state snapshot can never
+   *  resurrect an older pending entry over a settled failure/success. */
+  private readonly automaticRevisions = new Map<string, number>();
+  /** Process-boot identity: after a Host restart the revision counters
+   *  restart too, and the epoch tells views to accept the fresh baseline. */
+  readonly automaticEpoch = randomUUID();
+  private readonly listeners = new Set<(notification: TranslationNotification) => void>();
   private closing = false;
 
   constructor(private db: Db, private model: TranslateModel) {}
+
+  /** Subscribe to persisted translation changes. Missed notifications are
+   *  recoverable by reading the full state back (list/enabled/automatic). */
+  subscribe(listener: (notification: TranslationNotification) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(notification: TranslationNotification): void {
+    for (const listener of this.listeners) {
+      try { listener(notification); } catch { /* a subscriber must not break translation */ }
+    }
+  }
+
+  /** Mutate the automatic-translation progress map and notify in one step,
+   *  so no view can observe the map change without the notification. Pass
+   *  null to clear the entry (settled successfully). Every mutation bumps the
+   *  session's automatic revision — wholesale snapshots are ordered by it. */
+  setAutomaticState(sessionId: string, sourceId: string, state: { pending: boolean; error?: string } | null): void {
+    const key = `${sessionId}:${sourceId}`;
+    if (state === null) this.automatic.delete(key);
+    else this.automatic.set(key, state);
+    this.automaticRevisions.set(sessionId, (this.automaticRevisions.get(sessionId) ?? 0) + 1);
+    this.emit({ sessionId, automatic: { sourceId, pending: state?.pending ?? false, ...(state?.error ? { error: state.error } : {}) } });
+  }
+
+  /** Current automatic-progress revision for one session (0 = untouched). */
+  automaticRevision(sessionId: string): number {
+    return this.automaticRevisions.get(sessionId) ?? 0;
+  }
 
   get(id: string): TranslationRecord | null {
     const row = this.db.prepare('SELECT record_json FROM translation_results WHERE id = ?')
@@ -76,11 +130,36 @@ export class TranslationService {
   setEnabled(sessionId: string, enabled: boolean): void {
     const replica = this.db.prepare('SELECT cursor FROM remote_execution_replicas WHERE local_session_id = ?')
       .get(sessionId) as { cursor: number } | undefined;
-    this.db.prepare(`INSERT INTO session_translation_preferences (session_id, enabled, remote_after_sequence) VALUES (?, ?, ?)
+    // The monotonic revision lets every connected view reject a stale toggle
+    // response instead of letting an older write overwrite a newer state.
+    this.db.prepare(`INSERT INTO session_translation_preferences (session_id, enabled, remote_after_sequence, revision) VALUES (?, ?, ?, 1)
       ON CONFLICT(session_id) DO UPDATE SET enabled = excluded.enabled,
+      revision = session_translation_preferences.revision + 1,
       remote_after_sequence = CASE WHEN session_translation_preferences.enabled = 0 AND excluded.enabled = 1
         THEN excluded.remote_after_sequence ELSE session_translation_preferences.remote_after_sequence END`)
       .run(sessionId, enabled ? 1 : 0, replica?.cursor ?? 0);
+    this.emit({ sessionId, enabled });
+  }
+
+  /** Monotonic per-session revision of the automatic switch (0 = never set). */
+  stateRevision(sessionId: string): number {
+    return (this.db.prepare('SELECT revision FROM session_translation_preferences WHERE session_id = ?')
+      .get(sessionId) as { revision: number } | undefined)?.revision ?? 0;
+  }
+
+  /** Global revision of the saved translation preferences (agent/model/
+   *  languages). Bumped on every Settings save that touches translation, so
+   *  every view can order a state wholesale without scanning sessions. */
+  configRevision(): number {
+    const row = this.db.prepare("SELECT value FROM config WHERE key = 'translation_config_revision'")
+      .get() as { value: string } | undefined;
+    return Number.parseInt(row?.value ?? '0', 10) || 0;
+  }
+
+  /** Called by the settings save path before notifications go out. */
+  bumpConfigRevision(): void {
+    this.db.prepare(`INSERT INTO config (key, value) VALUES ('translation_config_revision', '1')
+      ON CONFLICT(key) DO UPDATE SET value = CAST(config.value AS INTEGER) + 1`).run();
   }
 
   shouldReadRemoteEvent(sessionId: string, sequence: number): boolean {
@@ -189,6 +268,7 @@ export class TranslationService {
     };
     this.db.prepare('INSERT INTO translation_results (id, session_id, cache_key, record_json) VALUES (?, ?, ?, ?)')
       .run(result.id, input.sessionId, key, JSON.stringify(result));
+    this.emit({ sessionId: input.sessionId, result });
     if (input.purpose === 'read' && !input.sourceId) {
       // Selection translations are a bounded cache, not conversation history.
       this.db.prepare(`DELETE FROM translation_results WHERE session_id = ?

@@ -460,7 +460,10 @@ function parseSettingsPatch(value: unknown): EditableSettingsPatch {
   return parsed as EditableSettingsPatch;
 }
 
-export function registerSettingsRoutes(app: Hono, db: Db): void {
+export function registerSettingsRoutes(app: Hono, db: Db, hooks?: {
+  /** Called after a settings save that touched translation preferences. */
+  onTranslationPreferencesChanged?: () => void;
+}): void {
   app.get('/api/settings/terminal-options', c => c.json(terminalOptions()));
   app.get('/api/settings', c => c.json(loadConfig(db)));
   app.patch('/api/settings', async c => {
@@ -477,6 +480,7 @@ export function registerSettingsRoutes(app: Hono, db: Db): void {
       return c.json({ error: error instanceof Error ? error.message : 'invalid settings patch' }, 400);
     }
     saveConfig(db, patch);
+    if (patch.translation !== undefined) hooks?.onTranslationPreferencesChanged?.();
     return c.json(loadConfig(db));
   });
 }

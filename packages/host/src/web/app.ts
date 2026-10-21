@@ -4,6 +4,7 @@ import type { Db } from '../storage/db.js';
 import {
   sessionAllowsLegacyRuntimeFallback,
   sessionBoundRuntimeCliPath,
+  DEFAULT_TRANSLATION_PREFERENCES,
   type SystemConfig,
 } from '@gian/shared';
 import { WsBroadcaster } from './ws-broadcast.js';
@@ -383,6 +384,8 @@ export function createApp(ctx: AppContext): AppHandle {
         }))
       : undefined,
     hostEvents: broadcaster,
+    translation: translations,
+    translationPreferences: () => loadConfig(ctx.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES },
     proxyLogo: ctx.agentManager
       ? (proxy, variant) => resolveProxyLogo(
           { agents: ctx.agentManager!, ...(ctx.catalogService ? { catalogService: ctx.catalogService } : {}) },
@@ -542,8 +545,34 @@ export function createApp(ctx: AppContext): AppHandle {
 
   app.get('/health', c => c.json(buildHealthPayload()));
   registerAuthRoutes(app, ctx.db);
-  registerSettingsRoutes(app, ctx.db);
+  registerSettingsRoutes(app, ctx.db, {
+    onTranslationPreferencesChanged: () => {
+      // Bump the global config revision BEFORE any view reads state back, so
+      // a late older response can never overwrite the new configuration.
+      translations.bumpConfigRevision();
+      // Global preference save: every connected view (local pages that are
+      // not the Settings window, and subscribed Remote clients) re-reads the
+      // Host-confirmed state instead of keeping a stale configured flag.
+      broadcaster.broadcast({ type: 'translation:updated', session_id: '', preferences_changed: true });
+      remote.notifyTranslationPreferencesChanged();
+    },
+  });
   registerTranslationRoutes(app, ctx.db, translations);
+  translations.subscribe(notification => {
+    broadcaster.broadcast({
+      type: 'translation:updated',
+      session_id: notification.sessionId,
+      ...(notification.enabled !== undefined ? { enabled: notification.enabled } : {}),
+      ...(notification.automatic ? {
+        automatic: {
+          source_id: notification.automatic.sourceId,
+          pending: notification.automatic.pending,
+          ...(notification.automatic.error ? { error: notification.automatic.error } : {}),
+        },
+      } : {}),
+      ...(notification.result ? { result: notification.result } : {}),
+    });
+  });
   registerRemoteSettingsRoutes(app, remote);
   registerRemoteControllerRoutes(app, remoteController, broadcaster);
   registerWorkspaceRoutes(app, ctx.db);

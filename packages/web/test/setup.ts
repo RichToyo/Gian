@@ -65,6 +65,14 @@ if (typeof window.HTMLElement.prototype.scrollIntoView !== 'function') {
   window.HTMLElement.prototype.scrollIntoView = function scrollIntoView() {};
 }
 
+// jsdom's InputEvent lacks getTargetRanges, which flips Lexical's
+// CAN_USE_BEFORE_INPUT off and skips its native beforeinput listener
+// (formatBold/formatItalic/…) entirely. Provide it so tests can exercise the
+// real browser event path for ⌘B/⌘I-style formatting.
+if ('InputEvent' in window && !('getTargetRanges' in new window.InputEvent('input'))) {
+  window.InputEvent.prototype.getTargetRanges = () => [];
+}
+
 // Lexical keeps the caret visible by measuring DOM Ranges. jsdom exposes the
 // Range API but not its layout methods, so editor interaction needs a stable
 // zero-sized rectangle in tests.

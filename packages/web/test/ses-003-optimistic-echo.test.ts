@@ -108,6 +108,22 @@ describe('SES-003: optimistic user echo reconciliation', () => {
     expect((after[0] as MsgItem).id).toBe('real-1');
   });
 
+  it('SES-003: inserts an unmatched canonical user_message at its (turn, ts) position, not the tail', () => {
+    // A remote send whose canonical broadcast was delayed past later turns
+    // (and whose echo never correlated) must still land in transcript order.
+    const before: TranscriptItem[] = [
+      { kind: 'user', id: 'u1', text: 'first', exec: 'claude', ts: 100, turn: 1 },
+      { kind: 'assistant', id: 'a1', text: 'reply', exec: 'claude', ts: 200, turn: 1 },
+      { kind: 'user', id: 'u2', text: 'second', exec: 'claude', ts: 300, turn: 2 },
+    ];
+    const late: EventEnvelope = {
+      session_id: 'sess-1', turn: 1, call_id: 'u-late', event: 'user_message', ts: 150,
+      data: { text: 'delayed original' },
+    };
+    const after = applyEnvelope(before, late, 'claude');
+    expect(after.map(item => item.id)).toEqual(['u1', 'u-late', 'a1', 'u2']);
+  });
+
   it('SES-003: collapses canonical + pending state when the matching WS event arrives', () => {
     const env: EventEnvelope = {
       ...userMessageEnvelope('hello'),

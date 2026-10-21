@@ -508,6 +508,52 @@ describe('SideChatDock', () => {
     expect(screen.getByText('thinking it over')).toBeInTheDocument();
   });
 
+  it('scroll-follow pins the .sidechat-scroll container (no .main-scroll ancestor exists)', () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get: () => 1000 });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 200 });
+    try {
+      const harness = makeHarness();
+      const record = sideChat('sc-1');
+      const first = {
+        kind: 'assistant', id: 'm-1', text: 'first', exec: 'codex',
+        ts: 1_700_000_000_000, turn: 1,
+      } satisfies TranscriptItem;
+      const view = renderDock(harness, { sideChats: [record], items: { 'sc-1': [first] } });
+
+      const panel = screen.getByTestId('sidechat-panel-sc-1');
+      const scroller = panel.querySelector('.sidechat-scroll') as HTMLElement;
+      const transcriptEl = panel.querySelector('.transcript') as HTMLElement;
+      expect(scroller).not.toBeNull();
+      // Pinned to the bottom on mount — not the non-scrolling .transcript div.
+      expect(scroller.scrollTop).toBe(1000);
+      expect(transcriptEl.scrollTop).toBe(0);
+
+      // A new item re-pins while at the bottom (jsdom fires no scroll event
+      // for programmatic scrollTop, so the pin stays engaged).
+      scroller.scrollTop = 0;
+      view.rerender(
+        <Providers harness={harness}>
+          <SideChatDock
+            parent={PARENT}
+            sideChats={[record]}
+            items={{
+              'sc-1': [first, {
+                kind: 'assistant', id: 'm-2', text: 'second', exec: 'codex',
+                ts: 1_700_000_000_001, turn: 1,
+              }],
+            }}
+            control={ENABLED_CONTROL}
+            onClosed={() => {}}
+          />
+        </Providers>,
+      );
+      expect(scroller.scrollTop).toBe(1000);
+    } finally {
+      delete (HTMLElement.prototype as Partial<HTMLElement>).scrollHeight;
+      delete (HTMLElement.prototype as Partial<HTMLElement>).clientHeight;
+    }
+  });
+
   it('keeps Working tool details inside Side Chat instead of replacing its owning panel', () => {
     const harness = makeHarness();
     const openParentPanel = vi.fn();

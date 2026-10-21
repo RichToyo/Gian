@@ -890,6 +890,15 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // session badges flip globe-code ↔ globe-x from it.
           applyRemoteEnvironmentsSnapshot(message.environments);
           return;
+        case 'translation:updated':
+          // Host-canonical translation change (switch, automatic progress,
+          // new record, preference save). The translation hook re-reads the
+          // confirmed state — including on pages whose switch is off and no
+          // longer poll. Empty session_id means global preferences changed.
+          window.dispatchEvent(new CustomEvent('gian:translation-updated', {
+            detail: { sessionId: message.session_id },
+          }));
+          return;
         case 'approval:created':
           upsertPendingApproval(message.approval);
           projectLocalBrowserApproval(message.approval);

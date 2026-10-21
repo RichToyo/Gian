@@ -7,6 +7,8 @@ import type {
   Schedule,
   ScheduleRun,
   Session,
+  SideChatInfo,
+  StateSyncMessage,
   Task,
   Workspace,
 } from '@gian/shared';
@@ -462,6 +464,40 @@ async function deliverSync(): Promise<void> {
   act(() => {
     socket.fakeOpen();
     socket.fakeMessage({ type: 'auth_ok', user: 'fixture-user' });
+    socket.fakeMessage(sync);
+  });
+}
+
+function sideChatRecord(id: string, parentSessionId: string): SideChatInfo {
+  return {
+    id,
+    parent_session_id: parentSessionId,
+    ordinal: 1,
+    name: null,
+    stream_id: `stream-${id}`,
+    state: 'idle',
+    status: 'open',
+    anchor: { type: 'turn', turn_id: 't_parent', source_turn_id: 'provider-turn-parent' },
+    session_config: {},
+    last_error: null,
+    uncertain_turn_id: null,
+    events: [],
+    user_inputs: [],
+    created_at: '2026-08-20T08:00:00.000Z',
+    updated_at: '2026-08-20T08:00:00.000Z',
+  } as unknown as SideChatInfo;
+}
+
+/** A state_sync whose sidechats set wholesale-replaces the read model. */
+function deliverSideChats(sidechats: SideChatInfo[]): void {
+  const socket = getMockWebSockets()[0]!;
+  const sync = stateSyncFixture();
+  sync.config.locale = 'en';
+  sync.workspaces = [workspace];
+  sync.sessions = world.sessions;
+  sync.tasks = world.tasks;
+  sync.sidechats = sidechats as unknown as StateSyncMessage['sidechats'];
+  act(() => {
     socket.fakeMessage(sync);
   });
 }
@@ -1816,6 +1852,41 @@ describe('P1a session navigation entries', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it('auto-hides the sidechat panel when its last record closes, but keeps an empty panel open', async () => {
+    world.sideChatCatalog = true;
+    world.sessions = [session({
+      id: 'side-host',
+      name: 'Side host',
+      type: 'subtask',
+      task_id: 'task-1',
+      available_actions: { 'sidechat.create': { enabled: true } },
+    })];
+    const user = userEvent.setup();
+    const navigation = installNavigation(null);
+    await boot(navigation);
+    await deliverSync();
+    await user.click(await screen.findByText('Side host'));
+    await expectOpenSession('side-host', 'Side host');
+    const dock = await screen.findByTestId('dock-sidechat');
+    await waitFor(() => expect((dock as HTMLButtonElement).disabled).toBe(false));
+
+    // Opened on an already-empty list: the create-CTA empty state is a
+    // legitimate view and must NOT auto-close.
+    await user.click(dock);
+    await waitFor(() => expect(document.querySelector('.chat-context-panel')).not.toBeNull());
+    await act(async () => { await Promise.resolve(); });
+    expect(document.querySelector('.chat-context-panel')).not.toBeNull();
+
+    // A record arrives: the dock shows it and the panel stays.
+    deliverSideChats([sideChatRecord('sc-1', 'side-host')]);
+    await screen.findByTestId('sidechat-panel-sc-1');
+    expect(document.querySelector('.chat-context-panel')).not.toBeNull();
+
+    // The last record closes (≥1→0): the empty dock panel goes with it.
+    deliverSideChats([]);
+    await waitFor(() => expect(document.querySelector('.chat-context-panel')).toBeNull());
   });
 
   it('scrolls Font size only after a delayed anchor is in the visible sheet', async () => {

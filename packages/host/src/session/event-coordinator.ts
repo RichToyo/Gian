@@ -121,6 +121,8 @@ interface EventCoordinatorCallbacks {
     toolRequestId?: string,
     contextItems?: MessageContextItem[],
     composerDocument?: import('@gian/shared').ComposerDocument,
+    /** Persisted send intent from the queue entry (receipt id or 'original'). */
+    translationId?: string,
   ) => Promise<unknown>;
   onInteractionResolved?: (sessionId: string, interactionId: string, turnId: string) => void;
   onSessionApprovalsCleared?: (sessionId: string) => void;
@@ -1578,6 +1580,7 @@ export class SessionEventCoordinator {
       next.toolRequestId,
       next.contextItems,
       next.composerDocument,
+      next.translationId,
     ).catch(err => {
       console.error('[queue] auto-send failed', err);
     });

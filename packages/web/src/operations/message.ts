@@ -53,7 +53,9 @@ export interface MessageEchoSink {
   /** Append a pending echo and raise the session's pending spinner. */
   append(sessionId: string, item: MsgItem): void;
   /** Drop transient correlation/retry metadata after the Host confirms the
-   *  send. The canonical transcript item itself remains untouched. */
+   *  send, retaining only the submission id so a late canonical user_message
+   *  can still reconcile the echo. The canonical transcript item itself
+   *  remains untouched. */
   markConfirmed(runId: string, sessionId: string): void;
   /** Mark the echo of run `runId` failed in place. No-op after its correlation
    *  was already cleared by a confirmed result. */
@@ -127,12 +129,15 @@ export function createMessageEchoSink(
           touched = true;
           const {
             sendRunId: _runId,
-            sendRetry: _retry,
+            sendRetry,
             sendCanonical: _canonical,
             pending: _pending,
             ...confirmed
           } = item;
-          return confirmed;
+          // Retain only the submission id: a remote translated send's
+          // canonical user_message may lag this result and must still find
+          // the echo (see apply.ts). Without sendRetry no retry UI appears.
+          return sendRetry?.sendId ? { ...confirmed, sendId: sendRetry.sendId } : confirmed;
         });
         return touched ? { ...previous, [sessionId]: nextItems } : previous;
       });

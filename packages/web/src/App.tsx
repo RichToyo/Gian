@@ -2420,6 +2420,23 @@ export function App() {
     if (activeSessionId) openChatPanel(activeSessionId, { kind: 'sidechat' });
   }, [chatPanel, sessionViewActive, sideChatControl, activeSessionId, openChatPanel, setChatPanel]);
 
+  // Closing the last Side Chat of the active session retires the now-empty
+  // dock panel with it. Only a ≥1→0 transition closes: a panel opened on an
+  // already-empty list (the create-CTA empty state) stays open.
+  const activeSideChatCountRef = useRef(activeSideChats.length);
+  useEffect(() => {
+    const previousCount = activeSideChatCountRef.current;
+    activeSideChatCountRef.current = activeSideChats.length;
+    if (
+      previousCount > 0
+      && activeSideChats.length === 0
+      && chatPanel?.kind === 'sidechat'
+      && chatPanel.sessionId === activeSessionId
+    ) {
+      setChatPanel(null);
+    }
+  }, [activeSideChats.length, chatPanel, activeSessionId, setChatPanel]);
+
   useEffect(() => {
     const notifications = desktopBridge()?.notifications;
     if (!notifications?.native) return;

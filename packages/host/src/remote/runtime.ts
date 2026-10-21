@@ -9,6 +9,8 @@ import {
   generateCanonicalId,
   generateP256KeyPair,
   importP256PublicKey,
+  redactRemoteText,
+  verifyBytes,
   type CanonicalEvent,
   type CommandRequest,
   type CryptoOffer,
@@ -18,9 +20,9 @@ import {
   type RemoteStatePatch,
   type StatePatch,
   type AccountLoginStarted,
-  verifyBytes,
 } from '@gian/remote-protocol';
 import type { ServerToClientMessage, RemoteSettingsSnapshot, RemoteSettingsPairing } from '@gian/shared';
+import { DEFAULT_TRANSLATION_PREFERENCES, type TranslationPreferences, type TranslationRecord } from '@gian/shared';
 import { loadConfig } from '../storage/config.js';
 import { PeerCryptoSession } from './crypto-session.js';
 import type { GianToolAccessController } from '../tool/access.js';
@@ -29,6 +31,7 @@ import { ApprovalScopeError } from '../approval/manager.js';
 import type { SessionManager } from '../session/manager.js';
 import type { TaskManager } from '../task/manager.js';
 import type { Db } from '../storage/db.js';
+import type { TranslationNotification, TranslationService } from '../translation/service.js';
 import { RemoteMutationAudit } from './audit.js';
 import { RemoteAttachmentService } from './attachment-stream.js';
 import { effectiveRemoteCapabilities } from './capability.js';
@@ -45,6 +48,8 @@ import {
   RemoteProjector,
   isRemoteSessionVisible,
   projectRemoteInteraction,
+  projectRemoteTranslation,
+  projectRemoteTranslationState,
   remoteInteractionResourceId,
 } from './projection.js';
 import { RemoteReplayBuffer } from './replay-buffer.js';
@@ -82,6 +87,11 @@ export interface RemoteRuntimeDeps {
     mediaType: 'image/png' | 'image/webp';
     sha256: string;
   } | null>;
+  /** Conversation translation service (wire.conversation_translation). When
+   *  absent, every translation command/field/event stays off the wire. */
+  translation?: TranslationService;
+  /** Live Host translation preferences; defaults to loadConfig at call time. */
+  translationPreferences?: () => TranslationPreferences;
 }
 
 export class RemoteRuntime {
@@ -128,6 +138,9 @@ export class RemoteRuntime {
   private readonly issuedInteractionIds = new Map<string, Set<string>>();
   private attention: RemoteAttention[] = [];
   private detachHostEvents: (() => void) | null = null;
+  private detachTranslation: (() => void) | null = null;
+  private readonly translationService: TranslationService | undefined;
+  private readonly translationPreferences: () => TranslationPreferences;
 
   constructor(deps: RemoteRuntimeDeps) {
     this.hostName = deps.hostName ?? (hostname().replace(/\.local$/i, '').trim().slice(0, MAX_NAME_CHARS) || 'Gian Host');
@@ -169,6 +182,9 @@ export class RemoteRuntime {
     const enrollment = this.enrollment;
     const hostName = this.hostName;
     const hostVersion = this.hostVersion;
+    this.translationService = deps.translation;
+    this.translationPreferences = deps.translationPreferences
+      ?? (() => loadConfig(deps.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES });
     this.projector = new RemoteProjector({
       db: deps.db,
       sessions: deps.sessions,
@@ -186,6 +202,7 @@ export class RemoteRuntime {
       listAgents: deps.listAgents,
       attachments: this.attachments,
       fileRefs: this.fileRefs,
+      ...(deps.translation ? { translations: deps.translation } : {}),
       workspacePath: sessionId => {
         try {
           const session = deps.sessions.getSession(sessionId);
@@ -240,7 +257,13 @@ export class RemoteRuntime {
       },
       onSubscribe: (deviceId, sessionId) => this.subscriptions.set(deviceId, sessionId),
       proxyLogo: deps.proxyLogo,
+      ...(deps.translation ? { translation: deps.translation } : {}),
+      translationPreferences: this.translationPreferences,
+      onTranslationSettled: (sessionId, requestId, outcome) => this.publishTranslationSettled(sessionId, requestId, outcome),
     });
+    this.detachTranslation = deps.translation?.subscribe(notification => {
+      this.publishTranslationNotification(notification);
+    }) ?? null;
     this.detachHostEvents = deps.hostEvents?.onBroadcast(message => {
       if (message.type === 'event') this.executions.append(message);
       this.observeHostBroadcast(message);
@@ -562,10 +585,25 @@ export class RemoteRuntime {
         attachments: this.attachments,
         hostVersion: this.hostVersion,
         fileRefs: this.fileRefs,
-        transcriptPage: (sessionId, deviceId) => {
+        transcriptPage: (sessionId, deviceId, options) => {
           if (!this.projector.isSessionIdVisible(sessionId)) return null;
-          return this.projector.transcriptPage(sessionId, 3, { deviceId });
+          return this.projector.transcriptPage(sessionId, 3, {
+            deviceId,
+            includeTranslations: options?.wireFeatures?.includes('wire.conversation_translation') === true,
+          });
         },
+        ...(this.translationService ? {
+          translationState: (sessionId: string) => {
+            if (!this.projector.isSessionIdVisible(sessionId)) return null;
+            if (this.translationExport(sessionId)) return null;
+            return projectRemoteTranslationState(
+              this.translationService!,
+              sessionId,
+              this.translationPreferences(),
+              this.translationService!.configRevision(),
+            );
+          },
+        } : {}),
       },
     );
     this.connectors.set(device.id, connector);
@@ -1196,7 +1234,9 @@ export class RemoteRuntime {
     if (!this.projector.isSessionIdVisible(message.session_id)) return;
     for (const [deviceId, connector] of this.connectors) {
       if (this.subscriptions.get(deviceId) !== message.session_id) continue;
-      const item = this.projector.projectTranscriptEvent(message, deviceId);
+      const item = this.projector.projectTranscriptEvent(message, deviceId, {
+        translation: connector.supportsFeature('wire.conversation_translation'),
+      });
       if (!item) continue;
       connector.sendTranscript({
         type: 'event',
@@ -1208,6 +1248,90 @@ export class RemoteRuntime {
           item,
         },
       });
+    }
+  }
+
+  private translationExport(sessionId: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM remote_execution_exports WHERE session_id = ?').get(sessionId));
+  }
+
+  /** Host translation preferences were saved: re-push the small per-session
+   *  state to every currently subscribed, negotiated connection so no view
+   *  keeps a stale configured/language snapshot. */
+  notifyTranslationPreferencesChanged(): void {
+    const service = this.translationService;
+    if (!service) return;
+    for (const sessionId of new Set(this.subscriptions.values())) {
+      if (this.translationExport(sessionId)) continue;
+      this.publishTranslationEvent(sessionId, {
+        state: projectRemoteTranslationState(service, sessionId, this.translationPreferences(), service.configRevision()),
+      });
+    }
+  }
+
+  /**
+   * Translation events ride the live connection exactly like transcript
+   * items: session-subscription scoped, feature-gated per connection, and
+   * NOT part of the canonical replay sequence. Missed changes are recovered
+   * by the resume-time state push plus session.subscribe / session.page
+   * reads, never by replaying to a closed-schema peer.
+   */
+  private publishTranslationNotification(notification: TranslationNotification): void {
+    const service = this.translationService;
+    if (!service || this.translationExport(notification.sessionId)) return;
+    if (notification.enabled !== undefined) {
+      this.publishTranslationEvent(notification.sessionId, {
+        state: projectRemoteTranslationState(service, notification.sessionId, this.translationPreferences(), service.configRevision()),
+      });
+    }
+    if (notification.automatic) {
+      this.publishTranslationEvent(notification.sessionId, {
+        automatic: {
+          source_id: notification.automatic.sourceId,
+          pending: notification.automatic.pending,
+          ...(notification.automatic.error
+            ? { error: redactRemoteText(notification.automatic.error).slice(0, 16_000) }
+            : {}),
+        },
+        // Deltas share the wholesale state's ordered version: the client's
+        // version advances with every delta, so a stale snapshot can never
+        // resurrect an older pending entry over a settled outcome.
+        automatic_revision: service.automaticRevision(notification.sessionId),
+        automatic_epoch: service.automaticEpoch,
+      });
+    }
+    if (notification.result) {
+      this.publishTranslationEvent(notification.sessionId, {
+        upsert: projectRemoteTranslation(notification.result),
+      });
+    }
+  }
+
+  private publishTranslationSettled(
+    sessionId: string,
+    requestId: string,
+    outcome: { record?: TranslationRecord; error?: string },
+  ): void {
+    this.publishTranslationEvent(sessionId, {
+      request_id: requestId,
+      ...(outcome.record ? { upsert: projectRemoteTranslation(outcome.record) } : {}),
+      ...(outcome.error ? { error: outcome.error } : {}),
+    });
+  }
+
+  private publishTranslationEvent(
+    sessionId: string,
+    event: Record<string, unknown>,
+  ): void {
+    for (const [deviceId, connector] of this.connectors) {
+      if (this.subscriptions.get(deviceId) !== sessionId) continue;
+      if (!connector.supportsFeature('wire.conversation_translation')) continue;
+      void connector.sendControl({
+        type: 'event',
+        host_generation: this.generation,
+        event_sequence: this.replay.eventSequence,
+        event: { kind: 'translation.updated', session_id: sessionId, ...event },
+      }).catch(() => undefined);
     }
   }
 
@@ -1270,6 +1394,8 @@ export class RemoteRuntime {
     this.stopConnection();
     this.detachHostEvents?.();
     this.detachHostEvents = null;
+    this.detachTranslation?.();
+    this.detachTranslation = null;
     this.displayGrant = null;
   }
 

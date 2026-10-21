@@ -134,7 +134,7 @@ test('bundled shipping proxy self-test ignores an ancestor app package.json', as
   }
 });
 
-test('all six official bundles self-test as Manifest v4 with matching identity', async (t) => {
+test('every shipping official bundle self-tests as Manifest v4 with matching identity', async (t) => {
   for (const plugin of proxyDefinitions) {
     const root = await mkdtemp(join(tmpdir(), `gian-proxy-v4-${plugin.id}-`));
     t.after(() => rm(root, { recursive: true, force: true }));

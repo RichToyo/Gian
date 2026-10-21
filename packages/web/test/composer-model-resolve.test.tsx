@@ -140,7 +140,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   } as unknown as Session;
 }
 
-function composerElement(session: Session) {
+function composerElement(session: Session, extras: Partial<React.ComponentProps<typeof Composer>> = {}) {
   return (
     <LocaleProvider locale="en">
       <Composer
@@ -160,6 +160,7 @@ function composerElement(session: Session) {
         onSetNativeConfig={vi.fn()}
         onSetTurnConfig={vi.fn()}
         onSetServiceTier={vi.fn()}
+        {...extras}
       />
     </LocaleProvider>
   );
@@ -276,5 +277,17 @@ describe('Composer model resolve fencing (Finding: missing web evidence)', () =>
     });
     // The old session's response must not leak into the new session's chip.
     expect(screen.queryByText(/Slow A/)).toBeNull();
+  });
+
+  it('a failed resolve surfaces its error in the sidechat (fixed) composer too', async () => {
+    const user = userEvent.setup();
+    render(composerElement(makeSession(), { variant: 'sidechat' }));
+    await waitFor(() => expect(screen.getByTestId('composer-model-chip')).toBeEnabled());
+    await openModelMenuAndPick(user, 'Model B');
+    await waitFor(() => expect(resolveCalls.length).toBe(1));
+    resolveCalls[0]!.reject(new Error('resolve exploded'));
+    await waitFor(() => {
+      expect(screen.getByTestId('composer-resolve-error')).toHaveTextContent('resolve exploded');
+    });
   });
 });

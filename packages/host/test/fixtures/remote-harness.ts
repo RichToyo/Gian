@@ -18,6 +18,9 @@ import { TaskManager } from '../../src/task/manager.js';
 import { GianToolAccessController } from '../../src/tool/access.js';
 import { GianToolService } from '../../src/tool/service.js';
 import type { WsBroadcaster } from '../../src/web/ws-broadcast.js';
+import { TranslationService, type TranslateModel } from '../../src/translation/service.js';
+import { loadConfig, saveConfig } from '../../src/storage/config.js';
+import { DEFAULT_TRANSLATION_PREFERENCES } from '@gian/shared';
 import { MemoryRemoteIdentity } from '../../src/remote/identity.js';
 import { RemoteRuntime } from '../../src/remote/runtime.js';
 import { defaultRemoteDeviceGrants } from '../../src/remote/grants.js';
@@ -37,10 +40,31 @@ export const HARNESS_PROXY_LOGO = {
   mediaType: 'image/png' as const,
 };
 
+export const HARNESS_TRANSLATION_PREFERENCES = {
+  ...DEFAULT_TRANSLATION_PREFERENCES,
+  agent_id: HARNESS_AGENT.id,
+  model: 'luna',
+};
+
+/** Deterministic translation model: decodes the prompt's sources JSON and
+ *  prefixes each string. Mutable so a test can swap behavior per case. */
+export function createHarnessTranslationModel(calls?: string[]): TranslateModel {
+  return async (_preferences, prompt) => {
+    calls?.push(prompt);
+    const line = prompt.trim().split('\n').at(-1) ?? '{}';
+    const sources = (JSON.parse(line) as { sources?: string[] }).sources ?? [];
+    return JSON.stringify({ translations: sources.map(source => `${String.fromCodePoint(0x8bd1)}:${source}`) });
+  };
+}
+
 class FakeProxyClient implements ProxyClient {
   readonly executor = 'claude' as const;
   notificationHandlers: NotificationHandler[] = [];
   startTurnCalls: StartTurnParams[] = [];
+  /** Tests opt into steer support explicitly; off by default so existing
+   *  harness behavior (no turn.steer advertised) is unchanged. */
+  steerAdvertised = false;
+  steerCalls: Array<{ sessionId: string; input: unknown }> = [];
 
   isExited() { return false; }
   async initialize() {
@@ -48,7 +72,7 @@ class FakeProxyClient implements ProxyClient {
       protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
       plugin: { id: 'claude', name: 'Claude', version: 'test' },
       process: { scope: 'session' as const },
-      capabilities: {},
+      capabilities: this.steerAdvertised ? { 'turn.steer': {} } : {},
     };
   }
   async catalog() {
@@ -97,6 +121,9 @@ class FakeProxyClient implements ProxyClient {
     };
   }
   async interruptTurn() {}
+  async steerTurn(params: { sessionId: string; input: unknown }) {
+    this.steerCalls.push({ sessionId: params.sessionId, input: params.input });
+  }
   async respondInteraction() {}
   async closeSession() {}
   async shutdown() {}
@@ -161,7 +188,7 @@ function agentStatus(): UserAgentStatus {
   };
 }
 
-export function setupRemoteHarness() {
+export function setupRemoteHarness(options?: { translationModel?: TranslateModel }) {
   const dir = mkdtempSync(join(tmpdir(), 'gian-remote-'));
   const previousDataDir = process.env['GIAN_DATA_DIR'];
   process.env['GIAN_DATA_DIR'] = dir;
@@ -225,6 +252,9 @@ export function setupRemoteHarness() {
   const access = new GianToolAccessController(tool, db);
   const identity = new MemoryRemoteIdentity();
   const clock = { nowMs: Date.now() };
+  saveConfig(db, { translation: HARNESS_TRANSLATION_PREFERENCES });
+  const translations = new TranslationService(db, options?.translationModel ?? createHarnessTranslationModel());
+  sessions.setTranslationService(translations);
   const runtime = new RemoteRuntime({
     db,
     sessions,
@@ -237,18 +267,21 @@ export function setupRemoteHarness() {
     now: () => new Date(clock.nowMs),
     listAgents: () => [HARNESS_AGENT],
     hostEvents: broadcaster,
+    translation: translations,
+    translationPreferences: () => loadConfig(db).translation ?? HARNESS_TRANSLATION_PREFERENCES,
     proxyLogo: async (proxy, variant) => {
       if (proxy !== HARNESS_AGENT.proxy || (variant !== 'light' && variant !== 'dark')) return null;
       const sha256 = createHash('sha256').update(HARNESS_PROXY_LOGO.bytes).digest('hex');
       return { bytes: HARNESS_PROXY_LOGO.bytes, mediaType: HARNESS_PROXY_LOGO.mediaType, sha256 };
     },
   });
-  return { dir, db, workspaceId, taskId, proxy, sessions, tasks, tool, access, runtime, identity, approvals, broadcaster, previousDataDir, clock };
+  return { dir, db, workspaceId, taskId, proxy, sessions, tasks, tool, access, runtime, identity, approvals, broadcaster, translations, previousDataDir, clock };
 }
 
 export function teardownRemoteHarness(context: ReturnType<typeof setupRemoteHarness>): void {
   context.runtime.close();
   context.tool.close();
+  void context.translations.shutdown();
   context.db.close();
   rmSync(context.dir, { recursive: true, force: true });
   if (context.previousDataDir === undefined) delete process.env['GIAN_DATA_DIR'];

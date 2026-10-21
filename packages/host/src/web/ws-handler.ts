@@ -503,6 +503,8 @@ async function dispatch(
         undefined,
         msg.context_items,
         msg.composer_document,
+        undefined,
+        msg.translation_id,
       );
       return;
     }

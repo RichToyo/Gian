@@ -516,7 +516,10 @@ export class RemoteControllerHub {
     } | undefined;
     if (existing && (existing.method !== 'session.send' || existing.input_json !== serialized || existing.local_session_id !== localId
       || existing.binding_revision !== binding.revision)) throw new RemoteProtocolError('PRECONDITION_FAILED', 'send request changed');
-    if (existing?.result_json) { await this.sync(localId); this.broadcastTranslatedHistory(localId); return; }
+    if (existing?.result_json) {
+      await this.syncSendReceipt(localId, JSON.parse(existing.result_json) as { delivery_id?: string; delivery_state?: string });
+      return;
+    }
     if (existing && existing.browser_id !== client.environment.browser_id) {
       throw new RemoteProtocolError('UNKNOWN_OUTCOME', 'pairing changed; reconcile execution history before sending again');
     }
@@ -542,8 +545,35 @@ export class RemoteControllerHub {
     this.db.prepare('UPDATE remote_execution_send_requests SET result_json = ? WHERE request_id = ?')
       .run(JSON.stringify(result), requestId);
     this.linkToolDeliveries(localId);
-    await this.sync(localId);
-    this.broadcastTranslatedHistory(localId);
+    await this.syncSendReceipt(localId, result as { delivery_id?: string; delivery_state?: string });
+  }
+
+  /** Restore the ws-handler ordering contract for remote sends: the canonical
+   *  user_message broadcast must precede the send's operation result. Never
+   *  join an in-flight poller sync — its execution.sync response may predate
+   *  the remote journaling of this send — and retry briefly when the fresh
+   *  replica still lacks the journaled delivery. A queued delivery has no
+   *  user_message yet; its queue:updated broadcast inside the sync carries
+   *  the ordering instead. */
+  private async syncSendReceipt(localId: string, receipt: { delivery_id?: string; delivery_state?: string }): Promise<void> {
+    const deliveryId = receipt.delivery_state === 'queued' ? undefined : receipt.delivery_id;
+    for (let attempt = 1; ; attempt += 1) {
+      await this.syncing.get(localId)?.catch(() => {});
+      await this.sync(localId);
+      this.broadcastTranslatedHistory(localId);
+      if (!deliveryId || this.replicaHasDelivery(localId, deliveryId)) return;
+      if (attempt >= 3) {
+        console.error('[remote] send delivery not journaled after fresh syncs; the poller reconciles it later', deliveryId);
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+  }
+
+  private replicaHasDelivery(localId: string, deliveryId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM remote_execution_replica_events
+      WHERE local_session_id = ? AND json_extract(item_json, '$.item.delivery_id') = ? LIMIT 1`)
+      .get(localId, deliveryId));
   }
 
   private async reconcileTranslationReceipts(localId: string, client: RemoteControllerClient, revision: number): Promise<void> {

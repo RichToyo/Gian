@@ -7,6 +7,46 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.8] - 2026-10-21
+
+### Added
+
+- Synchronize conversation translation settings and results between Gian and
+  compatible Remote Web clients, including pending sends, reconnect recovery,
+  and per-view translation expansion.
+- Distribute the Gian Tool Skill separately from the App through the Gian
+  release repository; installing the Skill does not launch the App or configure
+  an external MCP client.
+
+### Changed
+
+- Use RichToyo/Gian for App releases and RichToyo/Gian-Proxies for official
+  Proxy and signed Catalog discovery. Existing signed assets retain their
+  immutable RichLogic download URLs and the existing Catalog signing identity.
+- Make product UI and public source English-only and remove Appearance's
+  Language setting. Unicode user content and conversation translation remain
+  supported, including Chinese input and translation targets.
+- Share translation controls between local and Remote conversations, using a
+  globe icon for reading translations.
+
+### Fixed
+
+- Keep Remote translated sends aligned with their original messages and
+  transcript order without duplicate optimistic echoes.
+- Follow the Sidechat scroller, show Proxy-advertised extra options and model
+  resolution errors, and hide the panel after its last record closes.
+- Preserve macOS control-key editing and prevent Cmd+B/Cmd+I from toggling
+  composer formatting twice.
+
+### Known Limitations
+
+- Remote translation synchronization requires compatible Host and Remote Web
+  versions with the negotiated feature. Deploying or upgrading only one side
+  does not enable the complete workflow.
+- The new official Proxy source requires a published signed Catalog and
+  qualified assets in RichToyo/Gian-Proxies. Source synchronization alone does
+  not create these releases or migrate signing credentials.
+
 ## [0.6.7] - 2026-10-18
 
 ### Added

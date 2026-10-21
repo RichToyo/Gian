@@ -36,7 +36,7 @@ async function setup(t: TestContext) {
     serverFingerprint: environment.server_identity_fingerprint, installationId: generateCanonicalId(), accountId: '42',
     accountLogin: 'owner', token: 'fixture-only', expiresAt: Date.now() + 60_000 }, 'controller');
   const calls: Array<{ preferences: TranslationPreferences; prompt: string }> = [];
-  const controls = { loseSendReply: false, failTranslation: false, duplicatePage: false };
+  const controls = { loseSendReply: false, failTranslation: false, duplicatePage: false, holdNextSync: null as Promise<void> | null };
   const translation = new TranslationService(f.db, async (preferences, prompt) => {
     calls.push({ preferences, prompt });
     if (controls.failTranslation) throw new Error('local model unavailable');
@@ -50,9 +50,16 @@ async function setup(t: TestContext) {
   t.mock.method(hub, 'client', () => ({ environment, connected: true,
     async request(method: RemoteMethod, params: Record<string, unknown>, commandId?: string) {
       requests.push({ method, params, commandId });
-      if (method === 'execution.sync') return f.runtime.executions.sync(device, {
-        session_id: remote.id, after: controls.duplicatePage ? 0 : Number(params.after ?? 0), stream_id: params.stream_id as string | undefined,
-      });
+      if (method === 'execution.sync') {
+        // Snapshot BEFORE any hold, so a held response predates later journaling.
+        const snapshot = f.runtime.executions.sync(device, {
+          session_id: remote.id, after: controls.duplicatePage ? 0 : Number(params.after ?? 0), stream_id: params.stream_id as string | undefined,
+        });
+        const hold = controls.holdNextSync;
+        controls.holdNextSync = null;
+        if (hold) await hold;
+        return snapshot;
+      }
       const result = await f.runtime.commands.execute(device, command(method, params, commandId));
       if (!result.ok) throw new Error(result.error?.message ?? 'remote request failed');
       if (method === 'session.send' && controls.loseSendReply) {
@@ -220,5 +227,58 @@ test('ambiguous legacy turn-level delivery identities never invent a source-lang
     const projected = f.hub.historyEvent(f.localId, duplicate);
     assert.equal(projected.data.text, raw.item.text);
     assert.equal(projected.data.translation, undefined);
+  } finally { await f.cleanup(); }
+});
+
+test('the canonical translated user_message broadcasts before the send result when a poller sync is in flight', async t => {
+  const f = await setup(t);
+  try {
+    const sendId = generateCanonicalId();
+    let release!: () => void;
+    f.controls.holdNextSync = new Promise<void>(resolve => { release = resolve; });
+    const poller = f.hub.sync(f.localId);
+    // The in-flight sync holds a snapshot captured before the send journals.
+    for (let attempt = 0; attempt < 100 && !f.requests.some(request => request.method === 'execution.sync'); attempt++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const sending = f.send(String.fromCodePoint(0x8fdf, 0x5230, 0x7684, 0x4e2d, 0x6587), { send_id: sendId });
+    // The relay round-trips while the in-flight sync response is still stale.
+    for (let attempt = 0; attempt < 100 && !f.requests.some(request => request.method === 'session.send'); attempt++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    release();
+    await sending;
+    await poller;
+    const canonical = f.broadcasts.filter(message => message.type === 'event' && message.event === 'user_message');
+    assert.ok(canonical.length > 0, 'the canonical user_message broadcast precedes the send result');
+    assert.equal(canonical[0]!.data.send_id, sendId);
+    assert.equal(canonical[0]!.data.text, String.fromCodePoint(0x8fdf, 0x5230, 0x7684, 0x4e2d, 0x6587));
+    assert.ok(canonical[0]!.data.translation);
+  } finally { await f.cleanup(); }
+});
+
+test('a send whose delivery journals only after the first post-send sync still broadcasts before its result', async t => {
+  const f = await setup(t);
+  try {
+    const sendId = generateCanonicalId();
+    const held: EventEnvelope[] = [];
+    let holding = true;
+    const original = f.runtime.executions.append.bind(f.runtime.executions);
+    t.mock.method(f.runtime.executions, 'append', (event: EventEnvelope) => {
+      if (holding && event.event === 'user_message') { held.push(event); return; }
+      original(event);
+    });
+    setTimeout(() => {
+      holding = false;
+      for (const event of held) original(event);
+    }, 100).unref();
+    await f.send(String.fromCodePoint(0x7a0d, 0x540e, 0x7684, 0x4e2d, 0x6587), { send_id: sendId });
+    const canonical = f.broadcasts.filter(message => message.type === 'event' && message.event === 'user_message');
+    assert.ok(canonical.length > 0, 'the canonical user_message broadcast precedes the send result');
+    assert.equal(canonical[0]!.data.send_id, sendId);
+    assert.equal(canonical[0]!.data.text, String.fromCodePoint(0x7a0d, 0x540e, 0x7684, 0x4e2d, 0x6587));
+    const sendIndex = f.requests.findIndex(request => request.method === 'session.send');
+    const postSendSyncs = f.requests.slice(sendIndex + 1).filter(request => request.method === 'execution.sync').length;
+    assert.ok(postSendSyncs >= 2, 'the post-send sync retries until the delivery is journaled');
   } finally { await f.cleanup(); }
 });

@@ -98,6 +98,7 @@ export function Transcript({
   forkAtTurn, selectionActions, inlineEventDetails = false,
   scheduleFocus = null, onConsumeScheduleFocus,
   messageFocus = null, onConsumeMessageFocus, onLoadMessageContext, findActive = false,
+  scrollerSelector,
   returnToLatestGeneration = 0,
   approvalsLockedReason = null,
   translation,
@@ -166,6 +167,9 @@ export function Transcript({
   returnToLatestGeneration?: number;
   /** Conversation find owns the scroll position — suppress re-pinning. */
   findActive?: boolean;
+  /** Scrolling-ancestor selector forwarded to chat-ui (e.g. the Side Chat
+   *  dock's `.sidechat-scroll`; the session view keeps `.main-scroll`). */
+  scrollerSelector?: string;
   /** Read-only transcript (archived, Issue #168): approval/question cards
    *  render but cannot submit; the reason replaces the resolving note. */
   approvalsLockedReason?: string | null;
@@ -350,6 +354,7 @@ export function Transcript({
       messageFocus={chatMessageFocus}
       onConsumeMessageFocus={onConsumeMessageFocus}
       findActive={findActive}
+      scrollerSelector={scrollerSelector}
     />
   );
 }

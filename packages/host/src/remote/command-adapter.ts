@@ -9,6 +9,7 @@ import {
   canonicalJson,
   isRemoteErrorCode,
   parseRemoteMethodParams,
+  redactRemoteConversationText,
   redactRemoteError,
   splitSnapshotParts,
   uuidV7TimestampMs,
@@ -18,6 +19,7 @@ import {
   type RemoteMethod,
   type RemoteSession,
   type RemoteStateSnapshot,
+  type RemoteTranslationState,
   type StateSnapshotPart,
 } from '@gian/remote-protocol';
 import { writeFile } from 'node:fs/promises';
@@ -28,11 +30,16 @@ import type {
   GianToolResult,
   InputItem,
   MessageContextItem,
+  TranslationPreferences,
+  TranslationRecord,
 } from '@gian/shared';
+import { DEFAULT_TRANSLATION_PREFERENCES, isTranslationConfigured } from '@gian/shared';
 import { ensureSessionAttachmentDir } from '../storage/attachments.js';
+import type { TranslationService } from '../translation/service.js';
 import type { GianToolAccessController } from '../tool/access.js';
 import type { GianToolActor } from '../tool/credentials.js';
 import type { GianToolService } from '../tool/service.js';
+import type { GianToolMethod } from '@gian/shared';
 import type { SessionManager } from '../session/manager.js';
 import type { Db } from '../storage/db.js';
 import type { RemoteAuditCategory, RemoteMutationAudit } from './audit.js';
@@ -40,7 +47,7 @@ import type { RemoteAttachmentService } from './attachment-stream.js';
 import type { RemoteDeviceRecord } from './device-store.js';
 import type { RemoteFileRefService } from './file-ref.js';
 import type { RemoteExecutionJournal } from './execution-journal.js';
-import { RemoteProjector, assertNoLeak, remoteInteractionResourceId, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues } from './projection.js';
+import { RemoteProjector, assertNoLeak, projectRemoteTranslation, projectRemoteTranslationState, remoteInteractionResourceId, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues, REMOTE_TRANSLATION_INLINE_TEXT_LIMIT } from './projection.js';
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -65,6 +72,15 @@ export interface RemoteCommandAdapterDeps {
   pushSnapshotParts?: (deviceId: string, part: StateSnapshotPart) => Promise<void>;
   listAgents?: () => Array<{ id: string; proxy?: string; pluginId?: string }>;
   onSubscribe?: (deviceId: string, sessionId: string) => void;
+  /** Conversation translation (wire.conversation_translation). The adapter
+   *  reuses the exact same service entry points as the local HTTP routes. */
+  translation?: TranslationService;
+  /** Live Host translation preferences (loadConfig at call time). */
+  translationPreferences?: () => TranslationPreferences;
+  /** Settled remote translation request fan-out. Success carries the
+   *  persisted record (projected into the minimal DTO by the caller);
+   *  failure carries a redacted, display-safe error. */
+  onTranslationSettled?: (sessionId: string, requestId: string, outcome: { record?: TranslationRecord; error?: string }) => void;
   /** Branding bytes for one Proxy (manifest branding.logo). Null when the
    *  Proxy or the variant is unknown. Read-only; carries no device grant. */
   proxyLogo?: (proxy: string, variant: 'light' | 'dark') => Promise<{
@@ -85,6 +101,13 @@ export interface RemoteCommandHooks {
 }
 
 export class RemoteCommandAdapter {
+  /** In-flight translation requests by `sessionId:requestId`, so a retried
+   *  command (or a second view) never starts a duplicate model call. */
+  private readonly translationInflight = new Set<string>();
+  /** Bounded settled outcomes for translation.request_status recovery (LRU
+   *  via Map insertion order). */
+  private readonly translationOutcomes = new Map<string, { record?: TranslationRecord; error?: string }>();
+
   constructor(private readonly deps: RemoteCommandAdapterDeps) {}
 
   async execute(
@@ -135,7 +158,9 @@ export class RemoteCommandAdapter {
     const params = parseRemoteMethodParams(command.method, command.params);
     this.rejectCraftedFields(command.params);
     if (command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read'
-      && command.method !== 'proxy.logo' && command.method !== 'execution.list' && command.method !== 'execution.sync') {
+      && command.method !== 'proxy.logo' && command.method !== 'execution.list' && command.method !== 'execution.sync'
+      && command.method !== 'translation.state' && command.method !== 'translation.result_text'
+      && command.method !== 'translation.request_status' && command.method !== 'translation.cancel') {
       this.upsertLedger(device.id, command, 'accepted');
     }
     return { kind: 'accepted', params };
@@ -200,9 +225,9 @@ export class RemoteCommandAdapter {
       case 'state.refresh':
         return this.refresh(device, hooks);
       case 'session.subscribe':
-        return this.subscribe(device, command, params as { session_id: string });
+        return this.subscribe(device, command, params as { session_id: string }, hooks);
       case 'session.page':
-        return this.page(device, params as { session_id: string; turns?: number; cursor?: string });
+        return this.page(device, params as { session_id: string; turns?: number; cursor?: string }, hooks);
       case 'command.status':
         return this.status(device, params as { command_id: string });
       case 'session.create':
@@ -210,7 +235,7 @@ export class RemoteCommandAdapter {
       case 'session.update':
         return this.updateSession(device, command, params as Record<string, unknown>);
       case 'session.send':
-        return this.send(device, command, params as Record<string, unknown>);
+        return this.send(device, command, params as Record<string, unknown>, hooks);
       case 'session.stop':
         return this.stop(device, command, params as Record<string, unknown>);
       case 'queue.update':
@@ -220,6 +245,21 @@ export class RemoteCommandAdapter {
         return this.queue(device, command, method, params as Record<string, unknown>);
       case 'interaction.respond':
         return this.respond(device, command, params as Record<string, unknown>);
+      case 'translation.state':
+        return this.translationState(device, params as { session_id: string }, hooks);
+      case 'translation.set_auto':
+        return this.translationSetAuto(device, params as { session_id: string; enabled: boolean; expected_enabled?: boolean }, hooks);
+      case 'translation.request':
+        return this.translationRequest(device, params as {
+          session_id: string; request_id: string; purpose: 'send' | 'read';
+          text: string; source_id?: string; composer_document?: unknown;
+        }, hooks);
+      case 'translation.cancel':
+        return this.translationCancel(device, params as { session_id: string; request_id: string }, hooks);
+      case 'translation.result_text':
+        return this.translationResultText(device, params as { session_id: string; record_id: string; offset?: number }, hooks);
+      case 'translation.request_status':
+        return this.translationRequestStatus(device, params as { session_id: string; request_id: string }, hooks);
       case 'file.preview':
         return this.preview(device, params as { handle_id: string });
       case 'file.resolve': {
@@ -326,7 +366,8 @@ export class RemoteCommandAdapter {
     device: RemoteDeviceRecord,
     command: CommandRequest,
     params: { session_id: string },
-  ): { session: RemoteSession; cursor: string } {
+    hooks?: RemoteCommandHooks,
+  ): { session: RemoteSession; cursor: string; translation?: RemoteTranslationState } {
     this.assertVisibleSession(params.session_id, device);
     this.deps.db.prepare(
       `DELETE FROM remote_file_refs WHERE device_id = ? AND session_id != ?`,
@@ -334,18 +375,221 @@ export class RemoteCommandAdapter {
     this.deps.onSubscribe?.(device.id, params.session_id);
     void command;
     const session = this.deps.projector.projectSession(this.deps.sessions.getSession(params.session_id));
-    return { session, cursor: session.revision };
+    // Exported executions consume controller-prepared input: they get no
+    // translation state at all (ADR-0091 ownership), even when negotiated.
+    const exported = this.deps.db.prepare('SELECT 1 FROM remote_execution_exports WHERE session_id = ?')
+      .get(params.session_id);
+    const translation = !exported && this.deps.translation
+      && hooks?.wireFeatures?.includes('wire.conversation_translation')
+      ? this.translationStateFor(this.deps.translation, params.session_id)
+      : undefined;
+    return { session, cursor: session.revision, ...(translation ? { translation } : {}) };
   }
 
   private page(
     device: RemoteDeviceRecord,
     params: { session_id: string; turns?: number; cursor?: string },
+    hooks?: RemoteCommandHooks,
   ): unknown {
     this.assertVisibleSession(params.session_id, device);
     return this.deps.projector.transcriptPage(params.session_id, params.turns ?? 3, {
       cursor: params.cursor,
       deviceId: device.id,
+      includeTranslations: hooks?.wireFeatures?.includes('wire.conversation_translation') === true,
     });
+  }
+
+  // ── Conversation translation (wire.conversation_translation) ────────────
+
+  private requireTranslation(hooks: RemoteCommandHooks | undefined): TranslationService {
+    if (!hooks?.wireFeatures?.includes('wire.conversation_translation')) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'conversation translation was not negotiated');
+    }
+    if (!this.deps.translation) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'conversation translation is unavailable');
+    }
+    return this.deps.translation;
+  }
+
+  private requireDeviceGrant(device: RemoteDeviceRecord, method: GianToolMethod): void {
+    if (!device.grants.includes(method)) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'device grant missing');
+    }
+  }
+
+  /** Remote session visibility plus the ADR-0091 ownership rule: an exported
+   *  execution consumes controller-prepared input and never translates on
+   *  the execution Host. */
+  private assertTranslatableSession(sessionId: string, device: RemoteDeviceRecord): void {
+    this.assertVisibleSession(sessionId, device);
+    if (this.deps.db.prepare('SELECT 1 FROM remote_execution_exports WHERE session_id = ?').get(sessionId)) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'translation belongs to the controlling Host, not an exported execution');
+    }
+  }
+
+  private translationStateFor(service: TranslationService, sessionId: string): RemoteTranslationState {
+    const preferences = this.deps.translationPreferences?.() ?? { ...DEFAULT_TRANSLATION_PREFERENCES };
+    return projectRemoteTranslationState(service, sessionId, preferences, service.configRevision());
+  }
+
+  private translationState(
+    device: RemoteDeviceRecord,
+    params: { session_id: string },
+    hooks?: RemoteCommandHooks,
+  ): unknown {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.read');
+    this.assertTranslatableSession(params.session_id, device);
+    return this.translationStateFor(service, params.session_id);
+  }
+
+  private translationSetAuto(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; enabled: boolean; expected_enabled?: boolean; expected_revision?: number },
+    hooks?: RemoteCommandHooks,
+  ): unknown {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.update');
+    this.assertTranslatableSession(params.session_id, device);
+    const preferences = this.deps.translationPreferences?.() ?? { ...DEFAULT_TRANSLATION_PREFERENCES };
+    if (params.enabled && !isTranslationConfigured(preferences)) {
+      throw new RemoteProtocolError('PRECONDITION_FAILED', 'Choose a translation Agent, model and languages in Settings first.');
+    }
+    if (params.expected_enabled !== undefined && service.enabled(params.session_id) !== params.expected_enabled) {
+      throw precondition('expected_enabled', String(service.enabled(params.session_id)));
+    }
+    if (params.expected_revision !== undefined && service.stateRevision(params.session_id) !== params.expected_revision) {
+      throw precondition('expected_revision', String(service.stateRevision(params.session_id)));
+    }
+    service.setEnabled(params.session_id, params.enabled);
+    // The persisted record is the authority; the confirmed state goes back
+    // in the result AND as a translation.updated event to every other view.
+    return this.translationStateFor(service, params.session_id);
+  }
+
+  private translationRequest(
+    device: RemoteDeviceRecord,
+    params: {
+      session_id: string; request_id: string; purpose: 'send' | 'read';
+      text: string; source_id?: string; composer_document?: unknown;
+    },
+    hooks?: RemoteCommandHooks,
+  ): { request_id: string; status: 'accepted' } {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.send');
+    this.assertTranslatableSession(params.session_id, device);
+    const key = `${params.session_id}:${params.request_id}`;
+    if (this.translationInflight.has(key)) {
+      // Retry of an in-flight request: same receipt, no duplicate model call.
+      return { request_id: params.request_id, status: 'accepted' };
+    }
+    const document = params.composer_document === undefined
+      ? undefined
+      : this.resolveDocument(device, params.composer_document, params.session_id);
+    this.translationInflight.add(key);
+    const preferences = this.deps.translationPreferences?.() ?? { ...DEFAULT_TRANSLATION_PREFERENCES };
+    // The receipt returns immediately; the settled outcome rides the
+    // translation.updated event stream under the same request_id, so a long
+    // model call never holds the per-device command chain or a read timeout.
+    void service.translate({
+      sessionId: params.session_id,
+      requestId: params.request_id,
+      text: params.text,
+      purpose: params.purpose,
+      ...(params.source_id ? { sourceId: params.source_id } : {}),
+      ...(document ? { document } : {}),
+    }, preferences).then(
+      record => {
+        this.rememberTranslationOutcome(key, { record });
+        this.deps.onTranslationSettled?.(params.session_id, params.request_id, { record });
+      },
+      error => {
+        const message = redactRemoteError(error instanceof Error ? error.message : 'Translation failed');
+        this.rememberTranslationOutcome(key, { error: message });
+        this.deps.onTranslationSettled?.(params.session_id, params.request_id, { error: message });
+      },
+    ).finally(() => this.translationInflight.delete(key));
+    return { request_id: params.request_id, status: 'accepted' };
+  }
+
+  private rememberTranslationOutcome(key: string, outcome: { record?: TranslationRecord; error?: string }): void {
+    this.translationOutcomes.delete(key);
+    this.translationOutcomes.set(key, outcome);
+    while (this.translationOutcomes.size > 1024) {
+      const oldest = this.translationOutcomes.keys().next().value;
+      if (oldest === undefined) break;
+      this.translationOutcomes.delete(oldest);
+    }
+  }
+
+  private translationCancel(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; request_id: string },
+    hooks?: RemoteCommandHooks,
+  ): { ok: true } {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.send');
+    this.assertVisibleSession(params.session_id, device);
+    service.cancel(params.session_id, params.request_id);
+    return { ok: true };
+  }
+
+  /** Page one chunk of a descriptor-only translation's complete text. The
+   *  paged string is the SAME redacted full string the descriptor's
+   *  text_length/text_sha256 describe — offsets, chunk content and the final
+   *  hash all line up, and no chunk can expose what the inline path would
+   *  have redacted. Chunks are bounded by the wire text limit and never
+   *  split a surrogate pair. */
+  private translationResultText(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; record_id: string; offset?: number },
+    hooks?: RemoteCommandHooks,
+  ): { text: string; next_offset?: number } {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.read');
+    this.assertTranslatableSession(params.session_id, device);
+    const record = service.get(params.record_id);
+    if (!record || record.sessionId !== params.session_id) {
+      throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'translation record not found');
+    }
+    const full = redactRemoteConversationText(record.text);
+    const offset = params.offset ?? 0;
+    if (offset < 0 || offset >= full.length) {
+      throw new RemoteProtocolError('INVALID_FRAME', 'offset out of range');
+    }
+    let end = Math.min(offset + REMOTE_TRANSLATION_INLINE_TEXT_LIMIT, full.length);
+    if (end < full.length) {
+      const code = full.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    }
+    const chunk = full.slice(offset, end);
+    return {
+      text: chunk,
+      ...(end < full.length ? { next_offset: end } : {}),
+    };
+  }
+
+  /** Terminal-status recovery for a request identity: the in-flight set, then
+   *  the bounded settled-outcome map, else 'unknown' (client resets the row
+   *  and offers retry instead of showing a permanent pending state). */
+  private translationRequestStatus(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; request_id: string },
+    hooks?: RemoteCommandHooks,
+  ): unknown {
+    this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.read');
+    this.assertTranslatableSession(params.session_id, device);
+    const key = `${params.session_id}:${params.request_id}`;
+    if (this.translationInflight.has(key)) return { state: 'pending' };
+    const outcome = this.translationOutcomes.get(key);
+    if (!outcome) return { state: 'unknown' };
+    this.translationOutcomes.delete(key);
+    this.translationOutcomes.set(key, outcome);
+    if (outcome.record) {
+      return { state: 'succeeded', record: projectRemoteTranslation(outcome.record) };
+    }
+    return { state: 'failed', error: outcome.error ?? 'Translation failed' };
   }
 
   private status(device: RemoteDeviceRecord, params: { command_id: string }): CommandStatusResult {
@@ -428,9 +672,20 @@ export class RemoteCommandAdapter {
     device: RemoteDeviceRecord,
     command: CommandRequest,
     params: Record<string, unknown>,
+    hooks?: RemoteCommandHooks,
   ): Promise<unknown> {
     this.assertVisibleSession(String(params['session_id']), device);
     const sessionId = String(params['session_id']);
+    if (params['translation_id'] !== undefined) {
+      // A send-gate receipt is only meaningful on a negotiated connection —
+      // never silently drop it into an untranslated dispatch.
+      if (!hooks?.wireFeatures?.includes('wire.conversation_translation')) {
+        throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'translated sending was not negotiated');
+      }
+      if (!this.deps.translation) {
+        throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'conversation translation is unavailable');
+      }
+    }
     const items = [
       ...(await this.resolveItems(device, params['items'], sessionId) ?? []),
       ...await this.resolveContextFiles(device, params['context_items'], sessionId),
@@ -446,6 +701,7 @@ export class RemoteCommandAdapter {
         ...(items.length ? { items } : {}),
         ...(contextItems ? { context_items: contextItems } : {}),
         ...(document ? { composer_document: document } : {}),
+        ...(params['translation_id'] !== undefined ? { translation_id: params['translation_id'] } : {}),
       });
     } catch (error) {
       this.unpinResolved(items);
@@ -901,7 +1157,11 @@ function isMutation(method: RemoteMethod): boolean {
     || method === 'queue.remove'
     || method === 'queue.clear'
     || method === 'queue.send_now'
-    || method === 'interaction.respond';
+    || method === 'interaction.respond'
+    // Ledger dedup: a retried translation command must never start a second
+    // paid model call or flip the persisted switch twice.
+    || method === 'translation.set_auto'
+    || method === 'translation.request';
 }
 
 function asRemoteError(error: { code: string; message: string }): { code: RemoteErrorCode; message: string } {

@@ -17,6 +17,11 @@ export interface QueueEntry {
   items?: InputItem[];
   contextItems?: MessageContextItem[];
   composerDocument?: ComposerDocument;
+  /** Explicit send intent that must survive the busy queue: a translation
+   *  receipt id, or 'original' for the deliberate untranslated bypass. When
+   *  absent, drain-time behavior is unchanged (translate when the switch is
+   *  on). Dropped if the entry's text is edited. */
+  translationId?: string;
   toolRequestId?: string;
   createdAt: number;
 }
@@ -31,6 +36,7 @@ interface QueueRow {
   sort_order: number;
   created_at: string;
   tool_request_id: string | null;
+  translation_id: string | null;
 }
 
 export class QueueRevisionConflict extends Error {
@@ -80,6 +86,7 @@ function rowToEntry(row: QueueRow): QueueEntry {
     ...(contextItems ? { contextItems } : {}),
     ...(composerDocument ? { composerDocument } : {}),
     ...(row.tool_request_id ? { toolRequestId: row.tool_request_id } : {}),
+    ...(row.translation_id ? { translationId: row.translation_id } : {}),
     createdAt: Date.parse(row.created_at),
   };
 }
@@ -130,6 +137,8 @@ export class QueueManager {
       toolRequestId?: string;
       contextItems?: MessageContextItem[];
       composerDocument?: ComposerDocument;
+      /** Explicit send intent ('original' bypass or a translation receipt id). */
+      translationId?: string;
       expectedRevision?: string;
     } = {},
   ): QueueEntry {
@@ -143,6 +152,7 @@ export class QueueManager {
         toolRequestId: entry.toolRequestId,
         contextItems: entry.contextItems,
         composerDocument: entry.composerDocument,
+        translationId: entry.translationId,
         createdAt: entry.createdAt,
       }))
     ));
@@ -157,7 +167,9 @@ export class QueueManager {
     }, result => result !== null);
   }
 
-  /** Update an entry's text in place — its position (sort_order) is kept. */
+  /** Update an entry's text in place — its position (sort_order) is kept. An
+   *  edit invalidates a bound translation receipt (the text no longer matches
+   *  it) but keeps the deliberate 'original' bypass. */
   update(sessionId: string, queueId: string, text: string, expectedRevision?: string): QueueEntry | null {
     return this.mutate(sessionId, expectedRevision, () => {
       const current = this.get(sessionId, queueId);
@@ -168,9 +180,13 @@ export class QueueManager {
         if (compiled) return compileContextIntoInput(text, undefined, compiled.contextItems)[0]!;
         return item.text === current.text ? { ...item, text } : item;
       });
-      this.db.prepare('UPDATE queue_entries SET text = ?, items_json = ? WHERE session_id = ? AND id = ?')
-        .run(text, items ? JSON.stringify(items) : null, sessionId, queueId);
-      return { ...current, text, ...(items ? { items } : {}) };
+      const translationId = current.translationId === 'original' ? 'original' : null;
+      this.db.prepare('UPDATE queue_entries SET text = ?, items_json = ?, translation_id = ? WHERE session_id = ? AND id = ?')
+        .run(text, items ? JSON.stringify(items) : null, translationId, sessionId, queueId);
+      const next: QueueEntry = { ...current, text, ...(items ? { items } : {}) };
+      if (translationId) next.translationId = translationId;
+      else delete next.translationId;
+      return next;
     }, result => result !== null);
   }
 
@@ -244,6 +260,7 @@ export class QueueManager {
       toolRequestId?: string;
       contextItems?: MessageContextItem[];
       composerDocument?: ComposerDocument;
+      translationId?: string;
       createdAt?: number;
     },
   ): QueueEntry {
@@ -264,8 +281,8 @@ export class QueueManager {
       .prepare(
         `INSERT INTO queue_entries
           (id, session_id, text, items_json, context_items_json, composer_document_json,
-           sort_order, created_at, tool_request_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           sort_order, created_at, tool_request_id, translation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -277,6 +294,7 @@ export class QueueManager {
         sortOrder,
         now,
         options.toolRequestId ?? null,
+        options.translationId ?? null,
       );
     return rowToEntry({
       id,
@@ -288,6 +306,7 @@ export class QueueManager {
       sort_order: sortOrder,
       created_at: now,
       tool_request_id: options.toolRequestId ?? null,
+      translation_id: options.translationId ?? null,
     });
   }
 }

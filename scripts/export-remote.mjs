@@ -54,6 +54,10 @@ export function exportRemote({ source = root, output, revision = 'HEAD', working
   const release = JSON.parse(files.get('release.json')?.bytes ?? 'null');
   if (!release || !/^\d+\.\d+\.\d+$/.test(release.version)) throw new Error('Missing stable Remote release configuration');
   const protocol = validateProtocolDependency(protocolCoordinate ?? JSON.parse(files.get('protocol-package.json')?.bytes ?? 'null'));
+  const protocolSource = JSON.parse(readSource('packages/remote-protocol/package.json'));
+  if (protocol.version !== protocolSource.version) {
+    throw new Error('Publish the selected Remote Protocol source version and import its verified coordinate before exporting Remote');
+  }
   const putJson = (path, value) => files.set(path, { bytes: Buffer.from(JSON.stringify(value, null, 2) + '\n'), mode: 0o644 });
   putJson('protocol-package.json', protocol);
   for (const name of ['remote-server', 'remote-web']) {

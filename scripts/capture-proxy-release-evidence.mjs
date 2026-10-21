@@ -13,7 +13,7 @@ const repository = 'RichLogic/Gian-Proxies';
 export const proxyReleaseNotes = {
   claude: {
     id: 'claude', directory: 'claude',
-    text: 'Update the managed Claude Code Runtime to 2.1.302 (promoted to /latest, npm latest and GitHub latest on 2026-10-16; SHA-256 and size verified against the official manifest). Upstream 2.1.302 has no wire-protocol or spawn-surface changes; every flag the adapter spawns or parses was re-verified on the new binary. The wire protocol range is unchanged. Artifacts pass hosted qualification; real model turns were not run for this release.',
+    text: 'Update the managed Claude Code Runtime to 2.1.304 (promoted to /latest and /stable, npm latest and GitHub latest; SHA-256 and size verified against the official manifest). No documented headless spawn/wire compatibility changes were found in the official 2.1.304 changelog; the nine selected startup flags the adapter spawns or parses were verified on the new binary. Authenticated wire/Provider turns are NOT_RUN. The wire protocol range is unchanged. Artifacts pass hosted qualification.',
   },
   codex: {
     id: 'codex', directory: 'codex',
@@ -21,9 +21,7 @@ export const proxyReleaseNotes = {
   },
   dsh: {
     id: 'ai.deepseek.harness', directory: 'ai.deepseek.harness',
-    // Next publish copy. changelog.md's top snapshot stays the published
-    // Proxy 0.3.3 / Runtime 0.1.5-rc.3 projection until this capture runs.
-    text: 'Support DeepSeek Harness 0.2.0-rc.2: session logs move to V4, a saved model that is no longer advertised falls back to the current default with a prompt to reselect, and Side Chat plus native session fork are now available. Bundled Bridge is 0.1.6. Real model turns were not run for this release.',
+    text: 'Update the managed DeepSeek Harness to 0.2.1-rc.2 (now the npm latest dist-tag; upstream tag dsh-v0.2.1-rc.2). Exact npm package-payload comparison of the bridge-used surfaces: SESSION_FORMAT_VERSION stays 4 (no data migration), KNOWN_SESSION_EVENT_TYPES only gains job/registered, job/settled and working-directory/change (unknown durable events already project through the generic activity path), and cordis moves patch-only. The bundled Bridge moves to 0.1.7 (its peer range now explicitly admits both the 0.2.0 and 0.2.1 RC lines). Artifacts pass hosted qualification; real model turns were not run for this release.',
   },
   kimi: {
     id: 'kimi', directory: 'kimi',
@@ -33,9 +31,13 @@ export const proxyReleaseNotes = {
     id: 'grok', directory: 'grok',
     text: 'Update the managed Grok CLI to 1.0.62 (promoted to stable on x.ai/cli, the official GCS mirror and npm @xai-official/grok latest; bytes identical from x.ai and GCS). The spawn flags and ACP initialize contract are verified on the new binary (agentVersion 1.0.62, grokShell, unchanged capability shape; raw handshake evidence preserved); per-version notes for 1.0.53–1.0.62 are NOT_OBSERVED in the accessible official changelog, whose latest entry remains 1.0.52 — recorded honestly rather than blocking the promoted stable channel. Known limitation unchanged: native approval cards under auto/always_approve snapshots remain unverified (an authenticated session is required). The wire protocol range is unchanged. Artifacts pass hosted qualification; real model turns were not run for this release.',
   },
+  antigravity: {
+    id: 'io.gian.antigravity', directory: 'io.gian.antigravity',
+    text: 'Update the upstream Antigravity ACP Runtime to 1.4.1 (the current ACP registry version; the official dl.google.com ZIP passes strict pair validation with pinned bytes). The ACP initialize contract is re-verified: core session/prompt/MCP/auth capabilities are unchanged; 1.4.1 newly advertises optional _meta.antigravity metadata (tier, systemPrompt.append) that is not adopted as a Gian capability. The wire protocol range is unchanged. Artifacts pass hosted qualification; real model turns were not run for this release.',
+  },
   zcode: {
     id: 'com.zhipu.zcode', directory: 'com.zhipu.zcode',
-    text: 'Update the managed Runtime to reviewed ZCode v3.15.1 source aac4755 (upstream CLI still reports 0.16.9), retaining standalone authentication and model catalog integration. Fix native MCP forms: free-text inputs, optional fields, indexed answers for repeated questions, and exact string preservation. Artifacts pass hosted qualification; real model turns were not run for this release.',
+    text: "Update the managed Runtime to reviewed App-source 3.16.2 at immutable commit 3c5b227; CLI remains 0.17.0. The dependency lock, protocol entrypoint and database migration source are unchanged. Incorporate upstream temporary Bash-output preparation, fallback, cancellation and retention fixes, plugin-read concurrency improvements and read-only workflow children; retain the existing history-list fix and Gian capability boundaries. Selected source regressions pass and artifacts are hosted-qualified; real model turns were not run for this release.",
   },
 };
 
@@ -149,7 +151,7 @@ function capture(sequence, certificatePath, baseIndexPath, releaseDir, providers
           basis: 'verified-declaration',
         },
         companionDeclarations: provider === 'dsh'
-          ? [{ id: '@gian/dsh-bridge', version: '0.1.6', basis: 'bundled-package-source' }]
+          ? [{ id: '@gian/dsh-bridge', version: '0.1.7', basis: 'bundled-package-source' }]
           : [],
         protocolRange: manifest.protocol.range,
         manifestSchema: manifest.schemaVersion,

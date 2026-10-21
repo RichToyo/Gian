@@ -715,6 +715,10 @@ export class GianToolService {
       if (active) {
         if ((params.busy ?? 'queue') === 'fail') fail('SESSION_BUSY', 'Session already has an active Turn');
         if (params.busy === 'steer') {
+          // A prepared translation receipt binds one exact dispatch; steering
+          // has no receipt validation, so it is refused rather than silently
+          // dropped or double-translated.
+          if (params.translation_id) fail('SESSION_BUSY', 'A translated send cannot steer; send it to the queue instead');
           const steered = await this.deps.sessions.steerMessage(
             params.session_id,
             params.text,
@@ -726,6 +730,8 @@ export class GianToolService {
           delivery = this.ledger.updateDelivery(delivery.id, { state: 'steered', turnId: steered.turnId });
           return this.deliveryProjection(delivery)!;
         }
+        // Queueing preserves the explicit intent ('original' bypass or the
+        // receipt id) on the entry; drain dispatches exactly that.
         const entry = this.deps.sessions.enqueueMessage(
           params.session_id,
           params.text,
@@ -733,6 +739,8 @@ export class GianToolService {
           request.id,
           params.context_items,
           params.composer_document,
+          undefined,
+          params.translation_id,
         );
         delivery = this.ledger.updateDelivery(delivery.id, { state: 'queued', queueEntryId: entry.id });
         return this.deliveryProjection(delivery)!;
@@ -745,6 +753,9 @@ export class GianToolService {
         request.id,
         params.context_items,
         params.composer_document,
+        undefined,
+        undefined,
+        params.translation_id,
       );
       if (!receipt) fail('NOT_FOUND', `session not found: ${params.session_id}`);
       delivery = this.ledger.updateDelivery(delivery.id, { state: 'started', turnId: receipt.turnId, queueEntryId: null });

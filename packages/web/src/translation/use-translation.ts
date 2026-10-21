@@ -63,16 +63,26 @@ export function useTranslation(sessionId: string) {
   const requests = useRef(new Map<string, AbortController>());
   const sendId = useRef<string | null>(null);
   const alive = useRef(true);
+  /** Out-of-order guards: only the latest refresh may apply, and a state
+   *  whose switch revision is older than the last applied one never
+   *  overwrites it (a delayed read must not roll back a newer toggle). */
+  const refreshSeq = useRef(0);
+  const appliedRevision = useRef(-1);
+  const appliedConfigRevision = useRef(-1);
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
     try {
       const next = await loadTranslationState(sessionId);
       if (!next?.preferences || !Array.isArray(next.results)) throw new Error('Translation settings are unavailable.');
-      if (alive.current) {
-        setState(next);
-        setReady(true);
-        setError(next.enabled && !isTranslationConfigured(next.preferences) ? t('translation.configureFirst') : '');
-      }
-    } catch (error) { if (alive.current) setError(String(error)); }
+      if (!alive.current || seq !== refreshSeq.current) return;
+      if (typeof next.revision === 'number' && next.revision < appliedRevision.current) return;
+      if (typeof next.configRevision === 'number' && next.configRevision < appliedConfigRevision.current) return;
+      if (typeof next.revision === 'number') appliedRevision.current = next.revision;
+      if (typeof next.configRevision === 'number') appliedConfigRevision.current = next.configRevision;
+      setState(next);
+      setReady(true);
+      setError(next.enabled && !isTranslationConfigured(next.preferences) ? t('translation.configureFirst') : '');
+    } catch (error) { if (alive.current && seq === refreshSeq.current) setError(String(error)); }
   }, [sessionId, t]);
   useEffect(() => {
     alive.current = true;
@@ -90,10 +100,20 @@ export function useTranslation(sessionId: string) {
       clearPendingSend(sessionId);
     }
     void refresh();
+    // Host-pushed canonical changes (any view's toggle, automatic progress,
+    // a settled record, a Settings save). This is what keeps a page whose
+    // switch is OFF in sync — its 2s poll deliberately does not run there.
+    const onHostUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+      if (!alive.current) return;
+      if (!detail || detail.sessionId === '' || detail.sessionId === sessionId) void refresh();
+    };
+    window.addEventListener('gian:translation-updated', onHostUpdate);
     window.addEventListener('gian:translation-settings', refresh);
     window.addEventListener('focus', refresh);
     return () => {
       alive.current = false;
+      window.removeEventListener('gian:translation-updated', onHostUpdate);
       window.removeEventListener('gian:translation-settings', refresh);
       window.removeEventListener('focus', refresh);
       for (const [id, controller] of requests.current) {

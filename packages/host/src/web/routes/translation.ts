@@ -13,6 +13,8 @@ export function registerTranslationRoutes(app: Hono, db: Db, service: Translatio
   });
   app.get('/api/sessions/:sessionId/translation/state', c => c.json({
     enabled: service.enabled(c.req.param('sessionId')),
+    revision: service.stateRevision(c.req.param('sessionId')),
+    configRevision: service.configRevision(),
     results: service.list(c.req.param('sessionId')).filter(record => record.purpose === 'read' && !!record.sourceId),
     preferences: loadConfig(db).translation ?? DEFAULT_TRANSLATION_PREFERENCES,
     automatic: Object.fromEntries([...service.automatic].filter(([key]) => key.startsWith(`${c.req.param('sessionId')}:`))

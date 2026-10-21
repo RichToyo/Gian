@@ -32,6 +32,10 @@ function perform<T>(dispatch: OperationDispatcher['dispatch'] | null | undefined
 
 export interface TranslationState {
   enabled: boolean;
+  /** Monotonic switch revision — stale reads must not overwrite newer state. */
+  revision?: number;
+  /** Host-wide translation-preferences revision (Settings saves). */
+  configRevision?: number;
   preferences: TranslationPreferences;
   results: TranslationRecord[];
   automatic: Record<string, { pending: boolean; error?: string }>;

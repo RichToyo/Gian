@@ -1,5 +1,33 @@
 # Remote Protocol package
 
+## [1.4.0]
+
+- Adds conversation translation under the new `wire.conversation_translation`
+  capability: a minimal display DTO (`remoteTranslationSchema`), per-session
+  small state with ordered versions — a monotonic `revision` for the switch,
+  a Host-wide `config_revision` for saved preferences, and an
+  `automatic_revision`/`automatic_epoch` pair shared by wholesale states and
+  live deltas (deltas advance the view's version; stale snapshots or
+  ledger-replayed results never resurrect a settled pending row, and a
+  retired Host epoch never rolls back the adopted one) — the `translation.state` / `translation.set_auto` /
+  `translation.request` / `translation.cancel` / `translation.result_text` /
+  `translation.request_status` commands, a gated optional `translation_id`
+  receipt on `session.send`, sent-translation summaries on user transcript
+  items, reading translations on transcript pages, and `translation.updated`
+  events. Texts larger than the wire bound ship as descriptors
+  (`text_length` + `text_sha256`) paged in full through
+  `translation.result_text` — a prefix is never presented as complete.
+  Request outcomes are recoverable by request identity
+  (`translation.request_status`), so a lost settle event leaves no permanent
+  pending state. Hosts send every new field, event kind and command response
+  only to connections that negotiated the capability; legacy (no-hello) and
+  non-negotiated peers receive byte-identical frames. The DTO deliberately
+  omits Agent/model configuration, Composer documents, local paths and
+  provider errors.
+- Hello negotiation maximum minor version is now 3 (minimum stays 1).
+- Backward compatible with 1.3.0 peers: no existing schema, method or
+  capability shape changed.
+
 ## [1.3.0]
 
 - Adds an optional `host.locale` field to state snapshots so Remote Web can

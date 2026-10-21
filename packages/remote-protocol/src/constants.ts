@@ -4,7 +4,7 @@ export const REMOTE_PROTOCOL = 'gian.remote/1' as const;
 
 export const REMOTE_MAJOR_VERSION = 1 as const;
 export const REMOTE_MIN_MINOR_VERSION = 1 as const;
-export const REMOTE_MAX_MINOR_VERSION = 2 as const;
+export const REMOTE_MAX_MINOR_VERSION = 3 as const;
 
 export const WIRE_FEATURES = [
   'wire.snapshot_parts',
@@ -14,6 +14,11 @@ export const WIRE_FEATURES = [
   /** Snapshot `host.locale` (the Host UI locale) may be sent only when this
    *  feature was negotiated; older clients parse snapshots closed. */
   'wire.host_locale',
+  /** Conversation translation: per-session auto-translate state, minimal
+   *  display DTOs on transcript items/pages, translation.* commands and
+   *  translation.updated events. Sent only when negotiated; older clients
+   *  parse every frame closed. */
+  'wire.conversation_translation',
 ] as const;
 
 export const REMOTE_METHODS = [
@@ -36,6 +41,12 @@ export const REMOTE_METHODS = [
   'queue.clear',
   'queue.send_now',
   'interaction.respond',
+  'translation.state',
+  'translation.set_auto',
+  'translation.request',
+  'translation.cancel',
+  'translation.result_text',
+  'translation.request_status',
   'file.preview',
   'file.resolve',
   'file.tree',

@@ -9,18 +9,24 @@ import {
   type RemoteAttention,
   type RemoteInteraction,
   type RemoteQueueEntry,
+  type RemoteSentTranslation,
   type RemoteSession,
   type RemoteStateSnapshot,
   type RemoteTask,
   type RemoteTranscriptItem,
+  type RemoteTranslation,
+  type RemoteTranslationState,
 } from '@gian/remote-protocol';
 import {
   stripGianRolePrefix,
   stripManagerSystemPrefix,
+  isTranslationConfigured,
   type EventEnvelope,
   type InputItem,
   type MessageContextItem,
   type Session,
+  type TranslationPreferences,
+  type TranslationRecord,
   type UserAgent,
 } from '@gian/shared';
 import type { ApprovalRecord } from '../approval/manager.js';
@@ -80,6 +86,87 @@ export interface RemoteProjectionDeps {
   attachments?: RemoteAttachmentService;
   fileRefs?: RemoteFileRefService;
   workspacePath?: (sessionId: string) => string | null;
+  /** Canonical translation records, projected into minimal display DTOs for
+   *  negotiated connections. Absent keeps every translation field off. */
+  translations?: { list(sessionId: string): TranslationRecord[] };
+}
+
+/** Wire text bound shared by every conversation string on the Remote
+ *  protocol. A translation is served inline ONLY when complete within it;
+ *  larger results ship as descriptors paged through translation.result_text. */
+export const REMOTE_TRANSLATION_INLINE_TEXT_LIMIT = 16_000;
+
+/** Full-fidelity text payload: inline when complete, descriptor otherwise. */
+function translationTextPayload(text: string): { text?: string; text_length: number; text_sha256: string } {
+  const safe = redactRemoteConversationText(text);
+  const payload = {
+    text_length: safe.length,
+    text_sha256: createHash('sha256').update(safe).digest('hex'),
+  };
+  return safe.length <= REMOTE_TRANSLATION_INLINE_TEXT_LIMIT ? { ...payload, text: safe } : payload;
+}
+
+/** Minimal display DTO for one canonical record: no Agent id, model,
+ *  Composer document, or provider error crosses the relay. */
+export function projectRemoteTranslation(record: TranslationRecord): RemoteTranslation {
+  return {
+    id: record.id,
+    session_id: record.sessionId,
+    purpose: record.purpose,
+    ...(record.sourceId ? { source_id: record.sourceId } : {}),
+    target_language: remoteName(record.targetLanguage),
+    ...translationTextPayload(record.text),
+    source_sha256: createHash('sha256').update(record.sourceText).digest('hex'),
+  };
+}
+
+/** Inline send-translation summary for a user transcript item, from the
+ *  canonical user event's receipt payload. */
+export function projectRemoteSentTranslation(value: unknown): RemoteSentTranslation | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as { id?: unknown; text?: unknown; targetLanguage?: unknown };
+  if (typeof record.text !== 'string' || !record.text
+    || typeof record.targetLanguage !== 'string' || typeof record.id !== 'string') return null;
+  return {
+    id: record.id,
+    ...translationTextPayload(record.text),
+    target_language: remoteName(record.targetLanguage),
+  };
+}
+
+/** Per-session small translation state (switch, Host-side configurability,
+ *  languages, automatic progress). Shared by session.subscribe, the
+ *  translation.state command, and translation.updated events. */
+export function projectRemoteTranslationState(
+  service: {
+    enabled(sessionId: string): boolean;
+    stateRevision?(sessionId: string): number;
+    configRevision?(): number;
+    automaticRevision?(sessionId: string): number;
+    automatic: ReadonlyMap<string, { pending: boolean; error?: string }>;
+    readonly automaticEpoch?: string;
+  },
+  sessionId: string,
+  preferences: TranslationPreferences,
+  configRevision = 0,
+): RemoteTranslationState {
+  return {
+    enabled: service.enabled(sessionId),
+    configured: isTranslationConfigured(preferences),
+    sending_language: preferences.sending_language,
+    reading_language: preferences.reading_language,
+    revision: service.stateRevision?.(sessionId) ?? 0,
+    config_revision: configRevision,
+    automatic_revision: service.automaticRevision?.(sessionId) ?? 0,
+    automatic_epoch: service.automaticEpoch ?? 'unknown',
+    automatic: [...service.automatic]
+      .filter(([key]) => key.startsWith(`${sessionId}:`))
+      .map(([key, value]) => ({
+        source_id: key.slice(sessionId.length + 1),
+        pending: value.pending,
+        ...(value.error ? { error: redactRemoteText(value.error).slice(0, 16_000) } : {}),
+      })),
+  };
 }
 
 /** Stable wire identity; Host and Provider records keep their original ids. */
@@ -408,25 +495,41 @@ export class RemoteProjector {
   transcriptPage(sessionId: string, turns = 3, options: {
     cursor?: string;
     deviceId?: string;
+    /** Negotiated wire.conversation_translation: attach sent translations on
+     *  user items and the page's reading translations. */
+    includeTranslations?: boolean;
   } = {}): {
     session_id: string;
     cursor?: string;
     has_more: boolean;
     items: RemoteTranscriptItem[];
+    translations?: RemoteTranslation[];
   } {
     const beforeTurn = options.cursor === undefined ? null : parseTranscriptCursor(options.cursor);
     const page = this.deps.sessions.listEventPage(sessionId, beforeTurn, turns);
     const projectedItems = page.events.flatMap((event) => {
-      const projected = this.projectTranscriptEvent(event, options.deviceId);
+      const projected = this.projectTranscriptEvent(event, options.deviceId, {
+        translation: options.includeTranslations === true,
+      });
       return projected ? [projected] : [];
     });
     const items = capRemoteTranscriptItems(projectedItems);
+    let translations: RemoteTranslation[] | undefined;
+    if (options.includeTranslations && this.deps.translations) {
+      const turnKeys = new Set(page.events.map(event => `turn:${Number.isSafeInteger(event.turn) ? event.turn : 0}`));
+      translations = this.deps.translations.list(sessionId)
+        .filter(record => record.purpose === 'read' && record.sourceId !== undefined && turnKeys.has(record.sourceId))
+        .map(record => projectRemoteTranslation(record))
+        .slice(0, MAX_ARRAY_ITEMS);
+    }
     assertNoLeak(items);
+    if (translations?.length) assertNoLeak(translations);
     return {
       session_id: sessionId,
       items,
       has_more: page.hasMore,
       ...(page.nextCursor !== null ? { cursor: String(page.nextCursor) } : {}),
+      ...(translations?.length ? { translations } : {}),
     };
   }
 
@@ -435,7 +538,7 @@ export class RemoteProjector {
    * vocabulary. Unknown and non-transcript display events are omitted instead
    * of being mislabeled as generic notices.
    */
-  projectTranscriptEvent(event: EventEnvelope, deviceId?: string): RemoteTranscriptItem | null {
+  projectTranscriptEvent(event: EventEnvelope, deviceId?: string, features?: { translation?: boolean }): RemoteTranscriptItem | null {
     const data = event.display?.data as unknown as Record<string, unknown> | undefined;
     const type = event.display?.type;
     const turn = Number.isSafeInteger(event.turn) && event.turn >= 0 ? event.turn : 0;
@@ -461,12 +564,14 @@ export class RemoteProjector {
           .get(event.data.tool_request_id, event.session_id)
         : this.deps.db.prepare(`SELECT d.id FROM turns t JOIN tool_deliveries d ON d.request_id = t.tool_request_id
           WHERE t.session_id = ? AND t.turn_number = ? LIMIT 1`).get(event.session_id, turn)) as { id: string } | undefined;
+      const sentTranslation = features?.translation ? projectRemoteSentTranslation(event.data.translation) : null;
       return {
         ...base('user'),
         kind: 'user',
         text: redactRemoteConversationText(stripGianRolePrefix(stripManagerSystemPrefix(event.data.text))).slice(0, 16_000),
         ...(delivery ? { delivery_id: delivery.id } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(sentTranslation ? { translation: sentTranslation } : {}),
       };
     }
     if (!type || !data) return null;

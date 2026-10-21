@@ -9,6 +9,7 @@ import { Hono } from 'hono';
 import { DEFAULT_TRANSLATION_PREFERENCES, parseTranslationPreferences, type ComposerDocument } from '@gian/shared';
 import { TranslationService, decodeTranslation, translationPrompt, type TranslateModel } from '../src/translation/service.js';
 import { registerTranslationRoutes } from '../src/web/routes/translation.js';
+import { registerSettingsRoutes } from '../src/web/routes/settings.js';
 import { loadConfig, saveConfig } from '../src/storage/config.js';
 import { createTranslationModel } from '../src/translation/model.js';
 import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
@@ -22,12 +23,98 @@ function fixture(model: TranslateModel = async () => '{"translations":["Hello"]}
     CREATE TABLE remote_execution_replicas (local_session_id TEXT PRIMARY KEY, cursor INTEGER);
     CREATE TABLE remote_execution_replica_events (local_session_id TEXT, item_json TEXT);
     CREATE TABLE remote_execution_send_requests (request_id TEXT PRIMARY KEY, local_session_id TEXT, result_json TEXT, params_json TEXT);`);
+  // queue_entries stub so migration 092 (queue translation intent) applies.
+  db.exec(`CREATE TABLE queue_entries (
+    id TEXT PRIMARY KEY, session_id TEXT, text TEXT, items_json TEXT,
+    context_items_json TEXT, composer_document_json TEXT, sort_order INTEGER,
+    created_at TEXT, tool_request_id TEXT);`);
   db.exec(readFileSync(new URL('../migrations/082_translation.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../migrations/083_remote_translation.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../migrations/092_remote_translation_sync.sql', import.meta.url), 'utf8'));
   const service = new TranslationService(db, model);
   return { db, service };
 }
 const input = { sessionId: 's1', requestId: 'r1', text: 'bonjour', purpose: 'send' as const };
+
+test('translation service notifies subscribers only after persisting', async () => {
+  const { db, service } = fixture(async () => '{"translations":["Hello"]}');
+  try {
+    const seen: Array<{ sessionId: string; enabled?: boolean; automatic?: { sourceId: string; pending: boolean; error?: string }; result?: { id: string } }> = [];
+    const unsubscribe = service.subscribe(notification => seen.push(notification));
+    service.setEnabled('s1', true);
+    assert.equal(seen.at(-1)?.enabled, true);
+    assert.equal(service.enabled('s1'), true, 'the switch is persisted before the notification');
+    const record = await service.translate(input, preferences);
+    assert.equal(seen.at(-1)?.result?.id, record.id);
+    assert.equal(service.get(record.id)?.id, record.id, 'the record is persisted before the notification');
+    service.setAutomaticState('s1', 'turn:1', { pending: true });
+    assert.deepEqual(seen.at(-1)?.automatic, { sourceId: 'turn:1', pending: true });
+    service.setAutomaticState('s1', 'turn:1', { pending: false, error: 'model down' });
+    assert.deepEqual(seen.at(-1)?.automatic, { sourceId: 'turn:1', pending: false, error: 'model down' });
+    service.setAutomaticState('s1', 'turn:1', null);
+    assert.deepEqual(seen.at(-1)?.automatic, { sourceId: 'turn:1', pending: false });
+    unsubscribe();
+    service.setEnabled('s1', false);
+    assert.notEqual(seen.at(-1)?.enabled, false, 'unsubscribed listeners stop receiving');
+    // A throwing listener must not break translation for the others.
+    service.subscribe(() => { throw new Error('listener bug'); });
+    const second = await service.translate({ ...input, text: String.fromCodePoint(0x518d, 0x6b21), requestId: 'r9' }, preferences);
+    assert.equal(second.text, 'Hello');
+  } finally { db.close(); }
+});
+
+test('automatic progress has an ordered per-session version and a boot epoch', () => {
+  const { db, service } = fixture();
+  try {
+    assert.equal(service.automaticRevision('s1'), 0);
+    const epoch = service.automaticEpoch;
+    service.setAutomaticState('s1', 'turn:1', { pending: true });
+    assert.equal(service.automaticRevision('s1'), 1);
+    service.setAutomaticState('s1', 'turn:1', { pending: false, error: 'boom' });
+    service.setAutomaticState('s1', 'turn:1', null);
+    assert.equal(service.automaticRevision('s1'), 3, 'clear bumps the version too');
+    assert.equal(service.automaticRevision('s2'), 0, 'other sessions are untouched');
+    // A restart (new service instance) resets revisions under a new epoch:
+    // views accept the fresh baseline wholesale instead of comparing across.
+    const restarted = new TranslationService(db, async () => '{}');
+    assert.equal(restarted.automaticRevision('s1'), 0);
+    assert.notEqual(restarted.automaticEpoch, epoch);
+  } finally { db.close(); }
+});
+
+test('translation config revision is a global ordered version for preference saves', () => {
+  const { db, service } = fixture();
+  try {
+    assert.equal(service.configRevision(), 0);
+    service.bumpConfigRevision();
+    assert.equal(service.configRevision(), 1);
+    service.bumpConfigRevision();
+    assert.equal(service.configRevision(), 2);
+    // A fresh service over the same database reads the same version.
+    assert.equal(new TranslationService(db, async () => '{}').configRevision(), 2);
+  } finally { db.close(); }
+});
+
+test('settings save notifies translation preference changes through the hook', async () => {
+  const { db } = fixture();
+  try {
+    let calls = 0;
+    const app = new Hono();
+    registerSettingsRoutes(app, db, { onTranslationPreferencesChanged: () => { calls += 1; } });
+    const response = await app.request('/api/settings', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ translation: preferences }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(calls, 1);
+    const unrelated = await app.request('/api/settings', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: 'dark' }),
+    });
+    assert.equal(unrelated.status, 200);
+    assert.equal(calls, 1, 'unrelated settings do not fire the translation hook');
+  } finally { db.close(); }
+});
 
 test('translation preferences reject arbitrary language instructions and unknown keys', () => {
   assert.deepEqual(parseTranslationPreferences(preferences), preferences);

@@ -698,6 +698,15 @@ export function applyEnvelope(
         break;
       }
     }
+    // Confirmed-echo fallback: a remote translated send's canonical broadcast
+    // can lag its operation result, so the echo already lost `pending`. The
+    // stamped submission id still reconciles it in place; the id is unique
+    // per send, so no text comparison is needed here.
+    if (optimisticIndex < 0 && typeof data.send_id === 'string') {
+      optimisticIndex = base.findIndex(cand => cand.kind === 'user'
+        && !cand.pending && !cand.sendCanonical && !cand.failed
+        && cand.sendId === data.send_id);
+    }
 
     const optimistic = optimisticIndex >= 0 ? base[optimisticIndex] : undefined;
     const releaseOptimisticAttachments = (candidate = optimistic) => {
@@ -760,7 +769,12 @@ export function applyEnvelope(
         : item;
       return next;
     }
-    return [...base, item];
+    // No echo to reconcile (e.g. a remote send whose result arrived before
+    // any canonical broadcast): keep transcript order instead of appending
+    // after later-turn items that were rendered in the meantime.
+    const insertAt = base.findIndex(existing =>
+      existing.turn > item.turn || (existing.turn === item.turn && existing.ts > item.ts));
+    return insertAt < 0 ? [...base, item] : [...base.slice(0, insertAt), item, ...base.slice(insertAt)];
   }
 
   return items;

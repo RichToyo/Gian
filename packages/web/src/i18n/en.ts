@@ -21,6 +21,10 @@ export const EN: Messages = {
   'translation.sentLabel': 'The translated text sent to the LM is shown below',
   'translation.sendTimeout': 'Translation timed out after {s}s.',
   'translation.reclaim': 'Take text back',
+  'translation.sending': 'Sending',
+  'translation.sendUnknown': 'The send may not have completed — its status is being recovered.',
+  'translation.refreshState': 'Refresh state',
+  'translation.loadFailed': 'The translation could not be loaded.',
   'translation.draftRestored': 'The unsent text was restored to the composer.',
   // Topbar
   // Composer

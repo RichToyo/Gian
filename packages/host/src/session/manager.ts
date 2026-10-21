@@ -276,7 +276,7 @@ export class SessionManager {
       this.proxySessions,
       this.autoTitle,
       {
-        sendMessage: (sessionId, text, items, toolRequestId, contextItems, composerDocument) => (
+        sendMessage: (sessionId, text, items, toolRequestId, contextItems, composerDocument, translationId) => (
           this.sendMessage(
             sessionId,
             text,
@@ -285,6 +285,9 @@ export class SessionManager {
             toolRequestId,
             contextItems,
             composerDocument,
+            undefined,
+            undefined,
+            translationId,
           )
         ),
         onTurnCompleted: (sessionId, turn) => { void this.translateCompletedTurn(sessionId, turn); },
@@ -2248,6 +2251,7 @@ export class SessionManager {
     contextItems?: MessageContextItem[],
     composerDocument?: ComposerDocument,
     expectedQueueRevision?: string,
+    translationId?: string,
   ): import('../queue/manager.js').QueueEntry {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
@@ -2266,6 +2270,7 @@ export class SessionManager {
       expectedRevision: expectedQueueRevision,
       ...(normalizedContextItems.length > 0 ? { contextItems: normalizedContextItems } : {}),
       ...(normalizedDocument ? { composerDocument: normalizedDocument } : {}),
+      ...(translationId ? { translationId } : {}),
     });
     this.broadcastQueueUpdated(sessionId);
     return entry;
@@ -2328,6 +2333,9 @@ export class SessionManager {
       for (let i = 0; i < drained.length; i++) {
         const entry = drained[i]!;
         try {
+          // The entry's persisted intent travels into the steer: a deliberate
+          // 'original' bypass or a validated receipt — never a silent
+          // re-translation of a send the user already settled (F4).
           const receipt = await this.steerMessage(
             sessionId,
             entry.text,
@@ -2335,6 +2343,7 @@ export class SessionManager {
             entry.contextItems,
             entry.composerDocument,
             entry.toolRequestId,
+            entry.translationId,
           );
           this.deliveryLifecycle?.queueSteered(entry, receipt);
           affected.push({
@@ -2370,6 +2379,9 @@ export class SessionManager {
       next.toolRequestId,
       next.contextItems,
       next.composerDocument,
+      undefined,
+      undefined,
+      next.translationId,
     );
     if (!started) {
       this.queue.restore(sessionId, [next]);
@@ -2417,6 +2429,10 @@ export class SessionManager {
     contextItems?: MessageContextItem[],
     composerDocument?: ComposerDocument,
     toolRequestId?: string,
+    /** Persisted send intent from a queued entry: a translation receipt id
+     *  (validated exactly like sendMessage) or 'original' for the deliberate
+     *  untranslated bypass. Absent = translate at steer when the switch is on. */
+    translationId?: string,
   ): Promise<SteerReceipt> {
     if (this.sidechats.has(sessionId)) {
       const normalizedContextItems = normalizeMessageContextItems(
@@ -2461,9 +2477,18 @@ export class SessionManager {
       throw new Error(`no active turn for session ${sessionId}; send a normal message instead`);
     }
     const proxySessionId = await this.proxySessions.ensure(session);
-    const translation = text.trim() && this.translations?.enabled(sessionId)
-      ? await this.translations.translate({ sessionId, requestId: randomUUID(), text, purpose: 'send', document: composerDocument },
-        loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES }) : undefined;
+    const translation = translationId && translationId !== 'original'
+      ? this.translations?.get(translationId)
+      : !translationId && text.trim() && this.translations?.enabled(sessionId)
+        ? await this.translations.translate({ sessionId, requestId: randomUUID(), text, purpose: 'send', document: composerDocument },
+          loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES }) : undefined;
+    // A receipt bound to a queued entry is validated exactly like a direct
+    // send: wrong session/purpose/source never dispatches (F4).
+    if (translationId && translationId !== 'original' && (!translation || translation.sessionId !== sessionId || translation.purpose !== 'send'
+      || translation.sourceText !== text
+      || JSON.stringify(translation.sourceDocument ?? null) !== JSON.stringify(composerDocument ?? null))) {
+      throw new Error('Translation does not match the original message. Translate again before sending.');
+    }
     if (this.turns.get(sessionId)?.id !== active.id) {
       throw new Error('The active turn ended while translating. Send the message as a new turn.');
     }
@@ -2919,7 +2944,6 @@ export class SessionManager {
     const service = this.translations;
     if (!service?.enabled(sessionId)) return;
     const sourceId = `turn:${turn}`;
-    const key = `${sessionId}:${sourceId}`;
     try {
       const messages = compactHistoryEnvelopes(this.listEvents(sessionId))
         .filter(event => event.turn === turn && event.display?.type === 'message');
@@ -2929,12 +2953,12 @@ export class SessionManager {
       }).at(-1);
       const text = (last?.display?.data as { text?: string } | undefined)?.text;
       if (!text) return;
-      service.automatic.set(key, { pending: true });
+      service.setAutomaticState(sessionId, sourceId, { pending: true });
       await service.translate({ sessionId, requestId: randomUUID(), purpose: 'read', sourceId, text },
         loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES });
-      service.automatic.delete(key);
+      service.setAutomaticState(sessionId, sourceId, null);
     } catch (error) {
-      service.automatic.set(key, { pending: false, error: error instanceof Error ? error.message : 'Translation failed' });
+      service.setAutomaticState(sessionId, sourceId, { pending: false, error: error instanceof Error ? error.message : 'Translation failed' });
     }
   }
 

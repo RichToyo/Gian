@@ -11,8 +11,18 @@
     "troubleshooting": "troubleshooting.md"
   },
   "branding": {
-    "logoLight": { "path": "assets/logo-light.png", "mediaType": "image/png" },
-    "logoDark": { "path": "assets/logo-dark.png", "mediaType": "image/png" }
+    "logoLight": {
+      "path": "assets/logo-light.png",
+      "mediaType": "image/png"
+    },
+    "logoDark": {
+      "path": "assets/logo-dark.png",
+      "mediaType": "image/png"
+    }
   },
-  "channels": { "stable": { "pluginVersion": "0.0.1" } }
+  "channels": {
+    "stable": {
+      "pluginVersion": "0.0.2"
+    }
+  }
 }

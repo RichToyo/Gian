@@ -231,6 +231,82 @@ export const remoteFileRefSchema = z.strictObject({
 
 export const remoteLocaleSchema = z.enum(['en', 'zh-CN']);
 
+/**
+ * Minimal conversation-translation display DTO (wire.conversation_translation).
+ * Deliberately NOT the Host's full TranslationRecord: no Agent id, model,
+ * Composer document, local path, or provider error ever crosses the relay.
+ * `source_sha256` is the match identity a client verifies against the message
+ * text it already has; `source_id` carries the Host's stable turn/delivery
+ * association (`turn:N` for reading translations).
+ *
+ * Full-fidelity text: `text` is present only when the COMPLETE translation
+ * fits the wire text bound. Otherwise the descriptor (`text_length` +
+ * `text_sha256`) describes the full content and the client pages it through
+ * `translation.result_text`, verifying the hash after assembly — a prefix is
+ * never served as if it were the whole translation.
+ */
+export const remoteTranslationSchema = z.strictObject({
+  id: canonicalIdSchema,
+  session_id: canonicalIdSchema,
+  purpose: z.enum(['send', 'read']),
+  source_id: boundedStringSchema.optional(),
+  target_language: nameSchema,
+  text: boundedStringSchema.optional(),
+  text_length: nonNegativeSafeIntegerSchema,
+  text_sha256: sha256HexSchema,
+  source_sha256: sha256HexSchema,
+});
+export type RemoteTranslation = z.infer<typeof remoteTranslationSchema>;
+
+/** Inline send-translation summary on a user transcript item. Same
+ *  full-fidelity rule as remoteTranslationSchema: `text` only when complete. */
+export const remoteSentTranslationSchema = z.strictObject({
+  /** The Host receipt id — the client pages the full text via
+   *  translation.result_text when `text` is absent. */
+  id: canonicalIdSchema,
+  text: boundedStringSchema.optional(),
+  text_length: nonNegativeSafeIntegerSchema,
+  text_sha256: sha256HexSchema,
+  target_language: nameSchema,
+});
+export type RemoteSentTranslation = z.infer<typeof remoteSentTranslationSchema>;
+
+export const remoteTranslationAutomaticSchema = z.strictObject({
+  source_id: boundedStringSchema,
+  pending: z.boolean(),
+  error: boundedStringSchema.optional(),
+});
+export type RemoteTranslationAutomatic = z.infer<typeof remoteTranslationAutomaticSchema>;
+
+/** Per-session translation state: the Host is the single source of truth.
+ *  `configured` reports whether the Host's saved translation preferences are
+ *  usable, so the client can mirror the local "configure first" hint without
+ *  ever seeing the Agent/model selection itself. */
+export const remoteTranslationStateSchema = z.strictObject({
+  enabled: z.boolean(),
+  configured: z.boolean(),
+  sending_language: nameSchema,
+  reading_language: nameSchema,
+  /** Monotonic per-session switch revision. Clients apply a state only when
+   *  its revision is not older than the one they already hold, so a delayed
+   *  command result or replayed event can never roll back a newer toggle. */
+  revision: nonNegativeSafeIntegerSchema,
+  /** Monotonic Host-wide revision of the saved translation preferences
+   *  (configured/languages), bumped on each Settings save — covers the
+   *  wholesale-replace fields the per-session revision does not. */
+  config_revision: nonNegativeSafeIntegerSchema,
+  /** Per-session monotonic version of the automatic-progress map; bumped on
+   *  every progress write/clear. A wholesale state applies `automatic` only
+   *  when this is not older than the view's — a stale snapshot can never
+   *  resurrect a pending entry over a settled failure/clear. */
+  automatic_revision: nonNegativeSafeIntegerSchema,
+  /** Host process-boot identity: after a restart the counters restart too;
+   *  a different epoch tells views to accept the fresh baseline wholesale. */
+  automatic_epoch: boundedStringSchema,
+  automatic: z.array(remoteTranslationAutomaticSchema).max(MAX_ARRAY_ITEMS),
+});
+export type RemoteTranslationState = z.infer<typeof remoteTranslationStateSchema>;
+
 export const remoteStateSnapshotSchema = z.strictObject({
   type: z.literal('state.snapshot'),
   snapshot_id: canonicalIdSchema,
@@ -338,6 +414,11 @@ export const sessionSendParamsSchema = z.strictObject({
   items: z.array(remoteInputItemSchema).max(32).optional(),
   context_items: z.array(remoteContextItemSchema).max(32).optional(),
   composer_document: remoteComposerDocumentSchema.optional(),
+  /** Send-gate receipt from translation.request (purpose=send), or the
+   *  literal 'original' for an explicit untranslated send. Only accepted on
+   *  connections that negotiated wire.conversation_translation; the Host
+   *  revalidates the receipt against the stored record before dispatch. */
+  translation_id: z.union([canonicalIdSchema, z.literal('original')]).optional(),
 });
 export const sessionStopParamsSchema = z.strictObject({
   session_id: canonicalIdSchema,
@@ -374,6 +455,47 @@ export const interactionRespondParamsSchema = z.strictObject({
 export const filePreviewParamsSchema = z.strictObject({
   handle_id: canonicalIdSchema,
 });
+export const translationStateParamsSchema = z.strictObject({
+  session_id: canonicalIdSchema,
+});
+export const translationSetAutoParamsSchema = z.strictObject({
+  session_id: canonicalIdSchema,
+  /** Explicit target value — never a blind toggle. The Host's persisted
+   *  record is the authority; the result carries the confirmed value. */
+  enabled: z.boolean(),
+  /** Optional optimistic precondition: when present, the write fails with
+   *  PRECONDITION_FAILED if the persisted value no longer matches, so a
+   *  stale view cannot silently flip another device's newer choice. */
+  expected_enabled: z.boolean().optional(),
+  /** Optional stronger precondition on the monotonic state revision. */
+  expected_revision: nonNegativeSafeIntegerSchema.optional(),
+});
+export const translationRequestParamsSchema = z.strictObject({
+  session_id: canonicalIdSchema,
+  /** Client-minted request identity, stable across UI retries. */
+  request_id: z.string().min(1).max(128),
+  purpose: z.enum(['send', 'read']),
+  text: z.string().min(1).max(120_000),
+  source_id: z.string().min(1).max(256).optional(),
+  composer_document: remoteComposerDocumentSchema.optional(),
+});
+export const translationCancelParamsSchema = z.strictObject({
+  session_id: canonicalIdSchema,
+  request_id: z.string().min(1).max(128),
+});
+/** Bounded full-text paging for descriptor-only translation DTOs. Offsets are
+ *  JS string positions; each page returns at most one wire text chunk. */
+export const translationResultTextParamsSchema = z.strictObject({
+  session_id: canonicalIdSchema,
+  record_id: canonicalIdSchema,
+  offset: nonNegativeSafeIntegerSchema.optional(),
+});
+/** Terminal-status recovery for a translation.request identity (F7): a lost
+ *  settle event is re-queryable instead of leaving a permanent pending row. */
+export const translationRequestStatusParamsSchema = z.strictObject({
+  session_id: canonicalIdSchema,
+  request_id: z.string().min(1).max(128),
+});
 export const proxyLogoParamsSchema = z.strictObject({
   proxy: nameSchema,
   variant: z.enum(['light', 'dark']),
@@ -403,6 +525,12 @@ export const REMOTE_METHOD_PARAMS = {
   'queue.clear': queueClearParamsSchema,
   'queue.send_now': queueSendNowParamsSchema,
   'interaction.respond': interactionRespondParamsSchema,
+  'translation.state': translationStateParamsSchema,
+  'translation.set_auto': translationSetAutoParamsSchema,
+  'translation.request': translationRequestParamsSchema,
+  'translation.cancel': translationCancelParamsSchema,
+  'translation.result_text': translationResultTextParamsSchema,
+  'translation.request_status': translationRequestStatusParamsSchema,
   'file.preview': filePreviewParamsSchema,
   'file.resolve': z.strictObject({ session_id: canonicalIdSchema, reference: z.string().min(1).max(4096) }),
   'file.tree': z.strictObject({ session_id: canonicalIdSchema, directory: z.string().max(4096),
@@ -499,6 +627,10 @@ export const transcriptItemSchema = z.discriminatedUnion('kind', [
     text: boundedStringSchema,
     delivery_id: canonicalIdSchema.optional(),
     attachments: z.array(remoteFileRefSchema).max(32).optional(),
+    /** Sent-translation summary, projected from the canonical user event's
+     *  receipt. Present only when wire.conversation_translation was
+     *  negotiated AND this message was dispatched translated. */
+    translation: remoteSentTranslationSchema.optional(),
   }),
   z.strictObject({
     ...transcriptItemBaseSchema,
@@ -634,12 +766,17 @@ export const REMOTE_METHOD_RESULTS = {
   'session.subscribe': z.strictObject({
     session: remoteSessionSchema,
     cursor: boundedStringSchema,
+    /** Present only when wire.conversation_translation was negotiated. */
+    translation: remoteTranslationStateSchema.optional(),
   }),
   'session.page': z.strictObject({
     session_id: canonicalIdSchema,
     cursor: boundedStringSchema.optional(),
     has_more: z.boolean(),
     items: z.array(transcriptItemSchema).max(MAX_ARRAY_ITEMS),
+    /** Reading translations for this page's turns. Present only when
+     *  wire.conversation_translation was negotiated. */
+    translations: z.array(remoteTranslationSchema).max(MAX_ARRAY_ITEMS).optional(),
   }),
   'command.status': commandStatusResultSchema,
   'session.create': remoteSessionSchema,
@@ -666,6 +803,29 @@ export const REMOTE_METHOD_RESULTS = {
     interaction_id: canonicalIdSchema,
     revision: boundedStringSchema,
     resolved: z.literal(true),
+  }),
+  'translation.state': remoteTranslationStateSchema,
+  'translation.set_auto': remoteTranslationStateSchema,
+  /** Accepted receipt. The settled record (or a safe error) arrives as a
+   *  translation.updated event carrying the same request_id, so a long model
+   *  call never holds the per-device command chain or a read timeout. */
+  'translation.request': z.strictObject({
+    request_id: boundedStringSchema,
+    status: z.literal('accepted'),
+  }),
+  'translation.cancel': z.strictObject({
+    ok: z.literal(true),
+  }),
+  'translation.result_text': z.strictObject({
+    /** Next chunk of the complete text (at most one wire text bound). */
+    text: boundedStringSchema,
+    /** Present while more content follows; absent marks the final chunk. */
+    next_offset: nonNegativeSafeIntegerSchema.optional(),
+  }),
+  'translation.request_status': z.strictObject({
+    state: z.enum(['unknown', 'pending', 'succeeded', 'failed']),
+    record: remoteTranslationSchema.optional(),
+    error: boundedStringSchema.optional(),
   }),
   'file.preview': filePreviewResultSchema,
   'file.resolve': remoteFileRefSchema,
@@ -748,6 +908,9 @@ export const transcriptPageSchema = z.strictObject({
   cursor: boundedStringSchema.optional(),
   has_more: z.boolean(),
   items: z.array(transcriptItemSchema).max(MAX_ARRAY_ITEMS),
+  /** Reading translations for this page's turns; only sent when
+   *  wire.conversation_translation was negotiated. */
+  translations: z.array(remoteTranslationSchema).max(MAX_ARRAY_ITEMS).optional(),
 });
 
 export const snapshotRequiredSchema = z.strictObject({
@@ -791,6 +954,29 @@ export const remoteEventSchema = z.discriminatedUnion('kind', [
     kind: z.literal('transcript.item'),
     session_id: canonicalIdSchema,
     item: transcriptItemSchema,
+  }),
+  /** Conversation-translation delta. Only ever sent to connections that
+   *  negotiated wire.conversation_translation (legacy and non-negotiated
+   *  peers parse canonical events closed and must never see this kind).
+   *  `state` replaces the small per-session state outright (toggle, Host
+   *  preference change); `automatic` is a single-source progress delta;
+   *  `upsert` is a newly settled record; `request_id` correlates a
+   *  translation.request waiter with its settled outcome and `error` is a
+   *  redacted, display-safe message. */
+  z.strictObject({
+    kind: z.literal('translation.updated'),
+    session_id: canonicalIdSchema,
+    state: remoteTranslationStateSchema.optional(),
+    automatic: remoteTranslationAutomaticSchema.optional(),
+    /** Ordered version of an `automatic` delta, shared with the wholesale
+     *  state's automatic_revision/automatic_epoch: a delta advances the
+     *  view's version, and a stale snapshot or delta can never resurrect an
+     *  older pending entry over a settled outcome. */
+    automatic_revision: nonNegativeSafeIntegerSchema.optional(),
+    automatic_epoch: boundedStringSchema.optional(),
+    upsert: remoteTranslationSchema.optional(),
+    request_id: boundedStringSchema.optional(),
+    error: boundedStringSchema.optional(),
   }),
 ]);
 

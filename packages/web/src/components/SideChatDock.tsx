@@ -425,6 +425,7 @@ function SideChatPanel({
             items={items}
             pending={turnRunning}
             inlineEventDetails
+            scrollerSelector=".sidechat-scroll"
             onApprove={(
               approvalId: string,
               decision: ApprovalDecision,

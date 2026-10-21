@@ -392,22 +392,32 @@ export function FormatToolbarPlugin() {
   );
 }
 
-// ⌘/Ctrl+B bold, ⌘/Ctrl+I italic, ⌘/Ctrl+E inline code, ⇧⌘/Ctrl+X strikethrough.
-// Anything else returns false so the composer's ⌘Enter handling, chip
-// machinery, and Lexical defaults keep ownership of their keys.
+// ⌘E inline code, ⇧⌘X strikethrough (Ctrl on non-Apple platforms). macOS
+// keeps these ⌘-only so the Cocoa/emacs text bindings (Ctrl+B backward-char,
+// Ctrl+E end-of-line, …) keep working in the composer. The platform is read
+// per event so tests can stub it.
+// Bold/italic are deliberately ABSENT: the browser already turns ⌘B/⌘I
+// (Ctrl+B/I off Apple) into `beforeinput` formatBold/formatItalic, which
+// Lexical core maps to FORMAT_TEXT_COMMAND. Handling them here too toggles
+// the format twice per keystroke — the two toggles cancel and the shortcut
+// looks dead. Anything else returns false so the composer's ⌘Enter handling,
+// chip machinery, and Lexical defaults keep ownership of their keys.
+function isApplePlatform(): boolean {
+  return /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+}
+
 export function FormatShortcutPlugin() {
   const [editor] = useLexicalComposerContext();
   useEffect(() => editor.registerCommand(
     KEY_MODIFIER_COMMAND,
     (event: KeyboardEvent) => {
       if (event.isComposing) return false;
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return false;
+      const modifierDown = isApplePlatform() ? event.metaKey : (event.metaKey || event.ctrlKey);
+      if (!modifierDown || event.altKey) return false;
       const key = event.key.toLowerCase();
       let format: TextFormatType | null = null;
       if (!event.shiftKey) {
-        if (key === 'b') format = 'bold';
-        else if (key === 'i') format = 'italic';
-        else if (key === 'e') format = 'code';
+        if (key === 'e') format = 'code';
       } else if (key === 'x') {
         format = 'strikethrough';
       }

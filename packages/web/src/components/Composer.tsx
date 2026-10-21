@@ -988,6 +988,12 @@ export function Composer({
     && optionVisible(option, configValues)
   ));
   const extraTurnSummary = catalogOptionSummary(extraTurnOptions, configValues);
+  // The full variant hides the menu only in the narrow bar (the Proxy drop
+  // owns config there); a sidechat composer shows it when its turn-bound
+  // options are actually settable through onSetTurnConfig.
+  const catalogOptionsMenuVisible = extraTurnOptions.length > 0 && (fixed
+    ? configurableSidechat && Boolean(onSetTurnConfig)
+    : !narrowBar);
   const showFast = (fixed || Boolean(onSetServiceTier)) && (
     fastOption
       ? optionVisible(fastOption, configValues)
@@ -1930,7 +1936,7 @@ export function Composer({
         )}
 
           <div className={`composer-bar${narrowBar ? ' narrow' : ''}`} ref={barRef}>
-            {!fixed && resolvedOverlay?.error && (
+            {resolvedOverlay?.error && (
             <span className="composer-resolve-error" data-testid="composer-resolve-error">
               {resolvedOverlay.error}
             </span>
@@ -2088,7 +2094,7 @@ export function Composer({
               </>
             )}
 
-          {!fixed && !narrowBar && extraTurnOptions.length > 0 && (
+          {catalogOptionsMenuVisible && (
             <CatalogOptionsMenu
               summary={extraTurnSummary}
               options={extraTurnOptions}
@@ -2099,7 +2105,7 @@ export function Composer({
             />
           )}
 
-          {!fixed && !narrowBar && extraTurnOptions.length > 0 && modelControlVisible && <ControlSeparator />}
+          {catalogOptionsMenuVisible && modelControlVisible && <ControlSeparator />}
 
           {fixed && modelControlVisible && !modelControlInteractive && (
             <span

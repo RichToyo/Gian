@@ -147,6 +147,7 @@
       "patterns": [
         "packages/host/test/translation.test.ts",
         "packages/host/test/remote-translation.test.ts",
+        "packages/host/test/remote-translation-sync.test.ts",
         "packages/host/test/agent-instructions.test.ts",
         "packages/host/test/agent-home.test.ts",
         "packages/host/test/agent-proxy-default-home.test.ts",

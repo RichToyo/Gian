@@ -16,6 +16,7 @@ import { LocaleProvider } from '../src/i18n/index.js';
 import { createOperationDispatcher, type OperationTransport } from '../src/operations/dispatcher.js';
 // Runtime import: registers the product Message definitions used below.
 import {
+  createMessageEchoSink,
   dispatchMessageSend,
   wireMessageEchoSink,
   type MessageEchoSink,
@@ -24,7 +25,7 @@ import { createOperationStore } from '../src/operations/store.js';
 import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
 import { applyEnvelope } from '../src/transcript/apply.js';
 import { UserMessage } from '../src/transcript/items.js';
-import type { MessageSendPayload, MsgItem } from '../src/types.js';
+import type { MessageSendPayload, MsgItem, TranscriptItem } from '../src/types.js';
 
 vi.mock('../src/api.js', () => ({
   uploadAttachment: vi.fn(),
@@ -339,6 +340,52 @@ describe('message send echo (proposal §9, product definitions)', () => {
     expect((after[0] as MsgItem).sendCanonical).toBe(true);
     expect((after[0] as MsgItem).sendRunId).toBe(echo.sendRunId);
     expect((after[0] as MsgItem).sendRetry).toEqual(echo.sendRetry);
+  });
+
+  it('a canonical user_message that lags its operation result reconciles the confirmed echo in place', () => {
+    const { transport, dispatcher } = setup();
+    // Remote translated sends can broadcast the canonical user_message AFTER
+    // the operation:result (a stale in-flight sync swallowed it): the echo is
+    // already confirmed when the canonical arrives. Run the production sink so
+    // markConfirmed really strips — and retains — echo metadata.
+    let itemsBySession: Record<string, TranscriptItem[]> = {};
+    let pendingBySession: Record<string, boolean> = {};
+    wireMessageEchoSink(createMessageEchoSink(
+      update => { itemsBySession = update(itemsBySession); },
+      update => { pendingBySession = update(pendingBySession); },
+    ));
+    dispatchMessageSend(dispatcher.dispatch, payload({ text: String.fromCodePoint(0x539f, 0x59cb, 0x4e2d, 0x6587), sendId: 'send-remote-1' }));
+
+    transport.emitResult(requestIdOf(transport.sent[0]), true);
+
+    const confirmed = itemsBySession['s1']!;
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]).toMatchObject({ kind: 'user', text: String.fromCodePoint(0x539f, 0x59cb, 0x4e2d, 0x6587), sendId: 'send-remote-1' });
+    expect((confirmed[0] as MsgItem).pending).toBeUndefined();
+    expect((confirmed[0] as MsgItem).sendRetry).toBeUndefined();
+    expect((confirmed[0] as MsgItem).sendRunId).toBeUndefined();
+
+    // A later message already rendered by the time the canonical arrives.
+    const later: MsgItem = { kind: 'user', id: 'real-later', text: 'second question', exec: 'claude', ts: 2000, turn: 3 };
+    const canonical: EventEnvelope = {
+      session_id: 's1',
+      turn: 2,
+      call_id: 'remote-item-1',
+      event: 'user_message',
+      ts: 1000,
+      data: {
+        text: String.fromCodePoint(0x539f, 0x59cb, 0x4e2d, 0x6587),
+        send_id: 'send-remote-1',
+        translation: { text: 'translated question' },
+      },
+    };
+    const after = applyEnvelope([...confirmed, later], canonical, 'claude');
+
+    expect(after).toHaveLength(2);
+    expect(after[0]).toMatchObject({ kind: 'user', id: 'remote-item-1', text: String.fromCodePoint(0x539f, 0x59cb, 0x4e2d, 0x6587) });
+    expect((after[0] as MsgItem).pending).toBeUndefined();
+    expect((after[0] as MsgItem).translation).toEqual({ text: 'translated question' });
+    expect(after[1]).toBe(later);
   });
 });
 

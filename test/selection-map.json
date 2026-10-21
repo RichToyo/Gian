@@ -26,11 +26,11 @@
     },
     {
       "id": "conversation-translation",
-      "patterns": ["packages/shared/src/translation.ts", "packages/host/src/translation/**", "packages/host/src/web/routes/translation.ts", "packages/host/migrations/082_translation.sql", "packages/host/migrations/083_remote_translation.sql", "packages/host/test/translation.test.ts", "packages/host/test/remote-translation.test.ts", "packages/web/src/translation/**", "packages/web/src/operations/translation.ts", "packages/web/test/translation.test.tsx", "packages/web/test/remote-translation.test.tsx", "packages/web/test/translation-font-scale.test.ts", "packages/web/test/translation-send-flow.test.tsx"],
-      "modules": ["shared", "host", "web", "chat-ui", "codex-proxy"],
+      "patterns": ["packages/shared/src/translation.ts", "packages/host/src/translation/**", "packages/host/src/web/routes/translation.ts", "packages/host/migrations/082_translation.sql", "packages/host/migrations/083_remote_translation.sql", "packages/host/test/translation.test.ts", "packages/host/test/remote-translation.test.ts", "packages/host/test/remote-translation-sync.test.ts", "packages/host/src/remote/projection.ts", "packages/host/src/remote/command-adapter.ts", "packages/host/src/remote/connector.ts", "packages/host/src/remote/runtime.ts", "packages/host/src/web/routes/settings.ts", "packages/remote-protocol/src/constants.ts", "packages/remote-protocol/src/control.ts", "packages/remote-protocol/src/client/relay-client.ts", "packages/remote-protocol/test/translation.test.ts", "packages/remote-web/src/controller/translation.ts", "packages/remote-web/test/translation.test.ts", "packages/remote-web/test/translation-ui.test.tsx", "packages/remote-web/src/cache/pending-drafts.ts", "packages/remote-web/test/pending-drafts.test.ts", "packages/host/src/queue/manager.ts", "packages/host/migrations/092_remote_translation_sync.sql", "packages/host/src/session/event-coordinator.ts", "packages/chat-ui/src/translation.tsx", "packages/chat-ui/src/send-timeout.ts", "packages/web/src/translation/**", "packages/web/src/operations/translation.ts", "packages/web/test/translation.test.tsx", "packages/web/test/remote-translation.test.tsx", "packages/web/test/translation-font-scale.test.ts", "packages/web/test/translation-send-flow.test.tsx"],
+      "modules": ["shared", "host", "web", "chat-ui", "codex-proxy", "remote-protocol", "remote-web"],
       "scopes": ["unit", "integration"],
       "checks": ["typecheck", "quality:test-catalog"],
-      "reason": "Translation binds settings, isolated Provider calls, original-message persistence and reading-only projections."
+      "reason": "Translation binds settings, isolated Provider calls, original-message persistence, reading-only projections, and the negotiated Remote Web conversation-translation sync (DTOs, commands, send gate, shared chat-ui rendering)."
     },
     {
       "id": "proxy-information-projection",

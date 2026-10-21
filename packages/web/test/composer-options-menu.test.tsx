@@ -252,6 +252,39 @@ describe('Composer independent catalog controls', () => {
     });
   });
 
+  it('a sidechat composer with settable turn-bound options shows the extra-options menu', async () => {
+    const user = userEvent.setup();
+    const onSetTurnConfig = vi.fn();
+    renderComposer(makeSession('dsh', {
+      model: 'deepseek-v4-flash',
+      approval_mode: null,
+      thinking_effort: null,
+      turn_config: {},
+    }), { variant: 'sidechat', onSetTurnConfig });
+
+    const provider = await screen.findByTestId('composer-catalog-options');
+    expect(provider).toHaveTextContent('Provider: DeepSeek');
+    await user.click(provider);
+    await user.click(await screen.findByTestId('catalog-option-provider-opencode-go'));
+    expect(onSetTurnConfig).toHaveBeenCalledWith('provider', 'opencode-go');
+  });
+
+  it('a sidechat composer without onSetTurnConfig keeps the extra-options menu hidden', async () => {
+    renderComposer(makeSession('dsh', {
+      model: 'deepseek-v4-flash',
+      approval_mode: null,
+      thinking_effort: null,
+      turn_config: {},
+    }), { variant: 'sidechat' });
+
+    // The model chip depends on the loaded catalog, so it proves the catalog
+    // has settled before the negative assertion.
+    await waitFor(() => {
+      expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('DeepSeek V4 Flash');
+    });
+    expect(screen.queryByTestId('composer-catalog-options')).toBeNull();
+  });
+
   it('does not expose a Session-bound special option as a mutable next-Turn chip', async () => {
     vi.mocked(loadProxyCapabilities).mockResolvedValueOnce({
       catalogRevision: 'session-bound-model',

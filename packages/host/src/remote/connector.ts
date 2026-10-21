@@ -160,11 +160,16 @@ export class RemoteConnector {
       hostVersion?: string;
       attachments?: RemoteAttachmentService;
       fileRefs?: RemoteFileRefService;
-      transcriptPage?: (sessionId: string, deviceId: string) => {
+      transcriptPage?: (sessionId: string, deviceId: string, options?: { wireFeatures?: readonly string[] }) => {
         items: unknown[];
         has_more: boolean;
         cursor?: string;
+        translations?: unknown[];
       } | null;
+      /** Per-session translation state pushed after a resume, so a
+       *  reconnecting negotiated client recovers missed toggle/progress
+       *  changes without a state.refresh. */
+      translationState?: (sessionId: string) => object | null;
     },
     private readonly initialSnapshotGraceMs: number = SNAPSHOT_PUSH_GRACE_MS,
     private readonly transcriptCoalesceMs: number = TRANSCRIPT_COALESCE_MS,
@@ -179,6 +184,15 @@ export class RemoteConnector {
   }
 
   get connected(): boolean { return !this.closed; }
+
+  /** Features negotiated via hello; a legacy (no-hello) peer has none. */
+  get negotiatedWireFeatures(): readonly string[] {
+    return this.protocolMode === 'negotiated' ? this.wireFeatures : [];
+  }
+
+  supportsFeature(feature: string): boolean {
+    return this.negotiatedWireFeatures.includes(feature);
+  }
 
   nextBackoffMs(): number {
     const exp = Math.min(30_000, 500 * (2 ** this.attempts));
@@ -404,7 +418,10 @@ export class RemoteConnector {
           return;
         }
         const transcriptPage = subscribedSessionId && (this.protocolMode === 'legacy' || this.wireFeatures.includes('wire.transcript_page'))
-          ? this.services?.transcriptPage?.(subscribedSessionId, this.device.id) ?? null
+          ? this.services?.transcriptPage?.(subscribedSessionId, this.device.id, { wireFeatures: this.negotiatedWireFeatures }) ?? null
+          : null;
+        const translationState = subscribedSessionId && this.supportsFeature('wire.conversation_translation')
+          ? this.services?.translationState?.(subscribedSessionId) ?? null
           : null;
         await this.sendControl({
           type: 'resume.ok',
@@ -427,6 +444,19 @@ export class RemoteConnector {
             has_more: transcriptPage.has_more,
             ...(transcriptPage.cursor ? { cursor: transcriptPage.cursor } : {}),
             items: transcriptPage.items,
+            ...(transcriptPage.translations ? { translations: transcriptPage.translations } : {}),
+          });
+        }
+        if (translationState) {
+          await this.sendControl({
+            type: 'event',
+            host_generation: this.generation,
+            event_sequence: this.replay.eventSequence,
+            event: {
+              kind: 'translation.updated',
+              session_id: subscribedSessionId,
+              state: translationState,
+            },
           });
         }
       }
