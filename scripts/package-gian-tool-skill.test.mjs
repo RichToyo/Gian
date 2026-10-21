@@ -112,7 +112,7 @@ test('skill packaging rejects non-executable helpers and Han before writing', ()
 
 test('source skill copy uses the installed app bundle and skill-local commands', () => {
   const skill = readFileSync(join(worktree, 'packages/tool-cli/skill/gian-tool/SKILL.md'), 'utf8');
-  const guide = readFileSync(join(worktree, 'skill/gian-tool-install.md'), 'utf8');
+  const guide = readFileSync(join(worktree, 'skill/gian-tool-install.md'), 'utf8').replace(/\s+/g, ' ');
   assert.match(skill, /scripts\/gianctl/);
   assert.match(skill, /scripts\/gian-tool-mcp/);
   assert.match(skill, /does not configure MCP/);

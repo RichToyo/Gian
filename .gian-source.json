@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "75c4bcbc256668065c485772831a204309341eca",
+  "sourceCommit": "e042b22722a9ac613c84ce6a5c3e6b727ae9c458",
   "workingTree": false,
   "files": [
     {
@@ -10704,7 +10704,7 @@
     {
       "path": "scripts/package-gian-tool-skill.test.mjs",
       "mode": 420,
-      "sha256": "2dc88ae715d6fbf30c2c88b0eb7a9dc535d73f58dde896f8031e810fb1feece6"
+      "sha256": "0d45264ff3a580dd1f76f2cf3d5240df6ac6587516133b2d5816ff2aaf08330d"
     },
     {
       "path": "scripts/prepare-catalog-coordinate.mjs",
