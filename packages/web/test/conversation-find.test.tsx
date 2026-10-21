@@ -688,9 +688,8 @@ describe('ConversationFind', () => {
     const tailItem = msg('m-tail', 'assistant', 9, 'the latest tail');
     const match = hostMatch('occ-1', 'doc-1', historyItem, 'span.ri-title');
     const calls = findRouter(findPage([match], { total: 1 }));
-    let release!: (ok: boolean) => void;
-    const gate = new Promise<boolean>(resolve => { release = resolve; });
-    const onLoad = vi.fn(() => gate);
+    const releases: Array<(ok: boolean) => void> = [];
+    const onLoad = vi.fn(() => new Promise<boolean>(resolve => { releases.push(resolve); }));
     function DeferredReturn() {
       const [generation, setGeneration] = useState(0);
       const [detached, setDetached] = useState(true);
@@ -729,7 +728,7 @@ describe('ConversationFind', () => {
     await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(1));
     const findsBeforeReturn = calls.length;
     await user.click(screen.getByTestId('return-to-latest'));
-    release(false);
+    releases[0]!(false);
     await actDelay(80);
     expect(onLoad).toHaveBeenCalledTimes(1);
     expect(calls.length).toBe(findsBeforeReturn);
@@ -738,6 +737,28 @@ describe('ConversationFind', () => {
 
     await user.click(screen.getByTestId('conversation-find-next'));
     await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(2));
+  });
+
+  it('bounds failed context recovery and permits a new explicit locate retry', async () => {
+    const item = msg('unavailable', 'user', 4, 'needle in unavailable history');
+    const match = hostMatch('occ-unavailable', 'doc-unavailable', item, 'needle');
+    const calls = findRouter(findPage([match], { total: 1 }));
+    const onLoad = vi.fn(async () => false);
+    render(<Harness items={[]} onLoadMessageContext={onLoad} />);
+    const user = userEvent.setup();
+    await openFind(user);
+    await user.paste('needle');
+    await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(2));
+    await actDelay(80);
+    expect(onLoad).toHaveBeenCalledTimes(2);
+    expect(calls.length).toBe(2);
+    expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 1');
+
+    await user.click(screen.getByTestId('conversation-find-next'));
+    await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(4));
+    await actDelay(80);
+    expect(onLoad).toHaveBeenCalledTimes(4);
+    expect(calls.length).toBe(3);
   });
 
   it('a late context load cannot release the newer load of the same match', async () => {

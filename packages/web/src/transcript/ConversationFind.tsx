@@ -199,6 +199,8 @@ export function ConversationFind({
    */
   const contextLoadingRef = useRef(new Map<string, number>());
   const contextLoadTicketRef = useRef(0);
+  /** One automatic recovery per hit revision and explicit locate intent. */
+  const contextFailuresRef = useRef(new Map<string, number>());
   /** Re-query at most once per (query, message, text revision). */
   const unmappableRef = useRef(new Set<string>());
   /** After a load-more resolves, advance once into the first new match. */
@@ -262,6 +264,7 @@ export function ConversationFind({
     setResults(IDLE_RESULTS);
     setActiveIdx(0);
     contextLoadingRef.current.clear();
+    contextFailuresRef.current.clear();
     unmappableRef.current.clear();
     chaseSuspendedRef.current = false;
     findEngagedRef.current = false;
@@ -333,6 +336,7 @@ export function ConversationFind({
   // guard. (Same-query refreshes go through the refetch effect below.)
   useEffect(() => {
     if (!open) return;
+    contextFailuresRef.current.clear();
     const q = query.trim();
     if (!q) {
       requestSeqRef.current += 1;
@@ -603,6 +607,7 @@ export function ConversationFind({
       locateAnchorRef.current = null;
       anchorRestartRef.current = 0;
       contextLoadingRef.current.clear();
+      contextFailuresRef.current.clear();
     }
     returnWatchRef.current.generation = returnGeneration;
   }
@@ -748,6 +753,8 @@ export function ConversationFind({
     if (pendingContext && onLoadMessageContext) {
       const match = pendingContext;
       if (contextLoadingRef.current.has(match.id)) return;
+      const failureKey = JSON.stringify([sessionId, q, match.id, match.target.text_revision, locateSeqRef.current]);
+      if ((contextFailuresRef.current.get(failureKey) ?? 0) >= 2) return;
       const ticket = ++contextLoadTicketRef.current;
       contextLoadingRef.current.set(match.id, ticket);
       const seqAtEffect = requestSeqRef.current;
@@ -765,7 +772,11 @@ export function ConversationFind({
         contextLoadingRef.current.delete(match.id);
         if (locateSeqRef.current !== locateSeq) return;
         if (requestSeqRef.current !== seqAtEffect) return;
-        if (!ok) requestQueryRefresh(locateSeq);
+        if (!ok) {
+          const failures = (contextFailuresRef.current.get(failureKey) ?? 0) + 1;
+          contextFailuresRef.current.set(failureKey, failures);
+          if (failures === 1) requestQueryRefresh(locateSeq);
+        }
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -817,6 +828,7 @@ export function ConversationFind({
     // index wraps back onto the same match. Bumping the locate generation
     // retires a context load started for the previous step.
     chaseSuspendedRef.current = false;
+    contextFailuresRef.current.clear();
     locateSeqRef.current += 1;
     locateAnchorRef.current = null;
     anchorRestartRef.current = 0;

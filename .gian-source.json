@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "77268de968bed816e9b86c282563e4abd4bd3ab4",
+  "sourceCommit": "7081d271caf50012f03db96bc00f9bfe7e96b489",
   "workingTree": false,
   "files": [
     {
@@ -599,7 +599,7 @@
     {
       "path": "CHANGELOG.md",
       "mode": 420,
-      "sha256": "2c4aba514f62a40522daad0a84cc8135adba7ae3fb176908a04a3d13fc069381"
+      "sha256": "19d1c2918546ffb62110eb9fae497ebaf745cd15d14106270542b76a6e6020fb"
     },
     {
       "path": "CONTRIBUTING.md",
@@ -8984,7 +8984,7 @@
     {
       "path": "packages/web/src/transcript/ConversationFind.tsx",
       "mode": 420,
-      "sha256": "f03e1425be88cddb9e541af3eb6ffef0640f123adf7a771b9e760fd7084d6a8b"
+      "sha256": "0c691bcdce59d5436b0312622e6d69fef86b1d889d2759b1f9f98170bb51081f"
     },
     {
       "path": "packages/web/src/transcript/event-feed.ts",
@@ -9469,7 +9469,7 @@
     {
       "path": "packages/web/test/conversation-find.test.tsx",
       "mode": 420,
-      "sha256": "6fdb4aa038c434f7997b6f649e637cdaec07a060f4cd1f36d93e38788188f6b7"
+      "sha256": "28014b7bebf08705a188557a55430feccb0cf84fa3a813118161b2a43bca595e"
     },
     {
       "path": "packages/web/test/custom-layout.test.ts",
@@ -10424,7 +10424,7 @@
     {
       "path": "scripts/build-proxy-artifacts.test.mjs",
       "mode": 420,
-      "sha256": "8931daa1454eef454c84024dc5e483d4ddf4523130821ddbb9407f247760fd84"
+      "sha256": "03e6d90b75206ab9cb1b1f2f48436a9319b0a43ee5dbcba0fc7f1317bcab7f0b"
     },
     {
       "path": "scripts/build-zcode-runtime.mjs",

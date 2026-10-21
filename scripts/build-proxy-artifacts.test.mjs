@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import test from 'node:test';
+import test, { before } from 'node:test';
 
 import {
   assertRuntimeManifest,
@@ -18,6 +18,11 @@ import { prepareDevProxyPackages } from './prepare-dev-package-inputs.mjs';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+before(async () => {
+  // Source bundles now consume the shared MCP input guard at runtime.
+  await execFileAsync('pnpm', ['--filter', '@gian/shared', 'build'], { cwd: repoRoot });
+});
 
 test('the candidate set follows all seven self-describing Proxy packages', () => {
   assert.deepEqual([...shippingProxyIds].sort(), ['antigravity', 'claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode']);
