@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "e042b22722a9ac613c84ce6a5c3e6b727ae9c458",
+  "sourceCommit": "a6417e31749b4c8d3426c669e1f669c55b568c53",
   "workingTree": false,
   "files": [
     {
@@ -9204,7 +9204,7 @@
     {
       "path": "packages/web/test/agents-view.test.tsx",
       "mode": 420,
-      "sha256": "1d7a1f75196a67f5f05a51e08193d68c98cab1633e19dc2fdb05b9c142a05923"
+      "sha256": "39863c223e02349d2247ce3e6a2521dfafa17ed9216ad2f5f5a93fea7c05545e"
     },
     {
       "path": "packages/web/test/api-performance-cache.test.ts",

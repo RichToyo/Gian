@@ -735,7 +735,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     const view = renderWithOperations(<LocaleProvider locale="zh-CN"><AgentsView /></LocaleProvider>);
     fireEvent.click(within(await screen.findByTestId('catalog-item-io.acme.ready')).getByTestId(/^catalog-open-/));
     expect(await screen.findByRole('heading', { name: 'English version history' })).toBeTruthy();
-    expect(screen.getByText('English summary')).toBeTruthy();
+    expect(within(screen.getByTestId('catalog-item-io.acme.ready')).getByText('English Integration')).toBeTruthy();
+    expect(within(screen.getByTestId('proxy-detail-panel')).getByTitle('English Integration')).toBeTruthy();
+    expect(screen.queryByText('Secondary locale integration')).toBeNull();
     expect(screen.getAllByText('English tutorial body')).toHaveLength(3);
     expect(screen.queryByText('Secondary locale summary')).toBeNull();
     expect(screen.queryByText('Secondary locale tutorial body')).toBeNull();
