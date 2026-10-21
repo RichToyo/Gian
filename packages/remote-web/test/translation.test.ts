@@ -299,16 +299,18 @@ describe('remote conversation translation', () => {
       expect(controller.state.translations[sessionId]?.enabled).toBe(true);
       controller.actions.setAutoTranslation(sessionId, false);
       await viWait(() => Boolean(relay.lastCommand('translation.set_auto')));
-      const params = relay.lastCommand('translation.set_auto')!.params as { enabled?: boolean; expected_enabled?: boolean };
-      expect(params).toEqual({ session_id: sessionId, enabled: false, expected_enabled: true });
+      const params = relay.lastCommand('translation.set_auto')!.params as { enabled?: boolean; expected_enabled?: boolean; expected_revision?: number };
+      expect(params).toEqual({ session_id: sessionId, enabled: false, expected_enabled: true, expected_revision: 1 });
       // Not yet flipped locally — only the Host confirmation applies.
       expect(controller.state.translations[sessionId]?.enabled).toBe(true);
-      await relay.answer('translation.set_auto', translationState({ enabled: false }));
+      await relay.answer('translation.set_auto', translationState({ enabled: false, revision: 2 }));
       await viWait(() => controller.state.translations[sessionId]?.enabled === false);
+      expect(controller.state.translations[sessionId]?.revision).toBe(2);
 
       // Another view's toggle arrives as an event and applies verbatim.
-      await relay.emit(translationEvent({ state: translationState({ enabled: true }) }));
+      await relay.emit(translationEvent({ state: translationState({ enabled: true, revision: 3 }) }));
       await viWait(() => controller.state.translations[sessionId]?.enabled === true);
+      expect(controller.state.translations[sessionId]?.revision).toBe(3);
     } finally { controller.close(); }
   });
 
@@ -1018,9 +1020,13 @@ describe('remote conversation translation', () => {
       await relay2.answer('session.subscribe', {
         session: restarted.sessions[0],
         cursor: 'session-rev-1',
-        translation: translationState({ automatic_revision: 0, automatic_epoch: 'epoch-2', automatic: [{ source_id: 'turn:5', pending: true }] }),
+        // The confirmed switch revision survives the Host restart; only the
+        // automatic progress epoch resets.
+        translation: translationState({ enabled: false, revision: 2, automatic_revision: 0, automatic_epoch: 'epoch-2', automatic: [{ source_id: 'turn:5', pending: true }] }),
       });
       await viWait(() => controller.state.translations[sessionId]?.automaticEpoch === 'epoch-2');
+      expect(controller.state.translations[sessionId]?.revision).toBe(2);
+      expect(controller.state.translations[sessionId]?.enabled).toBe(false);
       expect(controller.state.translations[sessionId]?.automatic['turn:5']?.pending).toBe(true);
       // …and a retired-epoch A packet (e.g. a ledger-replayed historical
       // result) never rolls the new baseline back.
