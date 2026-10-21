@@ -16,6 +16,10 @@ is not placed on `PATH`. Installing this skill does not configure MCP, write
 client configuration, or start Gian. Connection details are in `INSTALL.md`
 in a packaged skill and in `skill/gian-tool-install.md` in the Gian source tree.
 
+An explicitly configured external MCP client can start the skill-local
+`scripts/gian-tool-mcp` adapter. It connects to the already-running Host;
+installing this skill does not configure or start that client.
+
 ## Workflow
 
 1. Run `scripts/gianctl ping`. If it fails, report that the local Gian Host is not

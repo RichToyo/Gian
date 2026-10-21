@@ -52,8 +52,22 @@ test('import only writes a coordinate after a stable public tag and archive dige
   assert.deepEqual(readFileSync(output), original);
 });
 
-test('committed Remote Protocol pin remains the RichLogic release coordinate', () => {
-  const pin = JSON.parse(readFileSync(new URL('../delivery/remote/protocol-package.json', import.meta.url), 'utf8'));
+test('committed Remote Protocol coordinate matches its source or remains blocked pending publication', () => {
+  const coordinate = JSON.parse(readFileSync(new URL('../delivery/remote/protocol-package.json', import.meta.url), 'utf8'));
+  const source = JSON.parse(readFileSync(new URL('../packages/remote-protocol/package.json', import.meta.url), 'utf8'));
+  assert.equal(coordinate.name, source.name);
+  assert.equal(coordinate.version, source.version);
+  if (coordinate.status === 'pending-publication') {
+    assert.equal(coordinate.repository, 'RichToyo/Gian');
+    assert.equal(coordinate.tag, protocolCoordinates(source.version, coordinate.repository).tag);
+    assert.equal(coordinate.filename, protocolCoordinates(source.version, coordinate.repository).filename);
+    assert.equal(Object.hasOwn(coordinate, 'sha256'), false);
+    assert.equal(Object.hasOwn(coordinate, 'integrity'), false);
+    assert.throws(() => validateProtocolDependency(coordinate), /Publish the Remote Protocol package/);
+  } else {
+    assert.equal(validateProtocolDependency(coordinate).version, source.version);
+  }
+  const pin = protocolFixture();
   assert.equal(validateProtocolDependency(pin).repository, 'RichLogic/Gian');
   assert.equal(pin.url, protocolCoordinates(pin.version).url);
   assert.equal(pin.url, protocolCoordinates(pin.version, 'RichLogic/Gian').url);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { isPublicPath } from './delivery-certificate.mjs';
 import { loadMediaReviews, mediaReviewPath, scanPublicEntries } from './public-english.mjs';
@@ -91,7 +91,7 @@ test('media review is an exact path and digest, never an extension or SVG waiver
 
 test('reviewed bytes match the manifest and private snapshots stay out', () => {
   const reviews = loadMediaReviews(readFileSync(mediaReviewPath(), 'utf8'));
-  assert.equal(reviews.size, 28);
+  assert.equal(reviews.size, 31);
   for (const review of reviews.values()) {
     const bytes = readFileSync(new URL(`../${review.path}`, import.meta.url));
     assert.equal(createHash('sha256').update(bytes).digest('hex'), review.sha256, review.path);
@@ -110,6 +110,7 @@ test('reviewed bytes match the manifest and private snapshots stay out', () => {
 test('publication workflows scan the exact revision before upload or deploy', () => {
   const root = new URL('..', import.meta.url);
   const read = path => readFileSync(new URL(path, root), 'utf8');
+  const privateCheckout = existsSync(new URL('AGENTS.md', root));
   const scan = 'node scripts/check-public-english.mjs --ref';
   const publications = [
     ['.github/workflows/release.yml', ['gh release create']],
@@ -126,6 +127,10 @@ test('publication workflows scan the exact revision before upload or deploy', ()
     ['delivery/remote/.github/workflows/deploy.yml', ['scripts/deploy-ssh.mjs']],
   ];
   for (const [path, markers] of publications) {
+    if (!privateCheckout && !isPublicPath(path)) {
+      assert.equal(existsSync(new URL(path, root)), false, path);
+      continue;
+    }
     const workflow = read(path);
     const scanned = workflow.indexOf(scan);
     assert.ok(scanned >= 0, path);
@@ -150,10 +155,14 @@ test('publication workflows scan the exact revision before upload or deploy', ()
     '.github/workflows/security-audit.yml',
     '.github/workflows/remote.yml',
   ]) {
-    assert.equal(read(path).includes('check-public-english'), false, path);
+    assert.equal(isPublicPath(path), false, path);
+    if (privateCheckout) assert.equal(read(path).includes('check-public-english'), false, path);
+    else assert.equal(existsSync(new URL(path, root)), false, path);
   }
-  const historical = read('.github/workflows/release-owner-065.yml');
-  assert.match(historical, /run\.repository\.full_name, 'RichLogic\/Gian'/);
+  if (privateCheckout) {
+    const historical = read('.github/workflows/release-owner-065.yml');
+    assert.match(historical, /run\.repository\.full_name, 'RichLogic\/Gian'/);
+  }
   assert.equal(isPublicPath('.github/workflows/release-owner-065.yml'), false);
   assert.equal(isPublicPath('.github/workflows/public-english.yml'), true);
   assert.match(read('.github/workflows/proxy-release.yml'), /github\.repository == 'RichToyo\/Gian'/);

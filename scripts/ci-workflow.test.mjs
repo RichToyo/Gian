@@ -23,7 +23,7 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
   const [workflow, releaseWorkflow, securityWorkflow, proxyCertification, proxyRelease] = await Promise.all([
     privateCheckout ? readFile(workflowUrl, 'utf8') : Promise.resolve(null),
     readFile(releaseWorkflowUrl, 'utf8'),
-    readFile(securityWorkflowUrl, 'utf8'),
+    privateCheckout ? readFile(securityWorkflowUrl, 'utf8') : Promise.resolve(null),
     readFile(proxyCertificationWorkflowUrl, 'utf8'),
     readFile(proxyReleaseWorkflowUrl, 'utf8'),
   ]);
@@ -47,6 +47,9 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
     assert.match(workflow, /node scripts\/source-gate.mjs/);
     assert.match(workflow, /fail-fast: false/);
     assert.doesNotMatch(workflow, /test:e2e|quality:package|test:smoke/);
+  } else {
+    assert.equal(isPublicPath('.github/workflows/security-audit.yml'), false);
+    assert.equal(existsSync(securityWorkflowUrl), false);
   }
 });
 

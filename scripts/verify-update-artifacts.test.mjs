@@ -260,19 +260,21 @@ test('desktop release build requires credentials and generates public latest met
   );
 });
 
-test('RichToyo embedded feed does not move this release publication or the metadata broker', async () => {
+test('RichToyo publication and metadata broker agree with the embedded feed', async () => {
   const release = await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
   const promote = await readFile(new URL('../.github/workflows/release-promote.yml', import.meta.url), 'utf8');
   for (const workflow of [release, promote]) {
-    assert.match(workflow, /github.repository == 'RichLogic\/Gian' && github.ref == 'refs\/heads\/main'/);
-    assert.doesNotMatch(workflow, /RichToyo|build\.publish/);
+    assert.match(workflow, /github.repository == 'RichToyo\/Gian' && github.ref == 'refs\/heads\/main'/);
+    assert.doesNotMatch(workflow, /RichLogic\/Gian|build\.publish/);
   }
   assert.match(release, /gh release create/);
   assert.match(release, /gh release upload/);
   assert.match(release, /--app-update-config packages\/desktop\/release\/mac-arm64\/Gian.app\/Contents\/Resources\/app-update.yml/);
   assert.match(promote, /gh release edit "\$TAG" --draft=false --latest/);
   const mainSource = await readFile(new URL('../packages/desktop/src/main.ts', import.meta.url), 'utf8');
-  assert.match(mainSource, /function releaseRepository\(\): string \{\s*return process.env\['GIAN_RELEASE_REPOSITORY'\]\?\.trim\(\) \|\| 'RichLogic\/Gian';/);
+  assert.match(mainSource, /function releaseRepository\(\): string \{\s*return process.env\['GIAN_RELEASE_REPOSITORY'\]\?\.trim\(\) \|\| OFFICIAL_APP_REPOSITORY;/);
+  const policy = await readFile(new URL('../packages/shared/src/official-catalog-source.ts', import.meta.url), 'utf8');
+  assert.match(policy, /OFFICIAL_APP_REPOSITORY = 'RichToyo\/Gian'/);
   assert.doesNotMatch(mainSource, /setFeedURL\(/);
 });
 

@@ -10,12 +10,13 @@ test('capture authors English changelog notes and keeps historical RichLogic rel
   assert.equal(scanned.ok, true, JSON.stringify(scanned.violations));
   assert.equal(source.includes('history-copy'), false);
   assert.match(source.toString(), /const repository = 'RichLogic\/Gian-Proxies'/);
-  assert.match(proxyReleaseNotes.codex.text, /0\.161\.0/);
-  assert.match(proxyReleaseNotes.claude.text, /2\.1\.296/);
-  assert.match(proxyReleaseNotes.dsh.text, /0\.2\.0-rc\.2/);
-  assert.match(proxyReleaseNotes.kimi.text, /Proxy Protocol SDK 1\.0\.2/);
-  assert.match(proxyReleaseNotes.grok.text, /1\.0\.46/);
-  assert.match(proxyReleaseNotes.zcode.text, /0\.16\.9/);
+  assert.match(proxyReleaseNotes.codex.text, /0\.163\.0/);
+  assert.match(proxyReleaseNotes.claude.text, /2\.1\.304/);
+  assert.match(proxyReleaseNotes.dsh.text, /0\.2\.1-rc\.2/);
+  assert.match(proxyReleaseNotes.kimi.text, /2\.2\.0/);
+  assert.match(proxyReleaseNotes.grok.text, /1\.0\.62/);
+  assert.match(proxyReleaseNotes.zcode.text, /0\.17\.0/);
+  assert.match(proxyReleaseNotes.antigravity.text, /1\.4\.1/);
   for (const note of Object.values(proxyReleaseNotes)) {
     assert.equal(typeof note.text, 'string');
     assert.equal(Object.hasOwn(note, 'zh'), false);

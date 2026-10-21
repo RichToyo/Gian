@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "f64426d51ab1de698c1e85009481f2317c1d01d9",
+  "sourceCommit": "75c4bcbc256668065c485772831a204309341eca",
   "workingTree": false,
   "files": [
     {
@@ -664,7 +664,7 @@
     {
       "path": "delivery/proxies/scripts/catalog-docs-policy.test.mjs",
       "mode": 420,
-      "sha256": "8b6f6e9e01b4ac54a4ccf2bc51d6126c259d5c844d29aab85fd31957ff653a14"
+      "sha256": "b596e6c258c3f20f4b0650bc563d13df296836c810edb221667b564554612bb4"
     },
     {
       "path": "delivery/proxies/scripts/protocol-dependency.mjs",
@@ -7829,7 +7829,7 @@
     {
       "path": "packages/tool-cli/skill/gian-tool/SKILL.md",
       "mode": 420,
-      "sha256": "e0670f2ea9344d54f27e76e7e2f25d181acf94b8367c775caccc4438b44b92dd"
+      "sha256": "a86dd004be92bb5681951f291e037f3522642cc2546a83de297372471ef8726f"
     },
     {
       "path": "packages/tool-cli/src/cli.ts",
@@ -10424,7 +10424,7 @@
     {
       "path": "scripts/capture-proxy-release-evidence.test.mjs",
       "mode": 420,
-      "sha256": "d1d7a85eda95de8f68e3a817276f24d4ec6e8ecb6f029db521e0a00b904f08eb"
+      "sha256": "73e16effdc288898860fa07b8da43763dd2690b42a698698e43ff7a7058f56a3"
     },
     {
       "path": "scripts/catalog-release.test.mjs",
@@ -10494,7 +10494,7 @@
     {
       "path": "scripts/ci-workflow.test.mjs",
       "mode": 420,
-      "sha256": "474f0baa109e7aa503fd906a2a68490c8a081044eccfbcca10b7ef0b33830976"
+      "sha256": "9c37be38fc745911fd36f98c6e048b63fa34b55ee07dc045034cbad5d48dc2b5"
     },
     {
       "path": "scripts/compile-official-catalog.mjs",
@@ -10789,7 +10789,7 @@
     {
       "path": "scripts/public-english.test.mjs",
       "mode": 420,
-      "sha256": "c9e41860cb2be528aae1edcae1b74df29a2184d263fa2338a036997fc7f626a1"
+      "sha256": "eafd4b9a51ce87f362de9644a5d6e91d88a17141d8cabc4dad0ad586b994e4ba"
     },
     {
       "path": "scripts/quality-lock.mjs",
@@ -10824,7 +10824,7 @@
     {
       "path": "scripts/remote-protocol-package.test.mjs",
       "mode": 420,
-      "sha256": "a2dd956952974cc13dea85727df7cb4d76c3c7259e23ed029dfc01ff1281a978"
+      "sha256": "45c67a9359dfc88b43778ad85e0ff4a5ba02b9bc9f41de5dc1178a463c4294ec"
     },
     {
       "path": "scripts/render-daemon-unit.mjs",
@@ -11099,7 +11099,7 @@
     {
       "path": "scripts/verify-update-artifacts.test.mjs",
       "mode": 420,
-      "sha256": "4de427c6b3517b8e163ff535a26797e7a7f39b09cd8de8b029901bd7458ddd34"
+      "sha256": "f5025d6bc1316dec255f20aa7b863fc0d0653320f587cc661569ff83330e4771"
     },
     {
       "path": "scripts/verify-zcode-runtime-protocol.mjs",
