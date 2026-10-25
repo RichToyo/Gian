@@ -5,18 +5,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stageProxyProtocolPackage, proxyProtocolPackageReceipt } from './proxy-protocol-package.mjs';
-import { importProxyProtocol } from './import-proxy-protocol.mjs';
+import { importProxyProtocol, parseCliArgs } from './import-proxy-protocol.mjs';
 import { protocolCoordinates, validateProtocolDependency, verifyProtocolArchive } from '../delivery/proxies/scripts/protocol-dependency.mjs';
 
 const archiveBytes = Buffer.from('synthetic protocol archive; never a publication coordinate');
 const revision = 'a'.repeat(40);
-function coordinateFixture() {
+function coordinateFixture(version = '1.0.0', repository = 'RichLogic/Gian') {
   return {
-    schema: 1, name: '@gian/proxy-protocol', repository: 'RichLogic/Gian', version: '1.0.0',
-    ...protocolCoordinates('1.0.0'), sourceCommit: revision, size: archiveBytes.length,
+    schema: 1, name: '@gian/proxy-protocol', repository, version,
+    ...protocolCoordinates(version, repository), sourceCommit: revision, size: archiveBytes.length,
     sha256: createHash('sha256').update(archiveBytes).digest('hex'),
     integrity: `sha512-${createHash('sha512').update(archiveBytes).digest('base64')}`,
-    dependencies: { zod: '4.4.3' },
+    dependencies: { zod: '4.6.6' },
   };
 }
 function temporaryRoot(t) {
@@ -153,6 +153,46 @@ test('import verifies public release, tag ancestry and exact bytes before atomic
   await assert.rejects(importProxyProtocol('1.0.0', output, fetcher), /Cannot replace/);
 });
 
+test('import selects the validated RichToyo publication repository and rejects repository mismatches', async t => {
+  const root = temporaryRoot(t);
+  const output = join(root, 'protocol-package.json');
+  const coordinate = coordinateFixture('1.0.3', 'RichToyo/Gian');
+  const { fetcher } = releaseFixture(coordinate);
+  writeFileSync(output, JSON.stringify({ status: 'pending-publication' }));
+  const result = await importProxyProtocol('1.0.3', output, { repository: 'RichToyo/Gian', fetcher });
+  assert.equal(result.repository, 'RichToyo/Gian');
+  assert.equal(result.version, '1.0.3');
+  assert.deepEqual(JSON.parse(readFileSync(output)), coordinate);
+
+  // An unknown/private repository is never a publication source.
+  await assert.rejects(
+    importProxyProtocol('1.0.3', output, { repository: 'acme/Gian', fetcher }),
+    /RichLogic pin repository or RichToyo publication/,
+  );
+  assert.deepEqual(JSON.parse(readFileSync(output)), coordinate);
+
+  // An explicitly empty repository is rejected before any fallback or network call.
+  for (const repository of [null, '']) {
+    await assert.rejects(
+      importProxyProtocol('1.0.3', output, { repository, fetcher }),
+      /Explicitly empty/,
+    );
+    assert.deepEqual(JSON.parse(readFileSync(output)), coordinate);
+  }
+
+  // A receipt whose repository differs from the selected source is rejected.
+  const mismatched = coordinateFixture('1.0.3', 'RichLogic/Gian');
+  const mismatchedFixture = releaseFixture(coordinate);
+  const mismatchFetcher = async url => (
+    url.endsWith('/protocol-package.json') ? Response.json(mismatched) : mismatchedFixture.fetcher(url)
+  );
+  await assert.rejects(
+    importProxyProtocol('1.0.3', output, { repository: 'RichToyo/Gian', fetcher: mismatchFetcher }),
+    /repository or version differs/,
+  );
+  assert.deepEqual(JSON.parse(readFileSync(output)), coordinate);
+});
+
 test('failed public requests and oversized metadata do not create a consumer pin', async t => {
   const root = temporaryRoot(t);
   const output = join(root, 'protocol-package.json');
@@ -180,11 +220,24 @@ test('publication tests the archive in isolation, publishes only certified bytes
   assert.ok(scans.some(index => index > upload && index < release));
 });
 
-test('committed Proxy Protocol pin remains the RichLogic release coordinate', () => {
+test('CLI argument parsing keeps the historical two-argument invocation and rejects extras', () => {
+  const legacy = parseCliArgs(['1.0.0', '/tmp/pin.json']);
+  assert.equal(legacy.version, '1.0.0');
+  assert.equal(legacy.destination, '/tmp/pin.json');
+  assert.deepEqual(legacy.options, {}, 'omitted repository stays absent, never an empty value');
+  const explicit = parseCliArgs(['1.0.3', '/tmp/pin.json', 'RichToyo/Gian']);
+  assert.deepEqual(explicit.options, { repository: 'RichToyo/Gian' });
+  assert.throws(() => parseCliArgs(['1.0.3', '/tmp/pin.json', 'RichToyo/Gian', 'extra']), /Usage/);
+  assert.throws(() => parseCliArgs(['1.0.3']), /Usage/);
+});
+
+test('committed Proxy Protocol pin is a validated coordinate of an approved repository', () => {
   const pin = JSON.parse(readFileSync(new URL('../delivery/proxies/protocol-package.json', import.meta.url), 'utf8'));
-  assert.equal(validateProtocolDependency(pin).repository, 'RichLogic/Gian');
-  assert.equal(pin.url, protocolCoordinates(pin.version).url);
-  assert.equal(pin.url, protocolCoordinates(pin.version, 'RichLogic/Gian').url);
+  const repository = validateProtocolDependency(pin).repository;
+  assert.ok(['RichLogic/Gian', 'RichToyo/Gian'].includes(repository), `unexpected pin repository ${repository}`);
+  assert.equal(pin.url, protocolCoordinates(pin.version, repository).url);
+  assert.equal(pin.repository, repository);
+  assert.equal(pin.tag, `proxy-protocol-v${pin.version}`);
   const omitted = { ...pin };
   delete omitted.repository;
   for (const candidate of [omitted, { ...pin, repository: undefined }, { ...pin, repository: null }, { ...pin, repository: '' }, { ...pin, repository: 'RichLogic/Gian-Dev' }]) {

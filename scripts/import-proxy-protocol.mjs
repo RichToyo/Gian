@@ -27,8 +27,19 @@ async function boundedBytes(response, maximum) {
   return Buffer.concat(chunks);
 }
 
-export async function importProxyProtocol(version, destination, fetcher = fetch) {
-  const expected = protocolCoordinates(version);
+export async function importProxyProtocol(version, destination, options = {}) {
+  const fetcher = typeof options === 'function' ? options : (options.fetcher ?? fetch);
+  let requestedRepository;
+  if (typeof options === 'object' && options !== null && options.repository !== undefined) {
+    if (options.repository === null || options.repository === '') {
+      throw new Error('Explicitly empty Proxy Protocol repository is not a valid publication source');
+    }
+    requestedRepository = options.repository;
+  }
+  const selectedRepository = requestedRepository
+    ?? (existsSync(destination) ? JSON.parse(readFileSync(destination)).repository : undefined)
+    ?? protocolRepository;
+  const expected = protocolCoordinates(version, selectedRepository);
   const signal = AbortSignal.timeout(120_000);
   const request = async url => {
     const response = await fetcher(url, {
@@ -39,12 +50,12 @@ export async function importProxyProtocol(version, destination, fetcher = fetch)
     return response;
   };
   const json = async url => JSON.parse((await boundedBytes(await request(url), 1024 * 1024)).toString('utf8'));
-  const api = `https://api.github.com/repos/${protocolRepository}`;
+  const api = `https://api.github.com/repos/${selectedRepository}`;
   const release = await json(`${api}/releases/tags/${expected.tag}`);
   if (release.draft !== false || release.prerelease !== false || release.tag_name !== expected.tag) {
     throw new Error('Only a published stable Gian Proxy Protocol package can be imported');
   }
-  const receiptUrl = `https://github.com/${protocolRepository}/releases/download/${expected.tag}/protocol-package.json`;
+  const receiptUrl = `https://github.com/${selectedRepository}/releases/download/${expected.tag}/protocol-package.json`;
   const archiveAsset = release.assets?.filter(asset => asset.name === expected.filename);
   const receiptAsset = release.assets?.filter(asset => asset.name === 'protocol-package.json');
   if (archiveAsset?.length !== 1 || archiveAsset[0].browser_download_url !== expected.url
@@ -52,7 +63,10 @@ export async function importProxyProtocol(version, destination, fetcher = fetch)
     throw new Error('Published Proxy Protocol assets are incomplete or ambiguous');
   }
   const coordinate = validateProtocolDependency(await json(receiptUrl));
-  if (coordinate.version !== version || archiveAsset[0].size !== coordinate.size
+  if (coordinate.version !== version || coordinate.repository !== selectedRepository) {
+    throw new Error('Proxy Protocol receipt repository or version differs from the requested release');
+  }
+  if (archiveAsset[0].size !== coordinate.size
     || (archiveAsset[0].digest && archiveAsset[0].digest !== `sha256:${coordinate.sha256}`)) {
     throw new Error('Proxy Protocol receipt differs from the requested release asset');
   }
@@ -91,9 +105,14 @@ export async function importProxyProtocol(version, destination, fetcher = fetch)
   return coordinate;
 }
 
+export function parseCliArgs(argv) {
+  const [version, destination, repository, extra] = argv;
+  if (!destination || extra) throw new Error('Usage: import-proxy-protocol.mjs <version> <coordinate-file> [repository]');
+  return { version, destination, options: repository ? { repository } : {} };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [version, destination, extra] = process.argv.slice(2);
-  if (!destination || extra) throw new Error('Usage: import-proxy-protocol.mjs <version> <coordinate-file>');
-  const result = await importProxyProtocol(version, destination);
-  console.log(`Pinned ${result.name}@${result.version} from ${protocolRepository}`);
+  const { version, destination, options } = parseCliArgs(process.argv.slice(2));
+  const result = await importProxyProtocol(version, destination, options);
+  console.log(`Pinned ${result.name}@${result.version} from ${result.repository}`);
 }

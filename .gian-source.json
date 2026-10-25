@@ -10674,7 +10674,8 @@
     {
       "path": "scripts/import-proxy-protocol.mjs",
       "mode": 420,
-      "sha256": "df2c6b30ed7a2875dc3650423db2fd47cd3b343110fc8c7f0a10269cd129f353"
+      "sha256": "da17239fd7fcd0b9eb07c2ab0581cb0c96053e766aebf7f7b4b93abafeaf1eab",
+      "sourceCommit": "5c9de5dd753c9a43d09cf9b6cc3afe42061ea5c3"
     },
     {
       "path": "scripts/import-remote-protocol.mjs",
@@ -10779,8 +10780,8 @@
     {
       "path": "scripts/proxy-protocol-package.test.mjs",
       "mode": 420,
-      "sha256": "d3bf8c97314f211360e88ec4b2efdbce6e9cb65d79b387cf5fa132f8b5f70ea7",
-      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166"
+      "sha256": "82529c9d7d14f331e21adf0b78e39dde9883ea66e1e0615ff8506970dad38c5f",
+      "sourceCommit": "5c9de5dd753c9a43d09cf9b6cc3afe42061ea5c3"
     },
     {
       "path": "scripts/proxy-real-acceptance-catalog.mjs",
@@ -11205,6 +11206,15 @@
         ".github/workflows/proxy-protocol-release.yml",
         "scripts/proxy-protocol-package.test.mjs",
         "pnpm-lock.yaml"
+      ]
+    },
+    {
+      "sourceRepository": "RichLogic/Gian-Dev",
+      "sourceCommit": "5c9de5dd753c9a43d09cf9b6cc3afe42061ea5c3",
+      "scope": "Repository-aware protocol importer; published package tags and bytes are unchanged.",
+      "paths": [
+        "scripts/import-proxy-protocol.mjs",
+        "scripts/proxy-protocol-package.test.mjs"
       ]
     }
   ]
