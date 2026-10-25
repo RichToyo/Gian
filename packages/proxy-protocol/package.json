@@ -1,6 +1,6 @@
 {
   "name": "@gian/proxy-protocol",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
@@ -30,7 +30,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "zod": "^4.3.6"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@types/node": "^24.12.2",

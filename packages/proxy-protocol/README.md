@@ -5,13 +5,13 @@ implementations. Node.js 24 is the supported delivery runtime.
 
 ## Public package
 
-Public source for this package is `RichToyo/Gian`. Published
-`proxy-protocol-vX.Y.Z` releases containing `gian-proxy-protocol-X.Y.Z.tgz`,
-`protocol-package.json` and `SHA256SUMS` remain the existing `RichLogic/Gian`
-release assets. Consumers use that exact archive URL and lockfile integrity,
-not a branch, `latest` URL, private checkout, temporary GitHub CDN URL, or a
-RichToyo path that does not contain the asset. The package does not require
-npm registry publication or authentication to download.
+Public source and new package releases use `RichToyo/Gian`. Version 1.0.3
+and later use immutable `proxy-protocol-vX.Y.Z` releases containing
+`gian-proxy-protocol-X.Y.Z.tgz`, `protocol-package.json` and `SHA256SUMS`.
+Existing versions through 1.0.2 retain their original `RichLogic/Gian` assets.
+Consumers use the exact archive URL and lockfile integrity, not a branch,
+`latest` URL, private checkout or temporary GitHub CDN URL. The package does
+not require npm registry publication or authentication to download.
 
 ```ts
 import { PROTOCOL_NAME, SUPPORTED_PROTOCOL_VERSIONS } from '@gian/proxy-protocol';

@@ -62,6 +62,7 @@ jobs:
           cd "$RUNNER_TEMP/proxy-protocol-consumer"
           node -e 'require("fs").writeFileSync("package.json",JSON.stringify({name:"proxy-protocol-consumer",private:true,type:"module"}))'
           npm install --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP"/proxy-protocol-package/*.tgz
+          npm audit --omit=dev --audit-level=high
           "$GITHUB_WORKSPACE/packages/proxy-protocol/node_modules/.bin/tsc" --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2022,DOM --skipLibCheck --typeRoots "$GITHUB_WORKSPACE/packages/proxy-protocol/node_modules/@types" --outDir compiled consumer.mts
           node compiled/consumer.mjs
       - uses: actions/upload-artifact@v4

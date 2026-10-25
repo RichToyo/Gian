@@ -1,5 +1,11 @@
 # Proxy Protocol Changelog
 
+## 1.0.3
+
+- Pin Zod 4.6.6 to address GHSA-mrhx-c7xc-m3w5.
+- Preserve all existing wire schemas, negotiated versions and public exports.
+- Audit the actual isolated archive consumer before publication.
+
 ## 1.0.2
 
 - Allow explicit Proxy opt-in to valueless cancellation through the existing

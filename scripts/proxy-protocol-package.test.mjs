@@ -168,7 +168,7 @@ test('publication tests the archive in isolation, publishes only certified bytes
     "github.repository == 'RichToyo/Gian'", 'git merge-base --is-ancestor',
     'node scripts/check-public-english.mjs --ref',
     'pnpm --filter @gian/proxy-protocol test', 'node --test scripts/proxy-protocol-package.test.mjs',
-    'npm install --ignore-scripts', 'node compiled/consumer.mjs', 'verifyProtocolArchive', '--latest=false',
+    'npm install --ignore-scripts', 'npm audit --omit=dev --audit-level=high', 'node compiled/consumer.mjs', 'verifyProtocolArchive', '--latest=false',
   ]) assert.ok(workflow.includes(required), `missing publication boundary: ${required}`);
   for (const forbidden of ['GIAN_DEV_READ_TOKEN', 'quality:package', 'verify:preview', 'secrets.APPLE', '--clobber']) {
     assert.ok(!workflow.includes(forbidden), `unexpected App coupling: ${forbidden}`);

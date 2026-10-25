@@ -74,7 +74,8 @@
     {
       "path": ".github/workflows/proxy-protocol-release.yml",
       "mode": 420,
-      "sha256": "e3734fe669e46e6481330c89aff59d25f89eb1021ed5e94667cfa2f72ee29486"
+      "sha256": "090a7811854c65ab3df30d7129d19fc57604fa923dbe3089d04333691ad7649f",
+      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166"
     },
     {
       "path": ".github/workflows/proxy-release.yml",
@@ -6499,17 +6500,20 @@
     {
       "path": "packages/proxy-protocol/CHANGELOG.md",
       "mode": 420,
-      "sha256": "45f34e12b680b733901b3e22a828e3ec716488ae4cb97726f4280f773935bad0"
+      "sha256": "33b37a3cb17589ec644929535ac717b32ef24fbdc9be12afb6c57d30f63f5f44",
+      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166"
     },
     {
       "path": "packages/proxy-protocol/package.json",
       "mode": 420,
-      "sha256": "37fe790d4d47ac55e3d9e4e8adf44bf3275bdb6cd9d58006d0cd1dd79b21cbc9"
+      "sha256": "7f43ed8c4f9c8d47e3fb5658f71fecbe3dd9585516b8d80790bc6d349deb975b",
+      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166"
     },
     {
       "path": "packages/proxy-protocol/README.md",
       "mode": 420,
-      "sha256": "e8b1a4cb93107e0f2b214acdd91683a460a661af3440cfaafca3f771ec52e61d"
+      "sha256": "a555fd3fe62f559e21aea44408a8fcd2a2a34fd13ffee0849f6c4029f2190d4d",
+      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166"
     },
     {
       "path": "packages/proxy-protocol/src/bounded-command.ts",
@@ -10364,7 +10368,8 @@
     {
       "path": "pnpm-lock.yaml",
       "mode": 420,
-      "sha256": "4ca82469e2fa979b4b4957a7cdf9c715046e1932225f06961b7ee3e9548198f4"
+      "sha256": "1de873e76fef4225630bc7ce65db806608f48942c5792eef3e05faf5a9416395",
+      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166"
     },
     {
       "path": "pnpm-workspace.yaml",
@@ -10774,7 +10779,8 @@
     {
       "path": "scripts/proxy-protocol-package.test.mjs",
       "mode": 420,
-      "sha256": "3d45bf36659f1385ae0b0d9d04ab80b4af5412895bf06c7b71d6b97a912f30d2"
+      "sha256": "d3bf8c97314f211360e88ec4b2efdbce6e9cb65d79b387cf5fa132f8b5f70ea7",
+      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166"
     },
     {
       "path": "scripts/proxy-real-acceptance-catalog.mjs",
@@ -11185,6 +11191,21 @@
       "path": "tsconfig.json",
       "mode": 420,
       "sha256": "e8c5a096da507af4d2cfe5be44de01c8b5b685f8f3595ea15723c99dc72cce0f"
+    }
+  ],
+  "curatedUpdates": [
+    {
+      "sourceRepository": "RichLogic/Gian-Dev",
+      "sourceCommit": "85696240aec5f0d68bf81f1c9c49a91efe60d166",
+      "scope": "Proxy Protocol 1.0.3 only; baseline sourceCommit above is retained for the unchanged App source.",
+      "paths": [
+        "packages/proxy-protocol/CHANGELOG.md",
+        "packages/proxy-protocol/README.md",
+        "packages/proxy-protocol/package.json",
+        ".github/workflows/proxy-protocol-release.yml",
+        "scripts/proxy-protocol-package.test.mjs",
+        "pnpm-lock.yaml"
+      ]
     }
   ]
 }
