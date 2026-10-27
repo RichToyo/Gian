@@ -34,6 +34,8 @@ export function staticFiles(rootDir: string): MiddlewareHandler {
     try {
       return context.body(new Uint8Array(await tryRead(target)), 200, contentTypeFor(target));
     } catch {
+      // Never bootstrap the full App as a missing independent panel entry.
+      if (requestPath === '/menubar.html') return context.text('Menubar entry is unavailable', 503);
       try {
         const body = await readFile(resolve(rootReal, 'index.html'));
         return context.body(new Uint8Array(body), 200, {

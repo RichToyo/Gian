@@ -73,6 +73,8 @@ interface BringUpInput {
   preparedLaunch?: PreparedSessionLaunch;
   executorDefaults?: AgentProxyDefaults;
   sessionConfig?: Record<string, ConfigValue>;
+  turnConfig?: Record<string, ConfigValue>;
+  explicitDefaultRoles?: Array<'model' | 'effort' | 'approval_mode' | 'execution_mode'>;
   /** Runs on the acquired connection, after its catalog and before native create. */
   validateCatalog: (catalog: ProxyCatalog, capabilities: Record<string, unknown>) => void;
   hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
@@ -112,13 +114,8 @@ function initialTurnConfigFromCreate(
     else if (option.category === 'effort' && roles.effort) config[option.id] = roles.effort;
     else if (option.category === 'fast') config[option.id] = roles.serviceTier === 'fast';
     else if (!option.category && agentOptions?.[option.id] !== undefined) {
-      // Role-less Agent option defaults (e.g. provider) seed the initial turn
-      // config; explicit create values already won above. Ids absent from the
-      // catalog never iterate, so unknown stored ids are skipped here.
-      const value = agentOptions[option.id]!;
-      if (!option.choices || option.choices.some(choice => Object.is(choice.value, value))) {
-        config[option.id] = value;
-      }
+      // New-session preferences were validated before native creation.
+      config[option.id] = agentOptions[option.id]!;
     }
   }
   return config;
@@ -225,9 +222,12 @@ export class SessionLifecycleService {
       throw new Error('service_tier is codex-only');
     }
     const serviceTier = officialKind === 'codex' ? input.service_tier ?? null : null;
-    const managedDefaults = resolvedAgent
+    const savedDefaults = resolvedAgent
       ? resolvedAgent.agent.defaults
       : this.proxyDefaults?.(executor);
+    const managedDefaults = savedDefaults
+      ? { ...savedDefaults, options: { ...(savedDefaults.options ?? {}) } }
+      : undefined;
     const configuredMode = managedDefaults?.mode ?? '';
     let approvalMode: ApprovalMode | null = null;
     let catalogValidated = false;
@@ -250,11 +250,11 @@ export class SessionLifecycleService {
           ? cfg.default_codex_effort.trim()
           : '';
     const explicitModel = typeof input.model === 'string' ? input.model.trim() : '';
-    const effectiveModel = explicitModel || defaultModel || null;
+    let effectiveModel = explicitModel || defaultModel || null;
     const explicitEffort = typeof input.thinking_effort === 'string'
       ? input.thinking_effort.trim()
       : '';
-    const effectiveEffort: ThinkingEffort | null = explicitEffort
+    let effectiveEffort: ThinkingEffort | null = explicitEffort
       ? explicitEffort as ThinkingEffort
       : defaultEffort
         ? defaultEffort as ThinkingEffort
@@ -286,6 +286,13 @@ export class SessionLifecycleService {
         ...(proxyVersion ? { proxyVersion } : {}),
         ...(preparedLaunch ? { preparedLaunch } : {}),
         validateCatalog: (catalog, capabilities) => {
+          for (const option of catalog.configOptions) {
+            const explicit = option.binding === 'session' ? input.session_config : input.turn_config;
+            if (!explicit || !Object.hasOwn(explicit, option.id)) continue;
+            const value = explicit[option.id];
+            if (option.role === 'model') effectiveModel = typeof value === 'string' ? value : null;
+            if (option.role === 'effort') effectiveEffort = typeof value === 'string' ? value as ThinkingEffort : null;
+          }
           // Semantics select the compatibility route, never a vocabulary.
           // The exact connection's choices/defaults/binding own every value.
           const nativeMode = catalogModeSemantics(executor,
@@ -329,13 +336,19 @@ export class SessionLifecycleService {
           ? {
               executorDefaults: {
                 model: defaultModel,
-                thinking: defaultEffort,
-                mode: configuredMode,
+                thinking: effectiveEffort ?? '',
+                mode: input.approval_mode ?? configuredMode,
                 options: { ...(managedDefaults.options ?? {}) },
               },
             }
           : {}),
         sessionConfig,
+        turnConfig: { ...input.turn_config },
+        explicitDefaultRoles: [
+          ...(explicitModel ? ['model' as const] : []),
+          ...(explicitEffort ? ['effort' as const] : []),
+          ...(input.approval_mode !== undefined ? ['approval_mode' as const, 'execution_mode' as const] : []),
+        ],
         ...(officialKind === 'codex'
           ? {
               hostServiceIdentity: {

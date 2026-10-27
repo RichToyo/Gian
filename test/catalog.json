@@ -94,6 +94,8 @@
         "packages/host/test/link-preview-fetch.test.ts",
         "packages/host/test/maintenance-lock-path.test.ts",
         "packages/host/test/map-concurrency.test.ts",
+        "packages/host/test/menubar-range.test.ts",
+        "packages/host/test/menubar-quota.test.ts",
         "packages/host/test/normalize-cc-parsers.test.ts",
         "packages/host/test/normalize-kimi.test.ts",
         "packages/host/test/normalize-protocol-v1.test.ts",
@@ -192,6 +194,10 @@
         "packages/host/test/gian-tool-worktree.test.ts",
         "packages/host/test/github-release-fetch.test.ts",
         "packages/host/test/history-store.test.ts",
+        "packages/host/test/menubar-usage.test.ts",
+        "packages/host/test/menubar-ingestion.test.ts",
+        "packages/host/test/menubar-routes.test.ts",
+        "packages/host/test/menubar-static.test.ts",
         "packages/host/test/jsonl-watcher.test.ts",
         "packages/host/test/managed-agent-skill.test.ts",
         "packages/host/test/managed-agent-runtime.test.ts",
@@ -413,6 +419,7 @@
         "packages/desktop/test/legacy-host-retirement.test.ts",
         "packages/desktop/test/managed-host-shutdown.test.ts",
         "packages/desktop/test/managed-host.test.ts",
+        "packages/desktop/test/menubar-state.test.ts",
         "packages/desktop/test/native-notifications.test.ts",
         "packages/desktop/test/resource-picker.test.ts",
         "packages/desktop/test/screenshot-controller.test.ts",
@@ -558,6 +565,7 @@
     {
       "id": "cc-proxy-unit",
       "patterns": [
+        "packages/proxies/cc-proxy/test/official-quota.test.ts",
         "packages/proxies/cc-proxy/test/build-prompt.test.ts",
         "packages/proxies/cc-proxy/test/input-localimage.test.ts",
         "packages/proxies/cc-proxy/test/protocol-v2.test.ts",
@@ -602,6 +610,7 @@
     {
       "id": "cc-proxy-system",
       "patterns": [
+        "packages/proxies/cc-proxy/test/official-quota-control.test.ts",
         "packages/proxies/cc-proxy/test/approval-server.test.ts",
         "packages/proxies/cc-proxy/test/display-name.test.ts",
         "packages/proxies/cc-proxy/test/model-discovery.test.ts",
@@ -631,6 +640,7 @@
       "id": "codex-proxy-unit",
       "patterns": [
         "packages/proxies/codex-proxy/test/err-005-input.test.ts",
+        "packages/proxies/codex-proxy/test/official-quota.test.ts",
         "packages/proxies/codex-proxy/test/slash.test.ts",
         "packages/proxies/codex-proxy/test/customization.test.ts",
         "packages/proxies/codex-proxy/test/customization-cli.test.ts",
@@ -697,6 +707,8 @@
       "id": "kimi-proxy-unit",
       "patterns": [
         "packages/proxies/kimi-proxy/test/customization.test.ts",
+        "packages/proxies/kimi-proxy/test/official-quota.test.ts",
+        "packages/proxies/kimi-proxy/test/kimi-errors.test.ts",
         "packages/proxies/kimi-proxy/test/kimi-server.test.ts",
         "packages/proxies/kimi-proxy/test/projector.test.ts",
         "packages/proxies/kimi-proxy/test/task-queue.test.ts"
@@ -757,6 +769,7 @@
     {
       "id": "antigravity-proxy-unit",
       "patterns": [
+        "packages/proxies/antigravity-proxy/test/official-quota.test.ts",
         "packages/proxies/antigravity-proxy/test/catalog.test.ts",
         "packages/proxies/antigravity-proxy/test/events.test.ts",
         "packages/proxies/antigravity-proxy/test/mcp.test.ts",
@@ -796,6 +809,7 @@
     {
       "id": "grok-proxy-unit",
       "patterns": [
+        "packages/proxies/grok-proxy/test/official-quota.test.ts",
         "packages/proxies/grok-proxy/test/acp-wire.test.ts",
         "packages/proxies/grok-proxy/test/input-localfile.test.ts",
         "packages/proxies/grok-proxy/test/slash-policy.test.ts",
@@ -1057,6 +1071,7 @@
         "packages/proxies/dsh-proxy/test/profile.test.ts",
         "packages/proxies/dsh-proxy/test/contract.test.ts",
         "packages/proxies/dsh-proxy/test/host-validator.test.ts",
+        "packages/proxies/dsh-proxy/test/official-quota.test.ts",
         "packages/proxies/dsh-proxy/test/idempotency-replay.test.ts",
         "packages/proxies/dsh-proxy/test/customization.test.ts",
         "packages/proxies/dsh-proxy/test/capabilities.test.ts",

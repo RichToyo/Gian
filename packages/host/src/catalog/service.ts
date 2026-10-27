@@ -40,6 +40,9 @@ import type { RuntimeKind } from '../runtime/resolver.js';
 
 export type OfficialBundledLaunch = OfficialPresence;
 
+/** Installation identity only; not a claim that a Runtime or account is ready. */
+export type LocalProxyInstallation = Pick<ProxyCatalogItem, 'pluginId' | 'installation'> & { revision?: string };
+
 export class CatalogService {
   private localizedFiles: Map<string, Buffer> | null = null;
   private localizedContent: CatalogLocalizations | null = null;
@@ -147,6 +150,42 @@ export class CatalogService {
 
   async list(): Promise<ProxyCatalogList> {
     return this.observeCatalog('user');
+  }
+
+  /** Menubar listing must not inspect Runtime trees. In Dev, the full Catalog
+   * projection hashes every installed CLI tree before returning any row. */
+  async listLocal(): Promise<{ items: LocalProxyInstallation[] }> {
+    if (this.options.developmentProxies) {
+      const launches = await this.options.developmentProxies();
+      return { items: launches.map(launch => ({
+        pluginId: launch.pluginId,
+        revision: createHash('sha256').update(JSON.stringify([launch.entryPath, launch.manifestSha256, launch.runtime, launch.pluginVersion])).digest('hex'),
+        installation: { state: 'installed', source: 'giandev', installedVersion: launch.pluginVersion,
+          latestVersion: launch.pluginVersion, updateAvailable: false },
+      })) };
+    }
+    const snapshot = this.options.store.snapshot();
+    const installed = await this.options.plugins.listInstalled();
+    const byId = new Map(installed.map(item => [item.pluginId, item]));
+    const ids = new Set([...byId.keys(), ...(snapshot.index?.plugins.map(item => item.pluginId) ?? [])]);
+    const items: LocalProxyInstallation[] = [];
+    for (const pluginId of ids) {
+      const local = byId.get(pluginId);
+      const current = local?.versions.find(item => item.version === local.currentVersion);
+      const state = !local || local.currentPointer === 'absent' ? 'not_installed'
+        : local.currentPointer === 'unmanaged' || current?.state !== 'valid' ? 'quarantined' : 'installed';
+      const bundled = state === 'not_installed' ? await this.options.officialPresence?.(pluginId) : null;
+      if (state === 'not_installed' && !bundled) continue;
+      const version = bundled?.pluginVersion ?? local?.currentVersion ?? null;
+      const source = bundled ? 'gian-official' : current?.receipt?.sourceId ?? null;
+      items.push({ pluginId,
+        revision: createHash('sha256').update(JSON.stringify([version, source, current?.receipt?.manifestSha256,
+          bundled?.entryPath, bundled?.runtime])).digest('hex'),
+        installation: { state: bundled ? 'installed' : state, installedVersion: version, source,
+          latestVersion: null, updateAvailable: false },
+      });
+    }
+    return { items };
   }
 
   private async observeCatalog(

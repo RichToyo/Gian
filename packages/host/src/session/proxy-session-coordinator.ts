@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   isSessionProxyBinding,
   parseProxyPluginId,
@@ -20,13 +21,15 @@ import {
   type SlashListResult,
 } from '@gian/shared';
 import { providerHomeEnvironment } from '../agents/home.js';
+import { usageRecorderFor, usageSourceKey } from '../usage/recorder.js';
+import { warnUsageFailure } from '../usage/ingestion.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { ProxyClient, ProxyReplayResult } from '../proxy/types.js';
 import { ensureSessionAttachmentDir } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
 import type { SessionHistoryStore } from './history-store.js';
-import { requestViolation } from '@gian/proxy-protocol';
+import { requestViolation, validateBindingConfig } from '@gian/proxy-protocol';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
 import { persistedForkBoundaries, type PersistedForkBoundary } from './fork.js';
 import type {
@@ -61,6 +64,8 @@ export interface BringUpProxySessionInput {
   resumeMode?: 'load' | 'resume';
   displayName?: string | null;
   sessionConfig?: Record<string, string | boolean | number | null>;
+  turnConfig?: Record<string, ConfigValue>;
+  explicitDefaultRoles?: Array<'model' | 'effort' | 'approval_mode' | 'execution_mode'>;
   hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
   preparedLaunch?: PreparedSessionLaunch;
   /** Creation policy must validate this connection's facts before native create. */
@@ -118,16 +123,20 @@ function nativeOptionsFromCatalog(
   }));
 }
 
-/** Catalog caches include the Agent config home. The no-home key stays
- *  `executor + cliPath` so existing kind-level probes keep their identity.
- *  A home is joined with NUL, which cannot appear in a CLI path. */
+/** Logical identity is structured and lossless, never a filesystem name. */
 function catalogKey(
   executor: Executor | string,
   cliPath?: string | null,
   configHome?: string | null,
 ): string {
-  const base = `${executor}${cliPath ?? ''}`;
-  return configHome ? `${base}\u0000${configHome}` : base;
+  return JSON.stringify([executor, cliPath ?? null, configHome ?? null]);
+}
+
+function catalogProbeSessionId(executor: Executor, cliPath?: string | null, configHome?: string | null): string {
+  if (cliPath == null && configHome == null && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(executor)) {
+    return `__caps__${executor}`;
+  }
+  return `__caps__${createHash('sha256').update(catalogKey(executor, cliPath, configHome)).digest('hex')}`;
 }
 
 export function catalogProbeEnv(
@@ -456,7 +465,56 @@ export class ProxySessionCoordinator {
       assertHandshakeMatchesBinding(initialized, args.preparedLaunch.sessionBinding);
     }
     this.rememberProtocolCapabilities(cacheKey, initialized);
-    const catalog = await client.catalog();
+    let catalog = await client.catalog();
+    // Only new Sessions snapshot Agent preferences. Resume keeps its separate
+    // persisted-config compatibility policy below.
+    const creationConfig = args.validateCatalog ? {
+      sessionConfig: { ...args.sessionConfig },
+      turnConfig: { ...args.turnConfig },
+    } : null;
+    if (creationConfig) {
+      for (const id of Object.keys(args.executorDefaults?.options ?? {})) {
+        const option = catalog.configOptions.find(candidate => candidate.id === id);
+        if (!option) throw requestViolation('CONFIG_VALUE_INVALID', `Saved Agent option ${id} is not advertised by the Proxy.`);
+        if ((args.sessionConfig && Object.hasOwn(args.sessionConfig, id))
+          || (args.turnConfig && Object.hasOwn(args.turnConfig, id))
+          || args.explicitDefaultRoles?.some(role => role === option.role)) continue;
+        if (option.role) throw requestViolation('CONFIG_VALUE_INVALID',
+          `Saved Agent option ${id} is role-bearing; use its defaults field.`);
+      }
+      for (const option of catalog.configOptions) {
+        const values = option.binding === 'session'
+          ? creationConfig.sessionConfig : creationConfig.turnConfig;
+        if (Object.hasOwn(creationConfig.sessionConfig, option.id)
+          || Object.hasOwn(creationConfig.turnConfig, option.id)) continue;
+        const value = option.role === 'model' ? args.model
+          : option.role === 'effort' ? args.executorDefaults?.thinking
+          : option.role === 'approval_mode' || option.role === 'execution_mode'
+            ? args.executorDefaults?.mode
+            : args.executorDefaults?.options?.[option.id];
+        if (value !== undefined && value !== null && value !== '') values[option.id] = value;
+      }
+      if (args.executorDefaults && initialized.capabilities['catalog.resolve'] !== undefined
+        && (Object.keys(creationConfig.sessionConfig).length > 0
+          || Object.keys(creationConfig.turnConfig).length > 0)) {
+        if (!client.resolveCatalog) throw new Error('catalog.resolve is not available');
+        catalog = await client.resolveCatalog({ catalogRevision: catalog.catalogRevision, ...creationConfig });
+      }
+      // Validate selected values, not required Proxy defaults
+      // that are filled by session.create/turn.start later.
+      for (const [role, value] of [
+        ['model', args.executorDefaults?.model],
+        ['effort', args.executorDefaults?.thinking],
+      ] as const) {
+        if (value && !catalog.configOptions.some(option => option.role === role)) {
+          throw requestViolation('CONFIG_VALUE_INVALID',
+            `Saved Agent ${role} preference has no advertised selector.`);
+        }
+      }
+      const optional = catalog.configOptions.map(option => ({ ...option, required: false }));
+      validateBindingConfig(optional, creationConfig.sessionConfig, 'session');
+      validateBindingConfig(optional, creationConfig.turnConfig, 'turn', creationConfig.sessionConfig);
+    }
     this.catalogByExecutor.set(cacheKey, catalog);
     args.validateCatalog?.(catalog, initialized.capabilities);
 
@@ -501,7 +559,9 @@ export class ProxySessionCoordinator {
         || !option.choices || option.choices.some(choice => Object.is(choice.value, byAgentOption))
         ? byAgentOption
         : undefined;
-      const value = args.sessionConfig && Object.hasOwn(args.sessionConfig, option.id)
+      const value = creationConfig && Object.hasOwn(creationConfig.sessionConfig, option.id)
+        ? creationConfig.sessionConfig[option.id]
+        : args.sessionConfig && Object.hasOwn(args.sessionConfig, option.id)
         ? args.sessionConfig[option.id]
         : persisted
         ?? supportedRoleValue
@@ -512,7 +572,7 @@ export class ProxySessionCoordinator {
         [args.sessionConfig?.[option.id], rawPersisted, byRole, byAgentOption],
         value,
       );
-      if (dropped !== undefined) {
+      if (dropped !== undefined && !creationConfig) {
         console.warn(catalogChoiceDowngradeWarning(args.sessionId, option.id, dropped, value));
       }
       if (value !== undefined && value !== '') sessionConfig[option.id] = value;
@@ -528,6 +588,7 @@ export class ProxySessionCoordinator {
         ).descriptor]
       : undefined;
     let created;
+    let newUsageSource = !args.nativeSessionId && !args.forkBoundaries?.length;
     try {
       created = await client.createSession({
         cwd: args.cwd,
@@ -545,6 +606,7 @@ export class ProxySessionCoordinator {
       );
       const turnCount = isMissing ? this.history.countTurns(args.sessionId) : -1;
       if (!isMissing || turnCount > 0) throw error;
+      newUsageSource = true;
 
       created = await client.createSession({
         cwd: args.cwd,
@@ -561,6 +623,13 @@ export class ProxySessionCoordinator {
       });
     }
 
+    if (created.nativeSessionId) {
+      try {
+        usageRecorderFor(this.db).bindSource(usageSourceKey(
+          args.preparedLaunch?.sessionBinding.pluginId ?? resolvePluginIdInput(args.executor) ?? args.executor,
+          configHome, created.nativeSessionId), newUsageSource);
+      } catch { warnUsageFailure(this.db); }
+    }
     this.sessionIds.set(args.sessionId, created.session.id);
     const persistedName = this.db.prepare('SELECT name FROM sessions WHERE id = ?')
       .get(args.sessionId) as { name: string | null } | undefined;
@@ -673,25 +742,21 @@ export class ProxySessionCoordinator {
     const key = catalogKey(executor, cliPath, configHome);
     const cached = this.catalogByExecutor.get(key);
     if (cached) return cached;
-    const tempKey = `__caps__${key}`;
-    if (this.emptyCatalogKeys.has(tempKey)) {
-      this.emptyCatalogKeys.delete(tempKey);
-      await this.proxy.dispose(tempKey).catch(() => undefined);
-    }
-    const env = catalogProbeEnv(executor, configHome);
-    const client = await this.proxy.getOrCreate(tempKey, executor, {
-      cliPath: cliPath ?? null,
-      ...(env ? { env } : {}),
-    });
-    const initialized = await client.initialize();
-    this.rememberProtocolCapabilities(key, initialized);
-    const catalog = await client.catalog();
-    if (catalogHasModelChoices(catalog)) {
-      this.catalogByExecutor.set(key, catalog);
-    } else {
+    const tempKey = catalogProbeSessionId(executor, cliPath, configHome);
+    const client = await this.catalogProbeClient(executor, cliPath, configHome);
+    try {
+      const catalog = await client.catalog();
+      if (catalogHasModelChoices(catalog)) {
+        this.catalogByExecutor.set(key, catalog);
+      } else {
+        this.emptyCatalogKeys.add(tempKey);
+      }
+      return catalog;
+    } catch (error) {
       this.emptyCatalogKeys.add(tempKey);
+      this.protocolCapabilitiesByExecutor.delete(key);
+      throw error;
     }
-    return catalog;
   }
 
   async resolveCatalog(
@@ -707,18 +772,40 @@ export class ProxySessionCoordinator {
   ): Promise<ResolvedProxyCatalog> {
     let client = sessionId ? this.proxy.get(sessionId) : undefined;
     if (!client) {
-      const env = catalogProbeEnv(executor, configHome);
-      const tempKey = `__caps__${catalogKey(executor, cliPath, configHome)}`;
-      client = await this.proxy.getOrCreate(tempKey, executor, {
-        cliPath: cliPath ?? null,
-        ...(env ? { env } : {}),
-      });
-      await client.initialize();
+      client = await this.catalogProbeClient(executor, cliPath, configHome);
     }
     if (!client.resolveCatalog) {
       throw new Error('catalog.resolve is not available');
     }
     return client.resolveCatalog(params);
+  }
+
+  private async catalogProbeClient(
+    executor: Executor,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): Promise<ProxyClient> {
+    const key = catalogKey(executor, cliPath, configHome);
+    const tempKey = catalogProbeSessionId(executor, cliPath, configHome);
+    if (this.emptyCatalogKeys.has(tempKey)) {
+      // Failed disposal is not permission to reuse a stale process or HOME.
+      await this.proxy.dispose(tempKey);
+      this.emptyCatalogKeys.delete(tempKey);
+      this.protocolCapabilitiesByExecutor.delete(key);
+    }
+    const env = catalogProbeEnv(executor, configHome);
+    try {
+      const client = await this.proxy.getOrCreate(tempKey, executor, {
+        cliPath: cliPath ?? null,
+        ...(env ? { env } : {}),
+      });
+      this.rememberProtocolCapabilities(key, await client.initialize());
+      return client;
+    } catch (error) {
+      this.emptyCatalogKeys.add(tempKey);
+      this.protocolCapabilitiesByExecutor.delete(key);
+      throw error;
+    }
   }
 
   async listSlashCommands(

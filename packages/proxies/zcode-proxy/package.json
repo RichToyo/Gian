@@ -1,8 +1,8 @@
 {
   "name": "@gian/zcode-proxy",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "private": true,
-  "description": "com.zhipu.zcode — shared-scope Gian Proxy translating gian.proxy/2.1 over ZCode Protocol v1 (zcode.cjs app-server)",
+  "description": "com.zhipu.zcode \u2014 shared-scope Gian Proxy translating gian.proxy/2.1 over ZCode Protocol v1 (zcode.cjs app-server)",
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
   "gianProxy": {

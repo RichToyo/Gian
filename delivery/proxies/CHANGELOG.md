@@ -1,5 +1,82 @@
 # Gian Proxies Changelog
 
+## Runtime maintenance candidates - 2026-10-26
+
+- Kimi Proxy 0.4.12 pins Kimi Code 2.3.2 (GitHub latest, published
+  2026-10-25; archive SHA-256 matches the official asset metadata). The
+  2.3.1-to-2.3.2 diff touches no kap-server file (22 files across agent-core
+  swarm/tooling, transcript folding and docs; shared tool-driven swarm entry
+  is now disabled until the user enables swarm mode, which can affect
+  web-runtime behavior - this Proxy declares/enables no swarm policy and its
+  generic isError/replay handling stays compatible). A bounded no-Provider native
+  probe confirms 2.3.2 serves the same 112 REST paths and the production
+  token layout.
+- Only Kimi is selected against signed RichToyo Catalog 40. All other
+  published tuples are preserved exactly. Real Provider turns and target
+  installation are not claimed.
+
+## Shared security repair candidates - 2026-10-25
+
+- Shared dependency set: Proxy Protocol SDK 1.0.3 with zod exactly 4.6.6
+  (wire protocol unchanged), body-parser 2.4.0 via the MCP SDK chain, and
+  undici 8.12.2 via the DSH fetch/proxy chains. The managed DeepSeek Harness
+  Runtime lock resolves a single zod 4.6.7 and undici 8.12.2.
+- Claude Proxy 0.3.14 pins official Claude Code 2.1.310.
+- Grok Proxy 0.3.14 pins official stable Grok CLI 1.0.70.
+- Antigravity Proxy 0.0.4 pins upstream ACP Runtime 1.4.3.
+- Codex Proxy 0.3.9 and Kimi Proxy 0.4.11 carry the new shared dependency set
+  with unchanged verified Runtimes 0.164.0 and 2.3.1.
+- DeepSeek Harness Proxy 0.3.8 ships the dependency-repaired managed Runtime
+  (CLI still 0.2.1-rc.2); its bytes live under the new 0.3.8 tag, never
+  overwriting 0.3.7.
+- Six providers selected against signed RichToyo Catalog 38. ZCode is
+  excluded pending its upstream lock review and keeps its exact 0.4.7/0.17.0
+  tuple. Real Provider turns and target installation are not claimed.
+
+## Runtime maintenance candidates - 2026-10-25
+
+- Claude Proxy 0.3.14 pins official Claude Code 2.1.310 (GitHub latest
+  v2.1.310 and npm latest; the vendor /stable pointer still reads 2.1.308 and
+  is recorded as lagging). Changelog review found no documented headless
+  spawn/wire compatibility changes; the nine selected startup flags were
+  verified on the new binary.
+- Grok Proxy 0.3.14 pins official stable Grok CLI 1.0.70 (x.ai/cli, official
+  GCS mirror and npm latest agree; downloaded bytes are byte-identical across
+  both sources). Spawn flags and the ACP initialize contract verified on the
+  new binary (agentVersion 1.0.70, grokShell; session creation remains
+  auth-gated). Per-version 1.0.68-1.0.70 notes remain NOT_OBSERVED in the
+  accessible official changelog.
+- Antigravity Proxy 0.0.4 pins upstream ACP Runtime 1.4.3, the current ACP
+  registry version. The official dl.google.com ZIP passes the strict
+  production pair validation; a bounded no-credential ACP initialize reports
+  antigravity-acp 1.4.3 with a capability shape identical to 1.4.1 (raw
+  old/new evidence retained).
+- Only these three providers are selected against signed RichToyo Catalog 38.
+  Real Provider turns and target installation are not claimed.
+
+## Runtime maintenance candidates - 2026-10-24
+
+- Claude Proxy 0.3.13 pins official Claude Code 2.1.309 (GitHub latest and npm
+  latest; the vendor /stable pointer still reads 2.1.308 and is recorded as
+  lagging, not as proof 2.1.309 is a prerelease).
+- Kimi Proxy 0.4.10 pins Kimi Code 2.3.1; the only server-side change is the
+  added optional session-takeover endpoint, which this Proxy does not use.
+  Native session locks stay at their defaults.
+- Codex Proxy 0.3.8 pins Codex CLI 0.164.0. Exact old/new app-server schema
+  comparison: Proxy-used surfaces unchanged except imageGeneration output now
+  allowing a durable fileId instead of a required inline result (plus optional
+  inputImages); a new fixture regression projects both shapes. ServerRequest
+  is byte-identical.
+- Only these three providers are selected against signed RichToyo Catalog 36.
+  Real Provider turns and target installation are not claimed.
+
+## Runtime maintenance candidates - 2026-10-22
+
+- Claude Proxy 0.3.12 pins official Claude Code 2.1.308.
+- Kimi Proxy 0.4.9 pins Kimi Code 2.3.0, preserves native session-conflict errors, and reads the observed native server.token location without relying on startup banners.
+- Grok Proxy 0.3.13 pins official Grok 1.0.67; npm platform bytes match the official standalone binary.
+- Only these three providers are selected against signed RichToyo Catalog 35. Real Provider turns and target installation are not claimed.
+
 ## RichToyo Proxy generation - 2026-10-21
 
 - Publish new English-only patches: Claude 0.3.11, Codex 0.3.7, Kimi 0.4.8,

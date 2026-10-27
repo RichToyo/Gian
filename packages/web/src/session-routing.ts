@@ -2,6 +2,7 @@ import type {
   Session,
   SessionStatus,
 } from '@gian/shared';
+import { sessionNeedsAttention as sharedSessionNeedsAttention } from '@gian/shared';
 
 export interface CreatedSessionFirstMessagePlan {
   structuredText: string | null;
@@ -39,11 +40,8 @@ export function delegatedCallerIds(sessions: Session[]): Set<string> {
 
 /** A session needs the user's attention when it is waiting for input, or when
  * its completed/failed turn has not been read yet. */
-export function sessionNeedsAttention(
-  session: Pick<Session, 'status' | 'unread'>,
-): boolean {
-  return session.status === 'pending'
-    || ((session.status === 'done' || session.status === 'error') && session.unread === 1);
+export function sessionNeedsAttention(session: Pick<Session, 'status' | 'unread'>): boolean {
+  return sharedSessionNeedsAttention(session);
 }
 
 export interface SessionCanonFact {

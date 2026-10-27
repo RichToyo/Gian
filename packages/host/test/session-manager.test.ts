@@ -623,7 +623,16 @@ test('new sessions use defaults owned by their Proxy configuration', async () =>
     mode: 'ask',
   }));
   try {
-    proxyMgr.client.catalogOverride = LEGACY_APPROVAL_CATALOG;
+    proxyMgr.client.catalogOverride = {
+      ...LEGACY_APPROVAL_CATALOG,
+      configOptions: [
+        ...LEGACY_APPROVAL_CATALOG.configOptions,
+        ...(['model', 'effort'] as const).map(role => ({
+          id: role, displayName: role, role, binding: 'turn' as const,
+          control: 'text' as const, required: false, defaultValue: '',
+        })),
+      ],
+    };
     const session = await sessions.createSession({
       workspace_id: wsId,
       executor: 'claude',
@@ -905,6 +914,7 @@ test('create persists session_config, turn_config, and create-result turn option
           control: 'select',
           required: false,
           defaultValue: 'default',
+          choices: ['default', 'strict'].map(value => ({ value, displayName: value })),
         },
         {
           id: 'model',
@@ -914,6 +924,7 @@ test('create persists session_config, turn_config, and create-result turn option
           control: 'select',
           required: true,
           defaultValue: 'base',
+          choices: ['base', 'sonnet'].map(value => ({ value, displayName: value })),
         },
       ],
       slashCommands: [],
@@ -1491,7 +1502,7 @@ test('explicit turn_config beats the Agent option default', async () => {
   }
 });
 
-test('DSH skips unknown or unadvertised Agent option defaults', async () => {
+test('DSH rejects unknown or unadvertised Agent option defaults on creation', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setupDsh(() => ({
     model: '',
     thinking: '',
@@ -1511,8 +1522,9 @@ test('DSH skips unknown or unadvertised Agent option defaults', async () => {
         { value: 'vendor-b', label: 'Vendor B' },
       ],
     });
-    const session = await sessions.createSession({ workspace_id: wsId, executor: 'dsh' });
-    assert.deepEqual(session.turn_config, {});
+    await assert.rejects(sessions.createSession({ workspace_id: wsId, executor: 'dsh' }),
+      (error: unknown) => error instanceof Error && 'code' in error && error.code === 'CONFIG_VALUE_INVALID');
+    assert.equal(proxyMgr.client.createCalls, 0);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

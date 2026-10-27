@@ -7,6 +7,53 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.9] - 2026-10-27
+
+### Added
+
+- Add a macOS menu-bar panel with local Token totals, incremental trends,
+  Agent and model breakdowns, and shortcuts to conversations needing attention.
+- Support calendar day, week and month alongside rolling 24-hour, seven-day
+  and 30-day Token ranges. Retain recorded consumption when conversations are
+  deleted, with a separate explicit statistics-clear action.
+- Show official-account quota for compatible Codex, Kimi Code, DeepSeek
+  Harness, Claude Code, Grok and Antigravity integrations, with cached data,
+  background refresh, manual retry and account-local failure states.
+
+### Changed
+
+- Save Agent defaults as local preferences without starting a Runtime or
+  resolving Provider catalogs. New sessions validate and snapshot those
+  preferences; existing sessions retain their configuration.
+- Keep Model, Thinking and Mode selectors as dropdowns while discovery is
+  loading, unavailable or incomplete, preserving saved values.
+
+### Fixed
+
+- Select one matching active Proxy/Runtime combination instead of combining
+  a newly installed Proxy with an older active CLI.
+- Treat explicit Custom Runtime versions as verification history rather than
+  rejecting them solely for being older than every previously verified version.
+- Scope Custom Runtime readiness and catalog discovery to the selected path
+  and HOME, and use filesystem-safe catalog probe identities.
+- Recognize Proxy package roots past compiler-generated package metadata and
+  authorize verified installer inventory during staging fingerprint checks.
+- Keep quota loading and retry failures separate from local Token/Todo
+  connectivity, and avoid scanning all Runtime trees just to list accounts.
+- Read Antigravity help from bounded stderr as well as stdout, and accept its
+  supported native quota-group response formats.
+- Record complete Kimi main-agent cumulative usage with cache counted once,
+  without using context occupancy or placeholder REST totals as consumption.
+
+### Known Limitations
+
+- Token statistics cover recorded Gian-local usage, not billing or complete
+  native CLI history. Missing sources, sub-agent coverage and unknown model
+  attribution remain explicit rather than estimated.
+- Quota requires compatible independently released Proxies/Runtimes and
+  supported first-party authentication. ZCode quota is not implemented;
+  Antigravity quota reports its separate CLI account.
+
 ## [0.6.8] - 2026-10-21
 
 ### Added

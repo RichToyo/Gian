@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'node:url';
 
 const hostPort = process.env.GIAN_HOST_PORT ?? process.env.GIAN_PORT ?? '8991';
 const webPort = Number(process.env.GIAN_WEB_PORT ?? '5191');
@@ -12,6 +13,10 @@ export default defineConfig({
   plugins: [react()],
   build: {
     rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        menubar: fileURLToPath(new URL('./menubar.html', import.meta.url)),
+      },
       output: {
         manualChunks: {
           react: ['react', 'react-dom'],

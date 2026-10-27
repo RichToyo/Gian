@@ -129,6 +129,8 @@ import {
 } from './screenshot-preferences.js';
 import { readPickedComposerResources } from './resource-picker.js';
 import { environmentSettings, productionHostIsOccupied } from './dev-environment.js';
+import { MenubarController } from './menubar-controller.js';
+import { isLocalMenubarOrigin, menubarRequestTimeout } from './menubar-state.js';
 
 const { autoUpdater } = electronUpdater;
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -184,6 +186,7 @@ const desktopToken = app.isPackaged
 const desktopInstanceId = app.isPackaged ? randomUUID() : null;
 
 let mainWindow: BrowserWindow | null = null;
+let menubarController: MenubarController | null = null;
 let browserController: BrowserController | null = null;
 let browserAutomationService: BrowserAutomationService | null = null;
 let browserUseBroker: BrowserUseBroker | null = null;
@@ -693,6 +696,7 @@ function initializeDesktopServices(): void {
 }
 
 function stopDesktopServicesForExit(): void {
+  menubarController?.pause();
   attentionClient?.stop();
   appUpdateController?.stop();
   githubAuthService?.cancel();
@@ -706,6 +710,7 @@ function resumeDesktopServicesAfterCancelledExit(restartManagedHost: boolean): v
   if (restartManagedHost) startProductionHost();
   initializeScreenshotController();
   attentionClient?.start();
+  menubarController?.resume();
   appUpdateController?.start();
 }
 
@@ -1921,6 +1926,40 @@ if (!hasSingleInstanceLock) {
     screenshotController = createScreenshotController();
     buildApplicationMenu();
     await ensureMainWindow();
+    if (process.platform === 'darwin' && isLocalMenubarOrigin(targets.hostUrl) && isLocalMenubarOrigin(targets.webUrl)) {
+      menubarController = new MenubarController({
+        webUrl: targets.webUrl,
+        hostUrl: targets.hostUrl,
+        preloadPath: join(currentDir, 'menubar-preload.cjs'),
+        iconPath: join(app.getAppPath(), 'resources', 'gian-menubarTemplate.png'),
+        preferencesPath: join(app.getPath('userData'), 'menubar-preferences.json'),
+        desktopToken, tokenHeader: DESKTOP_TOKEN_HEADER,
+        request: async (path, body) => {
+          const url = new URL(path, targets.hostUrl);
+          if (url.origin !== new URL(targets.hostUrl).origin || !url.pathname.startsWith('/api/')) {
+            throw new Error('Invalid menubar Host route');
+          }
+          const headers: Record<string, string> = {};
+          if (desktopToken) headers[DESKTOP_TOKEN_HEADER] = desktopToken;
+          const cookies = await session.defaultSession.cookies.get({ url: targets.hostUrl, name: 'gian_session' });
+          const cookie = cookies.find(item => item.name === 'gian_session');
+          if (cookie) headers.Cookie = `gian_session=${cookie.value}`;
+          if (body !== undefined) headers['Content-Type'] = 'application/json';
+          const response = await session.defaultSession.fetch(url.href, { method: body === undefined ? 'GET' : 'POST',
+            headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            redirect: 'error', signal: AbortSignal.timeout(menubarRequestTimeout(url.pathname, body === undefined ? 'GET' : 'POST')) });
+          if (!response.ok) throw new Error('Menubar Host unavailable');
+          return response.json();
+        },
+        navigate: async target => {
+          if (target.turn === null || desktopReplacementPending()) throw new Error('Navigation unavailable');
+          await activateDesktopNavigation({ type: 'session', sessionId: target.session_id,
+            turn: target.turn, kind: 'turn-completed', target });
+          if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Navigation unavailable');
+        },
+        quit: () => app.quit(),
+      });
+    }
     screenshotController.registerShortcut();
     void screenshotController.warmUp().catch(error => {
       console.warn('[desktop] screenshot overlay warm-up failed', error);
@@ -1969,6 +2008,7 @@ app.on('before-quit', event => {
     onBlocked: () => {
       console.error('[desktop] managed Host did not exit; cancelling unsafe quit');
       attentionClient?.start();
+      menubarController?.resume();
       appUpdateController?.start();
       dialog.showErrorBox(
         'Gian could not quit safely',
@@ -1981,6 +2021,8 @@ app.on('before-quit', event => {
 });
 
 app.on('will-quit', () => {
+  menubarController?.dispose();
+  menubarController = null;
   // before-quit can still be cancelled and then resumes this service.
   // Handles close only once quit actually proceeds.
   notificationService?.close();

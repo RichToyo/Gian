@@ -66,6 +66,16 @@ function makeAgent(overrides: Partial<UserAgent> = {}): UserAgent {
   };
 }
 
+interface CatalogFixture {
+  catalog: ProxyCatalog;
+  capabilities: Record<string, number>;
+  resolve?: (config: {
+    catalogRevision: string;
+    sessionConfig: Record<string, ConfigValue>;
+    turnConfig: Record<string, ConfigValue>;
+  }) => ProxyCatalog;
+}
+
 class FakeClient {
   readonly protocolV2 = true as const;
   stream: string | null = 'stream-1';
@@ -80,7 +90,7 @@ class FakeClient {
     readonly cliPath: string | null,
     private readonly injectHostServices = false,
     private readonly failCreate = false,
-    private readonly modeFixture?: { catalog: ProxyCatalog; capabilities: Record<string, number> },
+    private readonly modeFixture?: CatalogFixture,
   ) {}
 
   isExited() { return false; }
@@ -96,7 +106,21 @@ class FakeClient {
       },
     };
   }
-  async catalog() { return this.modeFixture?.catalog ?? EMPTY_CATALOG; }
+  async catalog() { return this.modeFixture?.catalog ?? {
+    ...EMPTY_CATALOG,
+    configOptions: (['model', 'effort'] as const).map(role => ({
+      id: role, displayName: role, role, binding: 'turn' as const,
+      control: 'text' as const, required: false, defaultValue: '',
+    })),
+  }; }
+  async resolveCatalog(config: {
+    catalogRevision: string;
+    sessionConfig: Record<string, ConfigValue>;
+    turnConfig: Record<string, ConfigValue>;
+  }) {
+    const catalog = this.modeFixture?.resolve?.(config) ?? await this.catalog();
+    return { ...catalog, resolvedDefaults: { sessionConfig: {}, turnConfig: {} } };
+  }
   streamId() { return this.stream; }
   runtimeHost() {
     return {
@@ -187,7 +211,7 @@ class FakeProxyManager {
   constructor(
     private readonly injectHostServices = false,
     private readonly failCreate = false,
-    private readonly modeFixture?: { catalog: ProxyCatalog; capabilities: Record<string, number> },
+    private readonly modeFixture?: CatalogFixture,
   ) {}
 
   async acquireWithBinding(sessionId: string, binding: { pluginId: string }, options?: {
@@ -249,7 +273,7 @@ function setup(options?: {
   failCreate?: boolean;
   dir?: string;
   bindingPlanner?: SessionBindingPlanner;
-  modeFixture?: { catalog: ProxyCatalog; capabilities: Record<string, number> };
+  modeFixture?: CatalogFixture;
   proxyDefaults?: (executor: Executor) => AgentProxyDefaults;
 }) {
   const dir = options?.dir ?? mkdtempSync(join(tmpdir(), 'gian-agent-binding-'));
@@ -343,7 +367,7 @@ function setup(options?: {
   return { dir, db, wsId, proxyMgr, broadcaster, sessions, credentials, resolution };
 }
 
-function nativeModeFixture(binding: 'session' | 'turn' = 'turn') {
+function nativeModeFixture(binding: 'session' | 'turn' = 'turn'): CatalogFixture {
   const catalog: ProxyCatalog = normalizeProtocolCatalog({
     catalogRevision: 'open-native-mode', input: [{ type: 'text' }], slashCommands: [],
     specialCatalogs: { model: 'model', thinking: 'effort', approvalMode: 'permission_mode' },
@@ -675,6 +699,151 @@ test('an explicitly advertised null native session mode is echoed, not replaced 
     });
     assert.equal(session.executor_config.values.permission_mode, null);
     assert.equal((h.proxyMgr.get(session.id)?.lastCreateParams?.sessionConfig as Record<string, ConfigValue>).permission_mode, null);
+  } finally {
+    h.db.close();
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('new Sessions reject invalid preferences before native creation without changing existing Sessions', async () => {
+  const h = setupOpenNativeMode('default');
+  try {
+    const original = await h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id });
+    const snapshot = structuredClone(h.sessions.getSession(original.id));
+    for (const patch of [
+      { model: 'unadvertised' }, { thinking: 'unadvertised' }, { mode: 'unadvertised' },
+      { options: { workspace_policy: 'unadvertised' } },
+      { options: { workspace_policy: true } },
+      { options: { ghost: 'unknown' } },
+      { options: { model: 'fixture-model' } },
+    ]) {
+      h.agent.defaults = { model: 'fixture-model', thinking: 'high', mode: 'default', options: {}, ...patch };
+      const before = structuredClone(h.agent.defaults);
+      const clients = h.proxyMgr.createdClients.length;
+      await assert.rejects(h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id }),
+        (error: unknown) => error instanceof Error && 'code' in error && error.code === 'CONFIG_VALUE_INVALID');
+      assert.equal(h.proxyMgr.createdClients[clients]?.lastCreateParams, null);
+      assert.deepEqual(h.agent.defaults, before);
+      assert.deepEqual(h.sessions.getSession(original.id), snapshot);
+      const count = h.db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number };
+      assert.equal(count.count, 1);
+    }
+    h.agent.defaults = {
+      model: 'invalid-model', thinking: 'invalid-effort', mode: 'invalid-mode',
+      options: { model: 'invalid-role-value', workspace_policy: 'invalid-policy' },
+    };
+    const explicit = await h.sessions.createSession({
+      workspace_id: h.wsId, agent_id: h.agent.id,
+      session_config: { workspace_policy: 'relaxed' },
+      turn_config: { model: 'fixture-model', effort: 'high', permission_mode: 'yolo' },
+    });
+    assert.equal(explicit.turn_config?.model, 'fixture-model');
+    assert.equal(explicit.model, 'fixture-model');
+    assert.equal(explicit.thinking_effort, 'high');
+    assert.equal(explicit.turn_config?.effort, 'high');
+    assert.equal(explicit.turn_config?.permission_mode, 'yolo');
+    assert.equal(explicit.executor_config.values.workspace_policy, 'relaxed');
+    assert.equal(h.agent.defaults.model, 'invalid-model');
+    assert.deepEqual(h.sessions.getSession(original.id), snapshot);
+  } finally {
+    h.db.close();
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+for (const absent of ['model', 'effort'] as const) {
+  test(`new Sessions reject a saved ${absent} preference when its role is absent`, async () => {
+    const fixture = nativeModeFixture();
+    fixture.catalog.configOptions = fixture.catalog.configOptions.filter(option => option.role !== absent);
+    const h = setupOpenNativeMode('default', 'turn', fixture);
+    try {
+      await assert.rejects(h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id }),
+        (error: unknown) => error instanceof Error && 'code' in error
+          && error.code === 'CONFIG_VALUE_INVALID' && /no advertised selector/.test(error.message));
+      assert.equal(h.proxyMgr.createdClients[0]?.lastCreateParams, null);
+    } finally {
+      h.db.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('new Sessions honor semantic and legacy approval overrides over stale preferences', async () => {
+  const fixture = nativeModeFixture();
+  fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.role === 'approval_mode'
+    ? { ...option, modeKind: 'gian-preset' as const, defaultValue: 'ask',
+      choices: ['ask', 'auto', 'full-access'].map(value => ({ value, displayName: value })) }
+    : option);
+  const h = setupOpenNativeMode('stale-mode', 'turn', fixture);
+  try {
+    h.agent.defaults = {
+      model: 'stale-model', thinking: 'stale-effort', mode: 'stale-mode',
+      options: { model: 'stale-role-model', permission_mode: 'stale-role-mode' },
+    };
+    const session = await h.sessions.createSession({
+      workspace_id: h.wsId, agent_id: h.agent.id,
+      model: 'fixture-model', thinking_effort: 'high', approval_mode: 'ask',
+    });
+    assert.equal(session.approval_mode, 'ask');
+    assert.equal(session.turn_config?.permission_mode, 'ask');
+    assert.equal(session.model, 'fixture-model');
+    assert.equal(session.thinking_effort, 'high');
+  } finally {
+    h.db.close();
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+for (const resolvedChange of ['removed', 'binding', 'choice'] as const) {
+  test(`new Sessions reject a saved option invalidated by catalog.resolve: ${resolvedChange}`, async () => {
+    const fixture = nativeModeFixture();
+    fixture.capabilities['catalog.resolve'] = 1;
+    let resolves = 0;
+    fixture.resolve = config => {
+      resolves += 1;
+      assert.equal(config.sessionConfig.workspace_policy, 'relaxed');
+      return {
+        ...fixture.catalog, catalogRevision: 'resolved',
+        configOptions: fixture.catalog.configOptions.flatMap(option => {
+          if (option.id !== 'workspace_policy') return [option];
+          if (resolvedChange === 'removed') return [];
+          if (resolvedChange === 'binding') return [{ ...option, binding: 'turn' as const }];
+          return [{ ...option, choices: [{ value: 'strict', displayName: 'Strict' }] }];
+        }),
+      };
+    };
+    const h = setupOpenNativeMode('default', 'turn', fixture);
+    h.agent.defaults.options = { workspace_policy: 'relaxed' };
+    try {
+      await assert.rejects(h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id }),
+        (error: unknown) => error instanceof Error && 'code' in error
+          && (error.code === 'CONFIG_VALUE_INVALID' || error.code === 'CONFIG_BINDING_INVALID'));
+      assert.equal(resolves, 1);
+      assert.equal(h.proxyMgr.createdClients[0]?.lastCreateParams, null);
+      assert.deepEqual(h.agent.defaults.options, { workspace_policy: 'relaxed' });
+    } finally {
+      h.db.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('new-session preferences are snapshotted before asynchronous Runtime work', async () => {
+  const fixture = nativeModeFixture();
+  fixture.capabilities['catalog.resolve'] = 1;
+  const h = setupOpenNativeMode('default', 'turn', fixture);
+  h.agent.defaults.options = { workspace_policy: 'relaxed' };
+  fixture.resolve = () => {
+    h.agent.defaults.model = 'later-model';
+    h.agent.defaults.options.workspace_policy = 'strict';
+    return fixture.catalog;
+  };
+  try {
+    const session = await h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id });
+    assert.equal(session.model, 'fixture-model');
+    assert.equal(session.executor_config.values.workspace_policy, 'relaxed');
+    assert.equal(h.agent.defaults.model, 'later-model');
+    assert.equal(h.agent.defaults.options.workspace_policy, 'strict');
   } finally {
     h.db.close();
     rmSync(h.dir, { recursive: true, force: true });

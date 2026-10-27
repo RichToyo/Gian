@@ -105,6 +105,7 @@ export class ManagedRuntimeInstaller {
       expectedVersion: string;
       pluginId: string;
       runtimeId: string;
+      staging?: { directory: string; files: readonly string[] };
     }) => Promise<string>;
   }) {
     this.runtimeRoot = join(options.dataDir, 'runtimes');
@@ -417,6 +418,7 @@ export class ManagedRuntimeInstaller {
         expectedVersion: distribution.version,
         pluginId,
         runtimeId: distribution.runtimeId,
+        staging: { directory: staging, files: inventory.map(file => file.path) },
       });
       if (observed !== distribution.version) {
         throw new ManagedRuntimeInstallError('RUNTIME_VERSION_MISMATCH', 'Runtime artifact reported a different version.');

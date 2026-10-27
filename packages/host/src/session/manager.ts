@@ -64,6 +64,8 @@ import {
 } from './sidechat-coordinator.js';
 import { SidechatTransientStore } from './sidechat-store.js';
 import { assertInheritedSessionConfig, nextForkSessionName, resolveForkAnchor } from './fork.js';
+import { usageSample, warnUsageFailure } from '../usage/ingestion.js';
+import { usageRecorderFor, trackingState } from '../usage/recorder.js';
 import { requestViolation } from '@gian/proxy-protocol';
 import type { ProtocolV2SessionClient } from '../proxy/protocol-v2-session-client.js';
 import type {
@@ -223,10 +225,23 @@ export class SessionManager {
     this.history = new SessionHistoryStore(db);
     this.traceEvidence = new TraceEvidenceStore(db);
     this.turns = new TurnRuntime(db, this.history);
+    trackingState(db);
+    const usageRecorder = usageRecorderFor(db);
     this.sidechats = new SidechatCoordinator(
       new SidechatTransientStore(db),
       proxy,
       broadcaster,
+      (parentId, sidechat, notification) => {
+        try {
+          const event = notification as import('@gian/shared').ProxyNotification;
+          const input = sidechat.userInputs.find(item => item.turnId === event?.params?.turnId);
+          if (!input || db.prepare('SELECT 1 FROM remote_execution_bindings WHERE local_session_id = ?').get(parentId)) return;
+          const session = this.sessions.get(parentId);
+          const sample = usageSample(session, event,
+            { id: input.turnId, startedAt: Date.parse(input.createdAt) }, Date.now(), `sidechat:${sidechat.resumeRefId}`);
+          if (sample) usageRecorder.recordSafely(sample);
+        } catch { warnUsageFailure(db); }
+      },
     );
     this.proxySessions = new ProxySessionCoordinator(
       db,

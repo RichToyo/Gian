@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { sessionNeedsAttention } from '../src/session-routing.js';
 
 describe('sessionNeedsAttention', () => {
+  it('does not treat array callback indexes as pending interaction flags', () => {
+    const idle = { status: 'done' as const, unread: 0 };
+    const pending = { status: 'pending' as const, unread: 0 };
+    expect([pending, idle, idle].filter(sessionNeedsAttention)).toEqual([pending]);
+    expect([idle, idle].some(sessionNeedsAttention)).toBe(false);
+  });
+
   it('is true while the session is pending', () => {
     expect(sessionNeedsAttention({ status: 'pending', unread: 0 })).toBe(true);
   });

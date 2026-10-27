@@ -52,6 +52,31 @@ test('import only writes a coordinate after a stable public tag and archive dige
   assert.deepEqual(readFileSync(output), original);
 });
 
+test('import follows the allowlisted repository selected by a pending coordinate without relabeling legacy pins', async t => {
+  const temp = mkdtempSync(join(tmpdir(), 'protocol-import-repository-'));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  const output = join(temp, 'coordinate.json');
+  const coordinate = { ...protocolFixture(), repository: 'RichToyo/Gian', ...protocolCoordinates('1.0.0', 'RichToyo/Gian') };
+  const receiptUrl = coordinate.url.replace(coordinate.filename, 'protocol-package.json');
+  const pending = { status: 'pending-publication', repository: coordinate.repository, version: coordinate.version };
+  writeFileSync(output, JSON.stringify(pending));
+  const fetcher = async url => {
+    assert.ok(url.startsWith('https://api.github.com/repos/RichToyo/Gian/') || url.startsWith('https://github.com/RichToyo/Gian/'), url);
+    if (url.includes('/releases/tags/')) return Response.json({ draft: false, prerelease: false, tag_name: coordinate.tag,
+      assets: [{ name: coordinate.filename, browser_download_url: coordinate.url }, { name: 'protocol-package.json', browser_download_url: receiptUrl }] });
+    if (url.includes('/git/ref/tags/')) return Response.json({ object: { type: 'commit', sha: coordinate.sourceCommit } });
+    if (url === receiptUrl) return Response.json(coordinate);
+    if (url === coordinate.url) return new Response(protocolBytes);
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  await importRemoteProtocol('1.0.0', output, fetcher);
+  assert.deepEqual(JSON.parse(readFileSync(output)), coordinate);
+  writeFileSync(output, JSON.stringify({ ...pending, repository: 'RichLogic/Gian-Dev' }));
+  let requests = 0;
+  await assert.rejects(importRemoteProtocol('1.0.0', output, async () => { requests++; throw new Error('Unexpected network'); }), /coordinates/);
+  assert.equal(requests, 0);
+});
+
 test('committed Remote Protocol coordinate matches its source or remains blocked pending publication', () => {
   const coordinate = JSON.parse(readFileSync(new URL('../delivery/remote/protocol-package.json', import.meta.url), 'utf8'));
   const source = JSON.parse(readFileSync(new URL('../packages/remote-protocol/package.json', import.meta.url), 'utf8'));

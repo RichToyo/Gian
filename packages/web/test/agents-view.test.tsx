@@ -261,9 +261,17 @@ function mockApi(agents: UserAgentStatus[], catalog: ProxyCatalogList | Error = 
     proxy: null,
     cliPath: input.cliPath ?? null,
   }));
-  vi.mocked(api.updateAgent).mockImplementation(async (id, patch) => agent({
-    id, name: patch.name ?? 'Agent', pluginId: 'claude',
-  }));
+  vi.mocked(api.updateAgent).mockImplementation(async (id, patch) => {
+    const previous = agents.find(item => item.id === id) ?? agent({ id });
+    const updated = {
+      ...previous, ...patch,
+      defaults: { ...previous.defaults, ...patch.defaults,
+        options: { ...previous.defaults.options, ...patch.defaults?.options } },
+    } as UserAgentStatus;
+    const index = agents.findIndex(item => item.id === id);
+    if (index >= 0) agents[index] = updated;
+    return updated;
+  });
   vi.mocked(api.deleteAgent).mockResolvedValue(undefined);
   vi.mocked(api.pickAgentHome).mockResolvedValue('/Users/test/custom-home');
   vi.mocked(api.pickAgentRuntime).mockResolvedValue('/Users/test/bin/acme-runtime');
@@ -1834,7 +1842,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(within(claudePanel).queryByTestId('agent-default-option-provider')).toBeNull();
   });
 
-  it('changing Provider writes one atomic patch and clears the dependent model default', async () => {
+  it('changing Provider persists only that preference without resolve or status refresh', async () => {
     mockApi([dshAgent({ options: { provider: 'deepseek-official' } })]);
     vi.mocked(api.loadProxyCapabilities).mockResolvedValue(dshLikeCapabilities() as never);
     mockProviderDependentResolve();
@@ -1848,14 +1856,26 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       return select;
     });
     expect(provider.value).toBe('deepseek-official');
-    // The initial re-resolve matches the stored defaults: no write yet.
+    // Mount is read-only; no automatic preference repair.
     expect(api.updateAgent).not.toHaveBeenCalled();
 
+    const runtimeReads = vi.mocked(api.loadManagedRuntimeStatus).mock.calls.length;
     fireEvent.change(provider, { target: { value: 'vendor-b' } });
     await waitFor(() => expect(api.updateAgent).toHaveBeenCalledTimes(1));
     expect(api.updateAgent).toHaveBeenCalledWith('a-dsh', {
-      defaults: { options: { provider: 'vendor-b' }, model: '' },
+      defaults: { options: { provider: 'vendor-b' } },
     });
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+    expect(api.loadAgents).toHaveBeenCalledTimes(1);
+    expect(api.loadManagedRuntimeStatus).toHaveBeenCalledTimes(runtimeReads);
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(provider).toHaveValue('vendor-b'));
+    expect(within(panel).getByRole('combobox', { name: 'Model' })).toHaveValue('deepseek-chat');
+    fireEvent.change(provider, { target: { value: 'deepseek-official' } });
+    await waitFor(() => expect(api.updateAgent).toHaveBeenCalledTimes(2));
+    expect(api.loadAgents).toHaveBeenCalledTimes(1);
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(1);
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
   });
 
   it('an enabledWhen-satisfying provider default enables the gated option', async () => {
@@ -2252,6 +2272,42 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     });
   }
 
+  function defaultsCatalog(fields: Array<'model' | 'thinking' | 'mode'>): AgentCatalog {
+    const base = agentCatalog('Kept Model');
+    const options: AgentCatalog['configOptions'] = [
+      ...base.configOptions,
+      {
+        id: 'effort', displayName: 'Effort', role: 'effort', binding: 'turn',
+        control: 'select', required: false, defaultValue: 'high',
+        choices: ['high', 'low'].map(value => ({ value, displayName: value })),
+      },
+      {
+        id: 'approval_mode', displayName: 'Mode', role: 'approval_mode', binding: 'turn',
+        control: 'select', required: false, defaultValue: 'ask',
+        choices: ['ask', 'auto'].map(value => ({ value, displayName: value })),
+      },
+    ];
+    return {
+      ...base, models: [], modes: [],
+      configOptions: options.filter(option => fields.includes(
+        option.role === 'effort' ? 'thinking' : option.role === 'approval_mode' ? 'mode' : 'model',
+      )),
+    };
+  }
+
+  function defaultDropdowns() {
+    const fields = {
+      model: screen.getByRole('combobox', { name: 'Model' }) as HTMLSelectElement,
+      thinking: screen.getByRole('combobox', { name: /^(Thinking|Effort)$/ }) as HTMLSelectElement,
+      mode: screen.getByRole('combobox', { name: 'Mode' }) as HTMLSelectElement,
+    };
+    for (const field of Object.values(fields)) expect(field.tagName).toBe('SELECT');
+    for (const name of ['Model', /^(Thinking|Effort)$/, 'Mode']) {
+      expect(screen.queryByRole('textbox', { name })).toBeNull();
+    }
+    return fields;
+  }
+
   function renderDetail(
     status: UserAgentStatus,
     onSetDefaults = vi.fn(async () => true),
@@ -2321,12 +2377,90 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(screen.getByRole('combobox', { name: 'Effort' })).toHaveValue('low');
     expect(screen.getByRole('combobox', { name: 'Mode' })).toHaveValue('auto_edit');
     expect(reopened.onSetDefaults).not.toHaveBeenCalled();
-    expect(api.loadResolvedProxyCatalog).toHaveBeenLastCalledWith('io.gian.antigravity', expect.objectContaining({
-      sessionConfig: {}, turnConfig: { model: 'gemini-3.8-flash', thinking: 'low', mode: 'auto_edit' },
-    }), 'agy-defaults');
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
   });
 
-  it('shows the safe timeout notice with retry and no Mode field', async () => {
+  it('keeps dropdowns disabled while discovery is pending, then enables genuine choices without resetting preferences', async () => {
+    resetCatalogMocks();
+    const pending = deferred<ListedCapabilities>();
+    vi.mocked(api.loadProxyCapabilities).mockImplementation(() => pending.promise);
+    const saved = {
+      ...detailAgent('pending-discovery', 'stored-model'),
+      defaults: { model: 'stored-model', thinking: 'stored-effort', mode: 'stored-mode', options: {} },
+    };
+    const { onSetDefaults } = renderDetail(saved);
+    const loading = screen.getByTestId('agent-defaults-retry');
+    expect(loading).toBeDisabled();
+    expect(loading).toHaveAttribute('aria-busy', 'true');
+    const initial = defaultDropdowns();
+    for (const [key, field] of Object.entries(initial)) {
+      expect(field).toBeDisabled();
+      expect(field).toHaveValue(saved.defaults[key as keyof typeof initial]);
+      expect(Array.from(field.options, option => option.value)).toEqual(['', field.value]);
+    }
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    pending.resolve(defaultsCatalog(['model', 'thinking', 'mode']));
+    await waitFor(() => {
+      for (const field of Object.values(defaultDropdowns())) expect(field).toBeEnabled();
+    });
+    expect(screen.queryByTestId('agent-defaults-retry')).toBeNull();
+    const loaded = defaultDropdowns();
+    expect(loaded.model).toHaveValue('stored-model');
+    expect(loaded.thinking).toHaveValue('stored-effort');
+    expect(loaded.mode).toHaveValue('stored-mode');
+    expect(within(loaded.model).getByRole('option', { name: 'Kept Model' })).toHaveValue('kept-model');
+    expect(within(loaded.thinking).getByRole('option', { name: 'low' })).toHaveValue('low');
+    expect(within(loaded.mode).getByRole('option', { name: 'auto' })).toHaveValue('auto');
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    fireEvent.change(loaded.thinking, { target: { value: 'low' } });
+    expect(onSetDefaults).toHaveBeenLastCalledWith({ thinking: 'low' });
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(1);
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { fields: [] as Array<'model' | 'thinking' | 'mode'> },
+    { fields: ['model'] as Array<'model' | 'thinking' | 'mode'> },
+    { fields: ['thinking'] as Array<'model' | 'thinking' | 'mode'> },
+    { fields: ['mode'] as Array<'model' | 'thinking' | 'mode'> },
+  ])('keeps empty or partial metadata as dropdowns, enabling only available fields: $fields', async ({ fields }) => {
+    resetCatalogMocks();
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(defaultsCatalog(fields));
+    const saved = {
+      ...detailAgent('partial-discovery', 'stored-model'),
+      defaults: { model: 'stored-model', thinking: 'stored-effort', mode: 'stored-mode', options: {} },
+    };
+    const { onSetDefaults } = renderDetail(saved);
+    await act(async () => { await Promise.resolve(); });
+    for (const [key, field] of Object.entries(defaultDropdowns())) {
+      const name = key as 'model' | 'thinking' | 'mode';
+      expect(field).toHaveValue(saved.defaults[name]);
+      if (fields.includes(name)) expect(field).toBeEnabled();
+      else {
+        expect(field).toBeDisabled();
+        expect(Array.from(field.options, option => option.value)).toEqual(['', field.value]);
+      }
+    }
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+  });
+
+  it('keeps declared fields as disabled dropdowns when their choice lists are empty', async () => {
+    resetCatalogMocks();
+    const emptyChoices = defaultsCatalog(['model', 'thinking', 'mode']);
+    emptyChoices.configOptions = emptyChoices.configOptions.map(option => ({ ...option, choices: [] }));
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(emptyChoices);
+    const { onSetDefaults } = renderDetail(detailAgent('empty-choices', 'stored-model'));
+    await act(async () => { await Promise.resolve(); });
+    for (const field of Object.values(defaultDropdowns())) expect(field).toBeDisabled();
+    expect(defaultDropdowns().model).toHaveValue('stored-model');
+    expect(defaultDropdowns().mode).toHaveValue('ask');
+    expect(screen.queryByTestId('agent-defaults-retry')).toBeNull();
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+  });
+
+  it('shows the safe timeout notice with retry and disabled defaults dropdowns', async () => {
     resetCatalogMocks();
     vi.mocked(api.loadProxyCapabilities).mockRejectedValue(timeoutError('timeout'));
     const { onSetDefaults } = renderDetail(detailAgent('timeout-agent', 'stale'));
@@ -2335,110 +2469,78 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       .toBe('The model list query timed out.');
     expect(screen.getByTestId('agent-defaults-retry')).toBeTruthy();
     expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole('combobox', { name: 'Mode' })).toBeNull();
+    const fields = defaultDropdowns();
+    for (const field of Object.values(fields)) expect(field).toBeDisabled();
+    expect(fields.model).toHaveValue('stale');
+    expect(fields.mode).toHaveValue('ask');
     expect(screen.queryByText('proxy unavailable')).toBeNull();
     expect(document.body.textContent).not.toContain(LEAKED);
     expect(document.body.textContent).not.toContain('Antigravity');
     expect(onSetDefaults).not.toHaveBeenCalled();
   });
 
-  it('keeps retry busy until the recovered catalog renders and does not write defaults', async () => {
+  it('keeps retry busy only until discovery completes, with no resolve or persistence', async () => {
     resetCatalogMocks();
     const caps = deferred<ListedCapabilities>();
-    const resolved = deferred<ResolvedCatalog>();
     vi.mocked(api.loadProxyCapabilities)
       .mockRejectedValueOnce(timeoutError('timeout'))
       .mockImplementationOnce(() => caps.promise);
-    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => resolved.promise);
     const { onSetDefaults } = renderDetail(detailAgent('retry-agent', 'stale'));
     const button = await screen.findByTestId('agent-defaults-retry');
-
+    for (const field of Object.values(defaultDropdowns())) expect(field).toBeDisabled();
     fireEvent.click(button);
-    expect((button as HTMLButtonElement).disabled).toBe(true);
-    expect(button.getAttribute('aria-busy')).toBe('true');
+    expect(button).toBeDisabled();
     fireEvent.click(button);
     expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(2);
-
-    caps.resolve(agentCatalog('Kept Model'));
-    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[0]?.[1].turnConfig.model).toBe('stale');
-    expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId('agent-defaults-retry').getAttribute('aria-busy')).toBe('true');
-
-    resolved.resolve(agentCatalog('Recovered Model'));
-    expect(await screen.findByRole('option', { name: 'Recovered Model' })).toBeTruthy();
+    for (const field of Object.values(defaultDropdowns())) expect(field).toBeDisabled();
+    caps.resolve(defaultsCatalog(['model', 'thinking', 'mode']));
+    await waitFor(() => {
+      for (const field of Object.values(defaultDropdowns())) expect(field).toBeEnabled();
+    });
     expect(screen.queryByTestId('agent-defaults-error')).toBeNull();
-    expect(screen.getByRole('combobox', { name: 'Mode' })).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveValue('stale');
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
     expect(onSetDefaults).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain(LEAKED);
   });
 
-  it('does not write when defaults change while resolve is pending', async () => {
+  it('mount, prop changes and edits preserve unrelated preferences without resolving', async () => {
     resetCatalogMocks();
-    const gate = deferred<ResolvedCatalog>();
     vi.mocked(api.loadProxyCapabilities).mockResolvedValue(agentCatalog('Kept Model'));
-    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => gate.promise);
-    const { onSetDefaults, rerenderAgent } = renderDetail(detailAgent('pending-agent', 'kept-model'));
-    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[0]?.[1].turnConfig.model).toBe('kept-model');
-
-    rerenderAgent(detailAgent('pending-agent', 'other-model'));
-    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[1]?.[1].turnConfig.model).toBe('other-model');
-    await act(async () => {
-      gate.resolve(agentCatalog('Resolved After Change'));
-      await gate.promise;
-    });
-    expect(screen.getByRole('option', { name: 'Resolved After Change' })).toBeTruthy();
+    vi.mocked(api.loadResolvedProxyCatalog).mockRejectedValue(new Error('must not resolve'));
+    const original = detailAgent('local-agent', 'stale');
+    const { onSetDefaults, rerenderAgent } = renderDetail(original);
+    await screen.findByRole('option', { name: 'Kept Model' });
     expect(onSetDefaults).not.toHaveBeenCalled();
+    const model = screen.getByRole('combobox', { name: 'Model' });
+    expect(model).toHaveValue('stale');
+    fireEvent.change(model, { target: { value: 'kept-model' } });
+    expect(onSetDefaults).toHaveBeenLastCalledWith({ model: 'kept-model' });
+    rerenderAgent({ ...original, defaults: { model: 'kept-model', thinking: 'future-effort', mode: 'future-mode', options: {} } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Mode' }), { target: { value: 'ask' } });
+    expect(onSetDefaults).toHaveBeenLastCalledWith({ mode: 'ask' });
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(1);
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+    expect(onSetDefaults).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps retry busy through resolve when defaults become set during the capability request', async () => {
-    resetCatalogMocks();
-    const caps = deferred<ListedCapabilities>();
-    const resolved = deferred<ResolvedCatalog>();
-    vi.mocked(api.loadProxyCapabilities)
-      .mockRejectedValueOnce(timeoutError('timeout'))
-      .mockImplementationOnce(() => caps.promise);
-    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => resolved.promise);
-    const { onSetDefaults, rerenderAgent } = renderDetail(detailAgent('fill-agent', ''));
-    const button = await screen.findByTestId('agent-defaults-retry');
-
-    fireEvent.click(button);
-    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(2);
-    rerenderAgent(detailAgent('fill-agent', 'kept-model'));
-    caps.resolve(agentCatalog('Kept Model'));
-    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[0]?.[1].turnConfig.model).toBe('kept-model');
-    const retry = screen.getByTestId('agent-defaults-retry');
-    expect((retry as HTMLButtonElement).disabled).toBe(true);
-    expect(retry.getAttribute('aria-busy')).toBe('true');
-    expect(onSetDefaults).not.toHaveBeenCalled();
-
-    resolved.resolve(agentCatalog('Filled Model'));
-    expect(await screen.findByRole('option', { name: 'Filled Model' })).toBeTruthy();
-    expect(screen.queryByTestId('agent-defaults-error')).toBeNull();
-    expect(onSetDefaults).not.toHaveBeenCalled();
-  });
-
-  it('drops a pending resolve when defaults become empty and ends loading', async () => {
-    resetCatalogMocks();
-    const gate = deferred<ResolvedCatalog>();
-    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(agentCatalog('Kept Model'));
-    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => gate.promise);
-    const { onSetDefaults, rerenderAgent } = renderDetail(detailAgent('empty-agent', 'kept-model'));
-    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
-
-    rerenderAgent(detailAgent('empty-agent', ''));
-    expect((screen.getByLabelText('Model') as HTMLSelectElement).disabled).toBe(false);
-    await act(async () => {
-      gate.resolve(agentCatalog('Stale Resolved'));
-      await gate.promise;
-    });
-    expect(screen.queryByRole('option', { name: 'Stale Resolved' })).toBeNull();
-    expect(screen.getByRole('option', { name: 'Kept Model' })).toBeTruthy();
-    expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1);
-    expect(onSetDefaults).not.toHaveBeenCalled();
+  it('retains the stored selection and shows persistence errors without runtime reads', async () => {
+    const saved = detailAgent('failed-save', 'stored-model');
+    mockApi([saved]);
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(defaultsCatalog(['model', 'thinking', 'mode']));
+    vi.mocked(api.updateAgent).mockRejectedValueOnce(new Error('disk unavailable'));
+    renderAgents();
+    fireEvent.click(await screen.findByRole('button', { name: /Writer/ }));
+    await waitFor(() => expect(defaultDropdowns().model).toBeEnabled());
+    const runtimeReads = vi.mocked(api.loadManagedRuntimeStatus).mock.calls.length;
+    fireEvent.change(defaultDropdowns().model, { target: { value: 'kept-model' } });
+    expect(await within(screen.getByTestId('agents-detail-panel')).findByText('disk unavailable')).toBeTruthy();
+    await waitFor(() => expect(defaultDropdowns().model).toHaveValue('stored-model'));
+    expect(api.updateAgent).toHaveBeenCalledWith('failed-save', { defaults: { model: 'kept-model' } });
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(1);
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+    expect(api.loadAgents).toHaveBeenCalledTimes(1);
+    expect(api.loadManagedRuntimeStatus).toHaveBeenCalledTimes(runtimeReads);
   });
 
   it('discards a late capability success and a late error when the Agent changes', async () => {
@@ -2480,38 +2582,49 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(next.onSetDefaults).not.toHaveBeenCalled();
   });
 
-  it('shows retry after a read-only resolve failure and recovers without writing', async () => {
+  it.each(['home', 'runtime'] as const)('fences discovery results when the same Agent changes %s', async identity => {
     resetCatalogMocks();
-    const recovery = deferred<ResolvedCatalog>();
-    let resolves = 0;
-    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(agentCatalog('Kept Model'));
-    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => {
-      resolves += 1;
-      if (resolves === 1) return Promise.reject(new Error(`resolve failed ${LEAKED}`));
-      return recovery.promise;
-    });
-    const { onSetDefaults } = renderDetail(detailAgent('resolve-agent', 'stale'));
-
-    expect((await screen.findByTestId('agent-defaults-error')).textContent)
-      .toBe('Agent defaults are unavailable.');
-    expect(document.body.textContent).not.toContain(LEAKED);
-    expect(onSetDefaults).not.toHaveBeenCalled();
-    const button = screen.getByTestId('agent-defaults-retry');
-    expect((button as HTMLButtonElement).disabled).toBe(false);
-
-    fireEvent.click(button);
-    expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByTestId('agent-defaults-retry'));
+    const old = deferred<ListedCapabilities>();
+    const current = deferred<ListedCapabilities>();
+    vi.mocked(api.loadProxyCapabilities)
+      .mockImplementationOnce(() => old.promise)
+      .mockImplementationOnce(() => current.promise);
+    const initial = detailAgent('same-agent', 'stored-model');
+    const { rerenderAgent, onSetDefaults } = renderDetail(initial);
+    const next = {
+      ...initial,
+      ...(identity === 'home' ? { home: { kind: 'custom' as const, path: '/new/home' } }
+        : { runtime: { kind: 'custom' as const, path: '/new/runtime' } }),
+    };
+    rerenderAgent(next);
     expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(2);
-    await waitFor(() => expect(resolves).toBe(2));
-    expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(true);
-
-    recovery.resolve(agentCatalog('Recovered Model'));
-    await waitFor(() => expect(screen.queryByTestId('agent-defaults-error')).toBeNull());
-    expect(screen.getByRole('option', { name: 'Recovered Model' })).toBeTruthy();
-    expect(screen.getByRole('combobox', { name: 'Mode' })).toBeTruthy();
+    await act(async () => {
+      if (identity === 'home') old.resolve(agentCatalog('Stale Model'));
+      else old.reject(timeoutError('timeout'));
+      await old.promise.catch(() => undefined);
+    });
+    expect(screen.queryByRole('option', { name: 'Stale Model' })).toBeNull();
+    expect(screen.queryByTestId('agent-defaults-error')).toBeNull();
+    for (const field of Object.values(defaultDropdowns())) expect(field).toBeDisabled();
+    current.resolve(defaultsCatalog(['model', 'thinking', 'mode']));
+    await waitFor(() => {
+      for (const field of Object.values(defaultDropdowns())) expect(field).toBeEnabled();
+    });
+    expect(defaultDropdowns().model).toHaveValue('stored-model');
     expect(onSetDefaults).not.toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain(LEAKED);
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+  });
+
+  it('a rejected resolver is irrelevant to local defaults and never called', async () => {
+    resetCatalogMocks();
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(agentCatalog('Kept Model'));
+    vi.mocked(api.loadResolvedProxyCatalog).mockRejectedValue(new Error(`resolve failed ${LEAKED}`));
+    const { onSetDefaults } = renderDetail(detailAgent('local-only', 'stale'));
+    await screen.findByRole('option', { name: 'Kept Model' });
+    expect(screen.queryByTestId('agent-defaults-error')).toBeNull();
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveValue('stale');
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+    expect(onSetDefaults).not.toHaveBeenCalled();
   });
 
   it('hides raw text for constructor, __proto__, and unknown capability reasons', async () => {
@@ -2521,7 +2634,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       const view = renderDetail(detailAgent(`reason-${reason}`, 'stale'));
       expect((await screen.findByTestId('agent-defaults-error')).textContent)
         .toBe('Agent defaults are unavailable.');
-      expect(screen.queryByRole('combobox', { name: 'Mode' })).toBeNull();
+      for (const field of Object.values(defaultDropdowns())) expect(field).toBeDisabled();
       expect(document.body.textContent).not.toContain(LEAKED);
       expect(document.body.textContent).not.toContain('Antigravity');
       expect(document.body.textContent).not.toContain(reason);

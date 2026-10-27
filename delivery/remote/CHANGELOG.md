@@ -1,5 +1,35 @@
 # Gian Remote Changelog
 
+## [1.4.2] - 2026-10-22
+
+- Offline deployment works across classic Docker and containerd image stores,
+  which can expose different immutable IDs for the same saved image. New
+  schema-3 receipts distinguish the build daemon ID, config digest and OCI
+  manifest digest, with their links verified directly from the single-image
+  archive before deployment.
+- Apply resolves only an archive-bound local image, verifies its platform,
+  source, layers and migrations before stopping the service, and uses that
+  immutable ID for startup, backup, health checks and retries. Ambiguous or
+  unsupported archives fail closed without registry pulls or tag fallbacks.
+- Existing 1.4.1 release assets remain immutable; this compatibility fix is
+  delivered as a new release, not replacement metadata for an older archive.
+
+## [1.4.1] - 2026-10-22
+
+- Remote Web shows Working as soon as the Host confirms an active turn,
+  without waiting for a tool event or refreshing the page. Completed turns,
+  pending approvals, unavailable history and disconnected state no longer
+  present stale model activity; final replies continue to arrive live.
+- Release CI publishes tested native amd64/arm64 offline image archives,
+  source-bound deployment tooling and verified release metadata. The local
+  download/upload CLI needs no Docker on the operator's Mac and preserves
+  existing SSH configuration. Server deployment no longer pulls from a registry.
+- Publication and deployment are separate steps. Upload stages verified files
+  without restarting the service; explicit apply preserves the existing project,
+  data volume, stopped-data backups and migration-aware cached-image rollback.
+- Continues to use Remote Protocol 1.4.0 and a compatible Gian Host; no new
+  protocol version or database migration is required.
+
 ## [1.4.0] - Unreleased
 
 - Publishes from RichToyo/Gian-Remote with English-only product copy.

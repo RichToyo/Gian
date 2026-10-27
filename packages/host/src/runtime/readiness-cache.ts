@@ -3,10 +3,15 @@ import type { OpenRuntimeProfile } from '@gian/shared';
 
 import type { RuntimeObservation } from './resolver.js';
 
+export interface CustomRuntimeReadinessScope {
+  configHome: string | null;
+}
+
 export interface RuntimeReadinessSnapshot {
   pluginId: string;
   pluginVersion: string;
   selectedPath: string | null;
+  customRuntime?: CustomRuntimeReadinessScope;
   profileIdentity: string | null;
   state: CatalogRuntimeState;
   displayName: string | null;
@@ -16,12 +21,12 @@ export interface RuntimeReadinessSnapshot {
   invalidated?: boolean;
 }
 
-function versionKey(pluginId: string, pluginVersion: string): string {
-  return `${pluginId}\0${pluginVersion}`;
+function versionKey(pluginId: string, pluginVersion: string, customRuntime?: CustomRuntimeReadinessScope): string {
+  return `${pluginId}\0${pluginVersion}\0${customRuntime ? JSON.stringify(['custom', customRuntime.configHome]) : 'managed'}`;
 }
 
-function exactKey(pluginId: string, pluginVersion: string, selectedPath: string | null): string {
-  return `${versionKey(pluginId, pluginVersion)}\0${selectedPath ?? ''}`;
+function exactKey(pluginId: string, pluginVersion: string, selectedPath: string | null, customRuntime?: CustomRuntimeReadinessScope): string {
+  return `${versionKey(pluginId, pluginVersion, customRuntime)}\0${selectedPath ?? ''}`;
 }
 
 /**
@@ -38,11 +43,12 @@ export class RuntimeReadinessCache {
     pluginId: string,
     pluginVersion: string,
     selectedPath?: string | null,
+    customRuntime?: CustomRuntimeReadinessScope,
   ): RuntimeReadinessSnapshot | null {
     if (selectedPath !== undefined) {
-      return this.exact.get(exactKey(pluginId, pluginVersion, selectedPath)) ?? null;
+      return this.exact.get(exactKey(pluginId, pluginVersion, selectedPath, customRuntime)) ?? null;
     }
-    const latest = this.latest.get(versionKey(pluginId, pluginVersion));
+    const latest = this.latest.get(versionKey(pluginId, pluginVersion, customRuntime));
     return latest ? this.exact.get(latest) ?? null : null;
   }
 
@@ -50,12 +56,14 @@ export class RuntimeReadinessCache {
     pluginId: string,
     pluginVersion: string,
     selectedPath?: string | null,
+    customRuntime?: CustomRuntimeReadinessScope,
   ): boolean {
-    const snapshot = this.get(pluginId, pluginVersion, selectedPath);
+    const snapshot = this.get(pluginId, pluginVersion, selectedPath, customRuntime);
     if (snapshot?.invalidated) return true;
     if (selectedPath !== undefined) return false;
     for (const item of this.exact.values()) {
-      if (item.pluginId === pluginId && item.pluginVersion === pluginVersion && item.invalidated) {
+      if (item.pluginId === pluginId && item.pluginVersion === pluginVersion && item.invalidated
+        && JSON.stringify(item.customRuntime) === JSON.stringify(customRuntime)) {
         return true;
       }
     }
@@ -63,9 +71,9 @@ export class RuntimeReadinessCache {
   }
 
   publish(snapshot: RuntimeReadinessSnapshot): void {
-    const key = exactKey(snapshot.pluginId, snapshot.pluginVersion, snapshot.selectedPath);
+    const key = exactKey(snapshot.pluginId, snapshot.pluginVersion, snapshot.selectedPath, snapshot.customRuntime);
     this.exact.set(key, { ...snapshot, invalidated: false });
-    this.latest.set(versionKey(snapshot.pluginId, snapshot.pluginVersion), key);
+    this.latest.set(versionKey(snapshot.pluginId, snapshot.pluginVersion, snapshot.customRuntime), key);
   }
 
   observations(): RuntimeObservation[] {
@@ -90,17 +98,6 @@ export class RuntimeReadinessCache {
         profile: undefined,
         profileIdentity: null,
       });
-    }
-    for (const [key] of this.latest) {
-      if (!key.startsWith(`${pluginId}\0`)) continue;
-      if (pluginVersion && key !== versionKey(pluginId, pluginVersion)) continue;
-      const latest = this.latest.get(key);
-      if (latest) {
-        const snapshot = this.exact.get(latest);
-        if (snapshot && selectedPath !== undefined && snapshot.selectedPath !== selectedPath) {
-          continue;
-        }
-      }
     }
   }
 }

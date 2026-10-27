@@ -5,9 +5,10 @@ import type { RuntimeDiscoverResult, RuntimeProbeResult } from '@gian/proxy-prot
 import { isCanonicalAbsolutePath, type OpenRuntimeProfile, type ProxyPluginId } from '@gian/shared';
 
 import { acquireAgentRuntimeUseLock, type AgentUpdateLease } from '../agents/update-lock.js';
+import { providerHomeEnvironment } from '../agents/home.js';
 import { runRuntimeBootstrap, assertSafeDiscoverResult, assertSafeProbeResult } from './bootstrap.js';
-import { classifyRuntimeVersion } from './classify-version.js';
-import { hostRuntimeFingerprint, RuntimeFingerprintError } from './fingerprint.js';
+import { classifyCustomRuntimeVersion, classifyRuntimeVersion } from './classify-version.js';
+import { hostRuntimeFingerprint, RuntimeFingerprintError, type RuntimeStagingInventory } from './fingerprint.js';
 import type { RuntimeLease, RuntimeSource } from './types.js';
 
 const SYSTEM_PATHS = [
@@ -34,6 +35,9 @@ export interface RuntimeResolveInput {
     verifiedVersions?: readonly string[];
   };
   selectedPath: string | null;
+  /** Host-only ownership evidence from an explicit Custom Agent binding.
+   * A configured/override path alone must never select this version policy. */
+  customRuntime?: { configHome: string | null };
 }
 
 export interface RuntimeReadinessIssue {
@@ -221,6 +225,10 @@ export class RuntimeResolver {
       };
     }
     assertTrustedRuntimeManifest(input);
+    if (input.customRuntime?.configHome !== null && input.customRuntime?.configHome !== undefined
+      && !isCanonicalAbsolutePath(input.customRuntime.configHome)) {
+      throw new RuntimeResolverError('RUNTIME_HOME_INVALID', 'Custom Runtime HOME must be a canonical absolute path.');
+    }
     const selected = await this.resolveSelectedPath(input);
     const selectedPath = selected.selectedPath;
     const key = this.generationKey(input, selectedPath);
@@ -269,6 +277,22 @@ export class RuntimeResolver {
         lease: this.makeLease(active),
         ...(this.observationFromActive(active)),
       };
+    }
+  }
+
+  /** Installation evidence is scoped to this probe and is never cached or observed. */
+  async probeStagedVersion(input: RuntimeResolveInput, staging: RuntimeStagingInventory): Promise<string | null> {
+    assertTrustedRuntimeManifest(input);
+    const selected = await this.resolveSelectedPath(input);
+    const key = this.generationKey(input, selected.selectedPath);
+    const pendingRetirement = this.retryRetirements(key);
+    if (pendingRetirement) await pendingRetirement;
+    const active = await this.resolveExternal(input, selected.selectedPath, 0, key, selected.discover, staging);
+    try {
+      await this.assertUnchanged(active, staging);
+      return this.profileFromActive(input, active).version;
+    } finally {
+      await this.retire(active);
     }
   }
 
@@ -398,6 +422,7 @@ export class RuntimeResolver {
     generation: number,
     key: string,
     discovered: RuntimeDiscoverResult | null,
+    staging?: RuntimeStagingInventory,
   ): Promise<ActiveRuntime> {
     assertTrustedRuntimeInput(input, selectedPath);
     const acquireLock = this.options.acquireLock ?? acquireAgentRuntimeUseLock;
@@ -422,7 +447,11 @@ export class RuntimeResolver {
         dataDir: this.options.dataDir,
         hostVersion: this.options.hostVersion,
         ...(this.options.bootstrapTimeoutMs ? { timeoutMs: this.options.bootstrapTimeoutMs } : {}),
-        ...(this.options.bootstrapEnv ? { env: this.options.bootstrapEnv } : {}),
+        env: {
+          ...this.options.bootstrapEnv,
+          ...(input.customRuntime?.configHome
+            ? providerHomeEnvironment(input.pluginId, input.customRuntime.configHome) : {}),
+        },
       }, async (client) => {
         const result = await client.request<RuntimeProbeResult>('runtime.probe', { path: authorized });
         assertSafeProbeResult(result, authorized);
@@ -446,6 +475,7 @@ export class RuntimeResolver {
         contentRoots: probe.contentRoots,
         ...(this.options.managedStoreRoot ? { managedStoreRoot: this.options.managedStoreRoot } : {}),
         ...(this.options.homeDir ? { homeDir: this.options.homeDir } : {}),
+        ...(staging ? { staging } : {}),
       });
       const fingerprintAfter = await this.safeLauncherFingerprint(authorized, probe.configHome);
       if (fingerprintBefore !== null && fingerprintAfter !== null && fingerprintBefore !== fingerprintAfter) {
@@ -456,7 +486,11 @@ export class RuntimeResolver {
       }
       const resolved: ActiveRuntime = {
         key,
-        identity: openRuntimeIdentity(input.pluginId, authorized, fingerprint),
+        identity: input.customRuntime
+          ? createHash('sha256').update(JSON.stringify([
+            openRuntimeIdentity(input.pluginId, authorized, fingerprint), 'custom', input.customRuntime.configHome,
+          ])).digest('hex')
+          : openRuntimeIdentity(input.pluginId, authorized, fingerprint),
         pluginId: input.pluginId,
         pluginVersion: input.pluginVersion,
         path: authorized,
@@ -471,10 +505,10 @@ export class RuntimeResolver {
         retirementComplete: false,
       };
       const observation = this.observationFromActive(resolved).observation;
-      if (observation) {
+      if (observation && !staging) {
         this.observations.set(this.observationContractKey(observation), observation);
       }
-      if ((this.generations.get(key) ?? 0) === generation) {
+      if (!staging && (this.generations.get(key) ?? 0) === generation) {
         this.active.set(key, resolved);
       }
       return resolved;
@@ -514,7 +548,7 @@ export class RuntimeResolver {
     }
   }
 
-  private async assertUnchanged(active: ActiveRuntime): Promise<void> {
+  private async assertUnchanged(active: ActiveRuntime, staging?: RuntimeStagingInventory): Promise<void> {
     if (!active.probe || !active.path || !active.fingerprint) return;
     const current = await hostRuntimeFingerprint({
       selectedPath: active.path,
@@ -522,6 +556,7 @@ export class RuntimeResolver {
       contentRoots: active.probe.contentRoots,
       ...(this.options.managedStoreRoot ? { managedStoreRoot: this.options.managedStoreRoot } : {}),
       ...(this.options.homeDir ? { homeDir: this.options.homeDir } : {}),
+      ...(staging ? { staging } : {}),
     });
     if (current !== active.fingerprint) {
       this.invalidate(active.pluginId, active.path);
@@ -567,10 +602,12 @@ export class RuntimeResolver {
       runtimeId: input.runtime.id ?? active.probe?.runtimeId ?? null,
       path: active.path,
       version: active.probe?.version ?? null,
-      configHome: active.probe?.configHome ?? null,
+      configHome: input.customRuntime?.configHome ?? active.probe?.configHome ?? null,
       contentFingerprint: active.fingerprint,
       verifiedVersions,
-      verification: classifyRuntimeVersion(active.probe?.version ?? null, verifiedVersions),
+      verification: input.customRuntime
+        ? classifyCustomRuntimeVersion(active.probe?.version ?? null, verifiedVersions)
+        : classifyRuntimeVersion(active.probe?.version ?? null, verifiedVersions),
     };
   }
 
@@ -617,6 +654,7 @@ export class RuntimeResolver {
       input.runtime.id ?? '',
       input.runtime.displayName ?? '',
       (input.runtime.verifiedVersions ?? []).join(','),
+      input.customRuntime ? JSON.stringify(['custom', input.customRuntime.configHome]) : 'managed',
       path ?? 'none',
     ].join('\0');
   }
@@ -761,5 +799,25 @@ export class RuntimeResolver {
     });
     failed.retirement = retirement;
     return retirement;
+  }
+}
+
+/** Shared Host installer wiring for staged and already-installed candidates. */
+export async function probeRuntimeVersionForInstall(
+  resolver: RuntimeResolver,
+  input: RuntimeResolveInput,
+  staging?: RuntimeStagingInventory,
+): Promise<string> {
+  if (staging) {
+    const version = await resolver.probeStagedVersion(input, staging);
+    if (!version) throw new Error(`${input.pluginId} Runtime reported no version.`);
+    return version;
+  }
+  const resolved = await resolver.resolve(input);
+  try {
+    if (!resolved.profile.version) throw new Error(`${input.pluginId} Runtime reported no version.`);
+    return resolved.profile.version;
+  } finally {
+    await resolved.lease?.release();
   }
 }

@@ -15,7 +15,7 @@ import {
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { verifiedRuntimeReuse } from '../runtime/artifact-reuse.js';
 import {
   HostProtocolValidator,
@@ -71,7 +71,7 @@ import { RuntimeBootstrapError } from '../runtime/bootstrap.js';
 import { RuntimeFingerprintError } from '../runtime/fingerprint.js';
 import { openRuntimeIdentity, RuntimeResolver, RuntimeResolverError } from '../runtime/resolver.js';
 import type { PluginStore } from '../plugin-store/store.js';
-import { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
+import { RuntimeReadinessCache, type CustomRuntimeReadinessScope } from '../runtime/readiness-cache.js';
 import { ManagedRuntimeGenerationStore, ManagedRuntimeStoreError } from '../runtime/generation-store.js';
 import {
   preferProvisionedRuntime,
@@ -483,6 +483,12 @@ export function mergeAgentProxyDefaults(
 
 function copyProxyDefaults(defaults: AgentProxyDefaults): AgentProxyDefaults {
   return { ...defaults, options: { ...(defaults.options ?? {}) } };
+}
+
+function sameAgentRuntimeIdentity(left: UserAgent, right: UserAgent): boolean {
+  return left.pluginId === right.pluginId && left.cliPath === right.cliPath
+    && isDeepStrictEqual(left.home ?? null, right.home ?? null)
+    && isDeepStrictEqual(left.runtime ?? null, right.runtime ?? null);
 }
 
 export function normalizeAgentName(value: unknown): string {
@@ -1006,8 +1012,9 @@ export class AgentManager {
     const manager = new AgentManager({
       ...options,
       generationStore,
-      readinessCache: options.readinessCache
-        ?? (options.runtimeResolver ? new RuntimeReadinessCache() : undefined),
+      // All Runtime observations, including a resolver installed later by
+      // Host bootstrap, have the same scoped readiness store.
+      readinessCache: options.readinessCache ?? new RuntimeReadinessCache(),
     });
     await mkdir(options.dataDir, { recursive: true });
     let persisted: AgentConfigFile | AgentConfigFileV1;
@@ -1144,6 +1151,7 @@ export class AgentManager {
 
   setRuntimeResolver(resolver: RuntimeResolver): void {
     this.options.runtimeResolver = resolver;
+    this.options.readinessCache ??= new RuntimeReadinessCache();
   }
 
   setPluginStore(store: PluginStore): void {
@@ -1643,6 +1651,8 @@ export class AgentManager {
   }
 
   activeRuntimeGeneration(pluginId: string): import('@gian/shared').ManagedRuntimeGeneration | null {
+    // Source-first GianDev must not adopt an installed release generation.
+    if (!this.options.managedProxies) return null;
     const id = parseProxyPluginId(pluginId);
     if (this.options.generationStore?.hasPendingActivation(id)) {
       throw new ManagedRuntimeStoreError(
@@ -2086,7 +2096,8 @@ export class AgentManager {
       if ((!input.home || input.home.kind === 'default') && generic && launch?.runtime.kind === 'external'
         && this.agentHomes.defaultPath(pluginId) === null && defaultRuntimePath) {
         try {
-          defaultRuntimeProfile = await this.probeAgentRuntimePath(pluginId, defaultRuntimePath);
+          defaultRuntimeProfile = await this.probeAgentRuntimePath(pluginId, defaultRuntimePath,
+            runtime?.kind === 'custom' ? { configHome: null } : undefined);
           runtimeAlreadyProbed = true;
         } catch (error) {
           rejectRuntimeProbe(pluginId, 'agent.create', error);
@@ -2181,7 +2192,7 @@ export class AgentManager {
         // Agent is persisted. A failed probe aborts the create — there is no
         // fallback to the managed generation.
         try {
-          if (!runtimeAlreadyProbed) await this.probeAgentRuntimePath(pluginId, runtime.path);
+          await this.probeAgentRuntimePath(pluginId, runtime.path, { configHome: home?.path ?? null });
         } catch (error) {
           rejectRuntimeProbe(pluginId, 'agent.create', error);
         }
@@ -2214,6 +2225,7 @@ export class AgentManager {
         launch.pluginVersion,
         runtime?.kind === 'custom' ? runtime.path : cliPath,
         agent.id,
+        runtime?.kind === 'custom' ? { configHome: home?.path ?? null } : undefined,
       );
       return agent;
     });
@@ -2311,18 +2323,25 @@ export class AgentManager {
       if (pathChanged && cliPath !== null) {
         await this.probeAgentRuntimePath(previous.pluginId, cliPath);
       }
+      const defaults = patch.defaults
+        ? mergeAgentProxyDefaults(previous.defaults, patch.defaults)
+        : previous.defaults;
+      if (Object.keys(defaults.options).length > MAX_PROXY_DEFAULT_OPTIONS) {
+        throw new Error('options exceeds 64 entries');
+      }
       const agent: UserAgent = persistableAgent({
         ...previous,
         name,
         home,
         cliPath,
-        defaults: patch.defaults
-          ? normalizeProxyDefaults(mergeAgentProxyDefaults(previous.defaults, patch.defaults))
-          : previous.defaults,
+        defaults: patch.defaults ? normalizeProxyDefaults(defaults) : previous.defaults,
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       });
       const agents = [...current.agents];
       agents[index] = agent;
+      const preferenceOnly = Object.keys(patch).every(key => (
+        key === 'defaults' || key === 'name' || key === 'enabled'
+      ));
       // The kind-level status view carries the first-Agent defaults/path, so
       // every committed update invalidates both touched kinds — even a
       // write-through defaults rename.
@@ -2330,6 +2349,7 @@ export class AgentManager {
         { schemaVersion: 6, agents },
         [id],
         officialKinds(official),
+        preferenceOnly ? { id, generation: this.agentStatusGenerations.get(id) ?? 0 } : undefined,
       );
       if (pathChanged) {
         const launch = await this.trustedLaunch(previous.pluginId);
@@ -2344,7 +2364,9 @@ export class AgentManager {
       }
       return agent;
     });
-    if (agent.proxy === 'codex') await this.reconcileManagedSkills();
+    if (agent.proxy === 'codex' && Object.keys(patch).some(key => (
+      key !== 'defaults' && key !== 'name' && key !== 'enabled'
+    ))) await this.reconcileManagedSkills();
     return agent;
   }
 
@@ -2355,6 +2377,37 @@ export class AgentManager {
       if (agents.length === current.agents.length) throw new Error(`agent not found: ${id}`);
       await this.commitConfig({ schemaVersion: 6, agents }, [id], officialKinds(existing.proxy));
     });
+  }
+
+  /** Last observed Runtime facts only, including on a cold cache. Preference
+   * writes must never start a Runtime just to construct their response. */
+  agentStatusSnapshot(id: string): UserAgentStatus {
+    const agent = this.getAgent(id);
+    const cached = this.agentStatusCache.get(id)?.value;
+    if (cached && sameAgentRuntimeIdentity(cached, agent)) return {
+      ...cached,
+      ...agent,
+      plugin: { ...cached.plugin, defaults: copyProxyDefaults(agent.defaults) },
+    };
+    return {
+      ...agent,
+      proxyName: agent.proxy ? AGENTS[agent.proxy].name : agent.pluginId,
+      ready: false,
+      cli: {
+        state: 'missing', path: null, version: null, source: null,
+        readinessIssue: {
+          code: 'RUNTIME_STATUS_NOT_CHECKED',
+          message: 'Runtime status has not been checked.',
+          repairable: false,
+        },
+      },
+      plugin: {
+        state: 'missing', path: null, version: null, source: null,
+        defaults: copyProxyDefaults(agent.defaults),
+      },
+      runtimeProfile: null,
+      officialInstallUrl: agent.proxy ? AGENTS[agent.proxy].installerUrl : '',
+    };
   }
 
   /** Live Runtime/Proxy status for one saved Agent. Production projects only
@@ -2368,6 +2421,13 @@ export class AgentManager {
     if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
     const pending = this.agentStatusProbes.get(id);
     if (!refresh && pending?.generation === generation) return pending.promise;
+    if (agent.runtime?.kind === 'custom') {
+      const value = await this.customRuntimeAgentStatus(agent);
+      if ((this.agentStatusGenerations.get(id) ?? 0) === generation) {
+        this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      }
+      return value;
+    }
     if (!this.options.managedProxies && this.provisionedRuntimes.has(agent.pluginId)
       && (await this.provisionedRuntimeStatus(agent.pluginId))?.state === 'ready') {
       const value = await this.managedGenerationAgentStatus(agent, true);
@@ -2375,9 +2435,7 @@ export class AgentManager {
       return value;
     }
     if (this.options.managedProxies) {
-      const value = agent.runtime?.kind === 'custom'
-        ? await this.customRuntimeAgentStatus(agent)
-        : await this.managedGenerationAgentStatus(agent);
+      const value = await this.managedGenerationAgentStatus(agent);
       this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       return value;
     }
@@ -2462,33 +2520,44 @@ export class AgentManager {
 
   /** ADR-0102: a custom-Runtime Agent never reports the managed generation's
    *  certified version. Its Runtime status comes from the user-provided path
-   *  plus the latest probe of exactly that path; without a successful probe
-   *  the Runtime is unverified, and a missing path is an explicit error. */
+   *  plus the latest scoped probe; without a successful probe it is not
+   *  ready, and a missing path is an explicit error. */
   private async customRuntimeAgentStatus(agent: UserAgent): Promise<UserAgentStatus> {
     const path = agent.runtime?.kind === 'custom' ? agent.runtime.path : '';
+    const customRuntime = { configHome: agent.home?.path ?? null };
     const trusted = await this.trustedLaunch(agent.pluginId);
     const pathReady = path.length > 0 && await existsReadable(path);
     let probeFailure: { code: string; message: string; repairable: boolean } | null = null;
     if (pathReady && trusted && this.options.runtimeResolver
-      && !this.options.readinessCache?.get(agent.pluginId, trusted.pluginVersion, path)) {
+      && !this.options.readinessCache?.get(agent.pluginId, trusted.pluginVersion, path, customRuntime)) {
       // No probe record for this path (e.g. after a Host restart): probe now
       // so the status view and session launch share one verification result.
       try {
-        await this.probeAgentRuntimePath(agent.pluginId, path);
+        await this.probeAgentRuntimePath(agent.pluginId, path, customRuntime);
       } catch (error) {
         probeFailure = {
-          code: 'RUNTIME_INVALID',
+          code: error instanceof RuntimeResolverError || error instanceof RuntimeBootstrapError
+            || error instanceof RuntimeFingerprintError ? error.code : 'RUNTIME_INVALID',
           message: error instanceof Error ? error.message : String(error),
           repairable: false,
         };
       }
     }
     const probe = trusted && path
-      ? this.options.readinessCache?.get(agent.pluginId, trusted.pluginVersion, path) ?? null
+      ? this.options.readinessCache?.get(agent.pluginId, trusted.pluginVersion, path, customRuntime) ?? null
       : null;
-    const profile = (path
-      ? this.lastOpenRuntimeProfiles.get(`${agent.pluginId}\0${path}`) ?? null
-      : null) ?? probe?.profile ?? null;
+    // Retained kind/path profiles have no HOME, policy or package fence.
+    // Only the exact scoped readiness record may certify this Agent view.
+    const profile = probe?.invalidated ? null : probe?.profile ?? null;
+    const readinessIssue = probe?.invalidated ? {
+      code: 'RUNTIME_MUTATED', message: 'Runtime content changed after the last trusted probe.', repairable: true,
+    } : probeFailure ?? probe?.readinessIssue ?? (
+      profile?.verification === 'incompatible' ? {
+        code: 'RUNTIME_INCOMPATIBLE', message: 'Selected Runtime is incompatible with the trusted Manifest.', repairable: false,
+      } : !profile?.path || !profile.version ? {
+        code: 'RUNTIME_STATUS_NOT_CHECKED', message: 'Runtime status has not been checked.', repairable: false,
+      } : null
+    );
     const plugin: Omit<AgentProxyStatus, 'defaults'> = trusted
       ? {
         state: 'ready',
@@ -2516,13 +2585,13 @@ export class AgentManager {
           repairable: false,
         },
       }
-      : probeFailure || probe?.state === 'invalid'
+      : readinessIssue || probe?.state === 'invalid'
         ? {
           state: 'invalid',
           path,
           version: profile?.version ?? null,
           source: 'override',
-          readinessIssue: probeFailure ?? probe?.readinessIssue,
+          ...(readinessIssue ? { readinessIssue } : {}),
         }
         : {
           state: 'ready',
@@ -2550,22 +2619,22 @@ export class AgentManager {
 
   private async managedGenerationAgentStatus(agent: UserAgent, sourceRuntime = false): Promise<UserAgentStatus> {
     const active = sourceRuntime ? null : this.options.generationStore?.activeCached(agent.pluginId) ?? null;
-    const trusted = await this.trustedLaunch(agent.pluginId);
-    const fallbackPlugin: Omit<AgentProxyStatus, 'defaults'> = trusted
-      ? {
-        state: 'ready',
-        path: trusted.entryPath,
-        version: trusted.pluginVersion,
-        verifiedCliVersions: [...(trusted.runtime.verifiedVersions ?? [])],
-        source: trusted.source === 'official-development' ? 'development' : 'github-release',
-      }
-      : agent.proxy ? await this.proxyStatus(agent.proxy) : {
-        state: 'missing',
-        path: null,
-        version: null,
-        source: null,
-      };
     if (!active) {
+      const trusted = await this.trustedLaunch(agent.pluginId);
+      const fallbackPlugin: Omit<AgentProxyStatus, 'defaults'> = trusted
+        ? {
+          state: 'ready',
+          path: trusted.entryPath,
+          version: trusted.pluginVersion,
+          verifiedCliVersions: [...(trusted.runtime.verifiedVersions ?? [])],
+          source: trusted.source === 'official-development' ? 'development' : 'github-release',
+        }
+        : agent.proxy ? await this.proxyStatus(agent.proxy) : {
+          state: 'missing',
+          path: null,
+          version: null,
+          source: null,
+        };
       const provisioned = this.provisionedRuntimes.get(agent.pluginId);
       const runtimeReady = provisioned !== undefined && await existsReadable(provisioned.entryPath);
       if (provisioned && runtimeReady) {
@@ -2745,7 +2814,11 @@ export class AgentManager {
     }
   }
 
-  private async probeAgentRuntimePath(pluginId: string, path: string): Promise<OpenRuntimeProfile | null> {
+  private async probeAgentRuntimePath(
+    pluginId: string,
+    path: string,
+    customRuntime?: CustomRuntimeReadinessScope,
+  ): Promise<OpenRuntimeProfile | null> {
     const launch = await this.trustedLaunch(pluginId);
     if (!launch) {
       // Onboarding may select an already-installed Runtime before its Proxy
@@ -2781,14 +2854,18 @@ export class AgentManager {
         verifiedVersions: [...(launch.runtime.verifiedVersions ?? [])],
       },
       selectedPath: path,
+      ...(customRuntime ? { customRuntime } : {}),
     });
     await resolved.lease?.release();
-    this.lastOpenRuntimeProfiles.set(`${pluginId}\0${path}`, resolved.profile);
-    this.lastOpenRuntimeProfiles.set(`${launch.pluginId}\0${path}`, resolved.profile);
+    if (!customRuntime) {
+      this.lastOpenRuntimeProfiles.set(`${pluginId}\0${path}`, resolved.profile);
+      this.lastOpenRuntimeProfiles.set(`${launch.pluginId}\0${path}`, resolved.profile);
+    }
     this.options.readinessCache?.publish({
       pluginId: launch.pluginId,
       pluginVersion: launch.pluginVersion,
       selectedPath: path,
+      ...(customRuntime ? { customRuntime } : {}),
       profileIdentity: resolved.profile.id,
       state: resolved.readinessIssue
         ? 'invalid'
@@ -2803,10 +2880,13 @@ export class AgentManager {
       ...(resolved.observation ? { observation: resolved.observation } : {}),
     });
     if (resolved.readinessIssue) {
-      throw new Error(resolved.readinessIssue.message);
+      throw customRuntime
+        ? new RuntimeResolverError(resolved.readinessIssue.code, resolved.readinessIssue.message)
+        : new Error(resolved.readinessIssue.message);
     }
     if (resolved.profile.verification === 'incompatible') {
-      throw new Error('Selected Runtime is incompatible with the trusted Manifest.');
+      const message = 'Selected Runtime is incompatible with the trusted Manifest.';
+      throw customRuntime ? new RuntimeResolverError('RUNTIME_INCOMPATIBLE', message) : new Error(message);
     }
     return resolved.profile;
   }
@@ -2849,30 +2929,46 @@ export class AgentManager {
     pluginVersion: string,
     selectedPath: string | null,
     agentId: string,
+    customRuntime?: CustomRuntimeReadinessScope,
   ): void {
-    const cached = this.options.readinessCache?.get(pluginId, pluginVersion, selectedPath);
+    const cached = this.options.readinessCache?.get(pluginId, pluginVersion, selectedPath, customRuntime);
     if (!cached?.profile) return;
     const profile = { ...cached.profile, agentId };
     this.options.readinessCache?.publish({
       ...cached,
       profile,
     });
-    this.lastOpenRuntimeProfiles.set(`${pluginId}\0${selectedPath ?? ''}`, profile);
+    if (!customRuntime) this.lastOpenRuntimeProfiles.set(`${pluginId}\0${selectedPath ?? ''}`, profile);
   }
 
   private async commitConfig(
     next: AgentConfigFile,
     invalidateAgentIds: readonly string[] = [],
     invalidateKinds: readonly LegacyExecutorId[] = [],
+    preserveAgentStatus?: { id: string; generation: number },
   ): Promise<void> {
     // Persistence is the commit point. Invalidate immediately so a later
     // claim-retirement failure cannot leave stale statuses cached.
     await this.saveConfig(next);
+    // Inspect the latest observation only after the write await. A Runtime
+    // invalidation during persistence must never be undone by this commit.
+    const observed = preserveAgentStatus
+      && (this.agentStatusGenerations.get(preserveAgentStatus.id) ?? 0) === preserveAgentStatus.generation
+      ? this.agentStatusCache.get(preserveAgentStatus.id) : undefined;
+    const agent = preserveAgentStatus ? next.agents.find(item => item.id === preserveAgentStatus.id) : undefined;
+    const preserved = observed && agent && sameAgentRuntimeIdentity(observed.value, agent)
+      ? { expiresAt: observed.expiresAt, value: {
+        ...observed.value, ...agent,
+        plugin: { ...observed.value.plugin, defaults: copyProxyDefaults(agent.defaults) },
+      } } : undefined;
     this.config = next;
     for (const id of invalidateAgentIds) {
       this.invalidateAgentStatus(id);
     }
     for (const kind of invalidateKinds) this.invalidateStatus(kind);
+    if (preserved && preserveAgentStatus) {
+      this.agentStatusCache.set(preserveAgentStatus.id, preserved);
+    }
   }
 
   /** Serialize agents.json writers in this Host, then across Hosts via the
@@ -3134,14 +3230,22 @@ export class AgentManager {
     }
   }
 
+  /** Catalog readiness follows the Runtime the Agent will launch. A custom
+   *  binding is runtime.path; cliPath stays the legacy seam and is not filled
+   *  in from the environment or a provisioned generation. */
+  private catalogSelectedRuntimePath(agent: UserAgent): string | null {
+    return agent.runtime?.kind === 'custom' ? agent.runtime.path : agent.cliPath;
+  }
+
   private async catalogOnlyAgentStatus(agent: UserAgent): Promise<UserAgentStatus> {
+    const selectedPath = this.catalogSelectedRuntimePath(agent);
     const unavailable = (readinessIssue: { code: string; message: string; repairable: boolean }): UserAgentStatus => ({
       ...agent,
       proxyName: agent.pluginId,
       ready: false,
       cli: {
         state: 'missing',
-        path: agent.cliPath,
+        path: selectedPath,
         version: null,
         source: null,
         readinessIssue,
@@ -3178,9 +3282,9 @@ export class AgentManager {
       const cached = this.options.readinessCache?.get(
         launch.pluginId,
         launch.pluginVersion,
-        agent.cliPath,
+        selectedPath,
       );
-      if (this.options.readinessCache?.isInvalidated(launch.pluginId, launch.pluginVersion, agent.cliPath)) {
+      if (this.options.readinessCache?.isInvalidated(launch.pluginId, launch.pluginVersion, selectedPath)) {
         return unavailable({
           code: 'RUNTIME_MUTATED',
           message: 'Runtime content changed after the last trusted probe.',
@@ -3209,7 +3313,7 @@ export class AgentManager {
             : !cached.profile.path || !cached.profile.version
               ? {
                 state: 'missing',
-                path: agent.cliPath,
+                path: selectedPath,
                 version: null,
                 source: null,
                 readinessIssue: {
@@ -3224,7 +3328,7 @@ export class AgentManager {
                 version: cached.profile.version,
                 verifiedVersions: cached.profile.verifiedVersions,
                 contentFingerprint: cached.profile.contentFingerprint,
-                source: agent.cliPath ? 'override' : 'path',
+                source: selectedPath ? 'override' : 'path',
               };
         const ready = cli.state === 'ready'
           && cached.profile !== undefined
@@ -3245,7 +3349,7 @@ export class AgentManager {
           officialInstallUrl: '',
         };
       }
-      const probed = await this.resolveSavedAgentStatus(agent.pluginId, launch, agent.id, agent.cliPath);
+      const probed = await this.resolveSavedAgentStatus(agent.pluginId, launch, agent.id, selectedPath);
       return {
         ...agent,
         proxyName: launch.displayName ?? agent.pluginId,
@@ -3270,7 +3374,7 @@ export class AgentManager {
         }),
         cli: {
           state: 'invalid',
-          path: agent.cliPath,
+          path: selectedPath,
           version: null,
           source: null,
           error: error instanceof Error ? error.message : String(error),

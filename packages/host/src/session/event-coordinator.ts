@@ -44,6 +44,8 @@ import {
 } from './token-usage.js';
 import { kimiContentText } from './input-items.js';
 import { AttentionDispatcher } from './attention.js';
+import { recordLocalUsage, warnUsageFailure } from '../usage/ingestion.js';
+import { usageRecorderFor, usageSourceKey } from '../usage/recorder.js';
 
 export { attentionMessageForEvent } from './attention.js';
 
@@ -810,6 +812,7 @@ export class SessionEventCoordinator {
     // Host turn, so do not use these samples to establish generation binding.
     if (notification.method === 'token_usage.updated' || notification.method === 'usage.updated') {
       const session = this.sessions.get(sessionId);
+      recordLocalUsage(this.db, session, notification, this.turns.get(sessionId)?.id);
       const update = parseTokenUsageUpdate(notification.params?.data, session.executor);
       if (update) this.persistTokenUsage(sessionId, providerTurnId ?? undefined, update);
       return;
@@ -1067,6 +1070,13 @@ export class SessionEventCoordinator {
     }
     const now = new Date().toISOString();
     this.conversationUsageTurns.delete(gianSessionId);
+    if (notification.method === 'session.rotated' && data?.oldNativeSessionId !== newNativeSessionId) {
+      const session = this.sessions.get(gianSessionId);
+      try {
+        usageRecorderFor(this.db).bindSource(usageSourceKey(session.proxy_plugin_id ?? session.executor,
+          session.runtime_profile?.configHome ?? null, newNativeSessionId), true);
+      } catch { warnUsageFailure(this.db); }
+    }
     this.db
       .prepare(
         `UPDATE sessions

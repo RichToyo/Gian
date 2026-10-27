@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Executor } from '@gian/shared';
+import type { Executor, SessionRuntimeProfile } from '@gian/shared';
 import {
   ProtocolV2Host,
   ProtocolV2SessionClient,
@@ -34,6 +34,17 @@ export interface InspectionHostOptions {
   runtimeProfileId?: string | null;
   configHome?: string | null;
   cliFingerprint?: string | null;
+}
+
+/** Compare snapshots from the Agent-status identity namespace, not a freshly
+ * resolved launch profile (managed status uses installation/archive hashes). */
+export function inspectionProfileMatches(options: InspectionHostOptions, profile: SessionRuntimeProfile | null): boolean {
+  const path = profile ? 'path' in profile ? profile.path : profile.cliPath : null;
+  const fingerprint = profile ? 'contentFingerprint' in profile ? profile.contentFingerprint : profile.cliFingerprint : null;
+  return (!options.runtimeProfileId || options.runtimeProfileId === profile?.id)
+    && (options.configHome === undefined || options.configHome === (profile?.configHome ?? null))
+    && (!options.cliPath || options.cliPath === path)
+    && (!options.cliFingerprint || options.cliFingerprint === fingerprint);
 }
 
 function logProxyCloseFailure(error: unknown): void {

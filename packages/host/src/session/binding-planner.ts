@@ -277,7 +277,7 @@ export class SessionBindingPlanner {
     let prepared: PreparedSessionLaunch;
     try {
       prepared = await this.prepareFromLaunch(
-        launch, agentId, selectedPath, profile, undefined, configHome,
+        launch, agentId, selectedPath, profile, undefined, configHome, false, ownerIsCustom === true,
       );
     } catch (error) {
       if (!customRuntime && !active && selectedPath !== null && launch.schemaVersion >= 4
@@ -302,11 +302,30 @@ export class SessionBindingPlanner {
     runtimeProfile?: SessionRuntimeProfile | null;
   }): Promise<PreparedSessionLaunch> {
     const pluginId = parseProxyPluginId(input.agent.pluginId);
-    const launch = await this.options.resolveCurrent(pluginId);
+    const customRuntime = input.agent.runtime?.kind === 'custom';
+    const active = customRuntime ? null : await this.options.resolveActiveGeneration?.(pluginId) ?? null;
+    const launch = active
+      ? await this.options.resolveExact({
+        pluginId,
+        pluginVersion: active.proxy.pluginVersion,
+        expectedManifestSha256: active.proxy.manifestSha256,
+      })
+      : await this.options.resolveCurrent(pluginId);
     if (!launch) {
       throw new SessionBindingError(
         'BINDING_PACKAGE_UNAVAILABLE',
         `No trusted Proxy package is available for ${pluginId}.`,
+      );
+    }
+    if (launch.pluginId !== pluginId || (active && (
+      active.pluginId !== pluginId
+      || launch.pluginVersion !== active.proxy.pluginVersion
+      || launch.manifestSha256 !== active.proxy.manifestSha256
+      || launch.processScope !== active.proxy.processScope
+    ))) {
+      throw new SessionBindingError(
+        'BINDING_GENERATION_MISMATCH',
+        'The active Proxy generation does not match its trusted package.',
       );
     }
     if (launch.schemaVersion !== 4 && !productExecutorForPluginId(pluginId)) {
@@ -315,14 +334,28 @@ export class SessionBindingPlanner {
         'Unknown plugins require a Manifest v4 package.',
       );
     }
-    return this.prepareFromLaunch(
+    const prepared = await this.prepareFromLaunch(
       launch,
       input.agent.id,
-      input.selectedPath,
+      input.agent.runtime?.kind === 'custom' ? input.agent.runtime.path
+        : active ? active.runtime?.entryPath ?? null : input.selectedPath,
       input.runtimeProfile,
       undefined,
       input.agent.home?.path ?? null,
+      false,
+      customRuntime,
     );
+    if (active) {
+      const profile = prepared.sessionBinding.runtimeProfile;
+      if (!profile || !isOpenRuntimeProfile(profile)
+        || profile.runtimeId !== (active.runtime?.runtimeId ?? null)
+        || profile.version !== (active.runtime?.version ?? null)) {
+        await prepared.releaseUnusedLease();
+        throw new SessionBindingError('BINDING_GENERATION_MISMATCH',
+          'Resolved Runtime does not match the active certified generation.');
+      }
+    }
+    return prepared;
   }
 
   /** Retained-package validation for migration diagnostics, not normal resume. */
@@ -350,6 +383,7 @@ export class SessionBindingPlanner {
     const agentId = binding.runtimeProfile?.agentId ?? 'session';
     const storedPath = sessionRuntimeCliPath(binding.runtimeProfile);
     const storedConfigHome = binding.runtimeProfile?.configHome ?? null;
+    const customRuntime = this.options.agentHasCustomRuntime?.(agentId) === true;
     let prepared: PreparedSessionLaunch;
     let runtimePathRediscovered = false;
     try {
@@ -360,10 +394,13 @@ export class SessionBindingPlanner {
         binding.runtimeProfile,
         binding.protocolVersion,
         storedConfigHome,
+        false,
+        customRuntime,
       );
     } catch (error) {
       if (
         storedPath !== null
+        && !customRuntime
         && launch.schemaVersion >= 4
         && launch.runtime.kind === 'external'
         && this.options.runtimeResolver
@@ -438,7 +475,11 @@ export class SessionBindingPlanner {
   }): Promise<PreparedSessionLaunch | null> {
     const launch = await this.options.resolveCurrent(input.pluginId);
     if (!launch) return null;
-    return this.prepareFromLaunch(launch, input.agentId, input.selectedPath, input.runtimeProfile);
+    const customRuntime = this.options.agentHasCustomRuntime?.(input.agentId) === true;
+    return this.prepareFromLaunch(
+      launch, input.agentId, input.selectedPath, input.runtimeProfile,
+      undefined, customRuntime ? input.runtimeProfile?.configHome ?? null : null, false, customRuntime,
+    );
   }
 
   private async prepareFromLaunch(
@@ -449,6 +490,7 @@ export class SessionBindingPlanner {
     exactProtocolVersion?: string,
     configHome: string | null = null,
     allowRuntimeRediscovery = false,
+    customRuntime = false,
   ): Promise<PreparedSessionLaunch> {
     const protocolVersion = exactProtocolVersion ?? pinnedProtocol(launch);
     const pluginId = parseProxyPluginId(launch.pluginId);
@@ -526,9 +568,11 @@ export class SessionBindingPlanner {
           'External Runtime binding requires the stored selected path.',
         );
       }
-      const resolved = await this.options.runtimeResolver.resolve(
-        resolveInput(launch, agentId, selectedPath),
-      );
+      const input = {
+        ...resolveInput(launch, agentId, selectedPath),
+        ...(customRuntime ? { customRuntime: { configHome } } : {}),
+      };
+      const resolved = await this.options.runtimeResolver.resolve(input);
       if (resolved.readinessIssue || !resolved.lease) {
         throw new SessionBindingError(
           resolved.readinessIssue?.code ?? 'BINDING_RUNTIME_UNREADY',
@@ -550,9 +594,7 @@ export class SessionBindingPlanner {
       runtimeProfile = scopeProfileToHome({ ...resolved.profile, agentId }, configHome);
       const expectedProfile = runtimeProfile;
       const reacquire = async (): Promise<RuntimeLease> => {
-        const next = await this.options.runtimeResolver!.resolve(
-          resolveInput(launch, agentId, selectedPath),
-        );
+        const next = await this.options.runtimeResolver!.resolve(input);
         if (next.readinessIssue || !next.lease) {
           throw new SessionBindingError(
             next.readinessIssue?.code ?? 'BINDING_RUNTIME_UNREADY',

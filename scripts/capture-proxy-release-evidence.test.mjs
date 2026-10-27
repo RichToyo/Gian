@@ -13,13 +13,13 @@ test('capture authors English RichToyo release notes without rewriting historica
   assert.match(source.toString(), /assert.equal\(certificate.repository, repository\)/);
   assert.match(proxyReleaseNotes.claude.text, /SDK 1\.32\.0.*bounded HTTP input/);
   assert.match(proxyReleaseNotes.zcode.text, /without altering original upstream source or notices/);
-  assert.match(proxyReleaseNotes.codex.text, /0\.163\.0/);
-  assert.match(proxyReleaseNotes.claude.text, /2\.1\.304/);
+  assert.match(proxyReleaseNotes.codex.text, /0\.164\.0/);
+  assert.match(proxyReleaseNotes.claude.text, /2\.1\.310/);
   assert.match(proxyReleaseNotes.dsh.text, /0\.2\.1-rc\.2/);
-  assert.match(proxyReleaseNotes.kimi.text, /2\.2\.0/);
-  assert.match(proxyReleaseNotes.grok.text, /1\.0\.62/);
+  assert.match(proxyReleaseNotes.kimi.text, /2\.3\.2/);
+  assert.match(proxyReleaseNotes.grok.text, /1\.0\.70/);
   assert.match(proxyReleaseNotes.zcode.text, /0\.17\.0/);
-  assert.match(proxyReleaseNotes.antigravity.text, /1\.4\.1/);
+  assert.match(proxyReleaseNotes.antigravity.text, /1\.4\.3/);
   for (const note of Object.values(proxyReleaseNotes)) {
     assert.equal(typeof note.text, 'string');
     assert.equal(Object.hasOwn(note, 'zh'), false);

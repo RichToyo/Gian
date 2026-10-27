@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { Hono } from 'hono';
 import test from 'node:test';
-import type { AgentProxyDefaults, ProxyCatalog } from '@gian/shared';
+import type { AgentProxyDefaults } from '@gian/shared';
 import {
   AgentManager,
   assertOfficialInstallerIntegrity,
@@ -2049,272 +2049,39 @@ test('Agent install routes expose updater contention as 409', async () => {
   assert.match((await response.json() as { error: string }).error, /already in progress/i);
 });
 
-test('Proxy defaults keep managed approval presets separate from native policy values', async () => {
-  const defaults: AgentProxyDefaults = { model: 'codex-model', thinking: 'high', mode: 'ask' };
+test('Agent defaults persistence never starts Runtime validation or changes unrelated values', async () => {
+  const defaults: AgentProxyDefaults = { model: 'saved-model', thinking: 'saved-effort', mode: 'ask', options: {} };
+  const current = () => ({ id: 'agent-codex', name: 'Codex', pluginId: 'codex', proxy: 'codex', cliPath: null, defaults });
   const writes: Array<Partial<AgentProxyDefaults>> = [];
-  let catalog: ProxyCatalog = {
-    catalogRevision: 'codex-low-level',
-    input: [{ type: 'text' }],
-    configOptions: [
-      {
-        id: 'model',
-        displayName: 'Model',
-        binding: 'turn',
-        role: 'model',
-        control: 'select',
-        required: false,
-        defaultValue: 'codex-model',
-        choices: [{ value: 'codex-model', displayName: 'Codex model' }],
-      },
-      {
-        id: 'effort',
-        displayName: 'Effort',
-        binding: 'turn',
-        role: 'effort',
-        control: 'select',
-        required: false,
-        defaultValue: 'high',
-        choices: [{ value: 'high', displayName: 'High' }],
-      },
-      {
-        id: 'approval_policy',
-        displayName: 'Approval policy',
-        binding: 'turn',
-        role: 'approval_mode',
-        control: 'select',
-        required: false,
-        defaultValue: null,
-        choices: [
-          { value: null, displayName: 'Configured default' },
-          { value: 'on-request', displayName: 'On request' },
-          { value: 'never', displayName: 'Never' },
-        ],
-      },
-    ],
-    slashCommands: [],
-  };
+  let probes = 0;
   const agents = {
-    getAgent: () => ({
-      id: 'agent-codex',
-      name: 'Codex',
-      proxy: 'codex',
-      cliPath: null,
-      defaults: { ...defaults },
-    }),
+    getAgent: current,
+    agentStatusSnapshot: () => ({ ...current(), ready: false, plugin: { defaults } }),
     updateAgent: async (_id: string, patch: { defaults?: Partial<AgentProxyDefaults> }) => {
       writes.push(patch.defaults ?? {});
       Object.assign(defaults, patch.defaults);
-      return {};
+      return current();
     },
-    agentStatus: async () => ({}),
+    agentStatus: async () => { probes += 1; throw new Error('Runtime unavailable'); },
   } as unknown as AgentManager;
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    closeProxy: async () => undefined,
-    capabilities: async () => catalog,
+    closeProxy: async () => { probes += 1; },
+    capabilities: async () => { probes += 1; throw new Error('Provider unavailable'); },
   });
-  const put = (body: Partial<AgentProxyDefaults>) => app.request(
-    '/api/agents/agent-codex',
-    {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ defaults: body }),
-    },
-  );
-
-  const unrelated = await put({ model: 'codex-model' });
-  assert.equal(unrelated.status, 200, 'an existing semantic preset must not block unrelated saves');
-  assert.deepEqual(writes, [{ model: 'codex-model' }]);
-
-  const nativePolicy = await put({ mode: 'on-request' });
-  assert.equal(nativePolicy.status, 400);
-  assert.match(
-    (await nativePolicy.json() as { error: string }).error,
-    /Gian approval preset|product-level approval modes/,
-  );
-  assert.equal(writes.length, 1, 'native policy values must not be stored as managed presets');
-
-  catalog = {
-    ...catalog,
-    catalogRevision: 'codex-semantic-modes',
-    configOptions: catalog.configOptions.map(option => option.role === 'approval_mode'
-      ? {
-          ...option,
-          id: 'approval_mode',
-          defaultValue: 'ask',
-          choices: [
-            { value: 'ask', displayName: 'Ask for approval' },
-            { value: 'auto', displayName: 'Approve for me' },
-            { value: 'full-access', displayName: 'Full access' },
-            { value: 'custom', displayName: 'config.toml' },
-          ],
-        }
-      : option),
-  };
-  const semanticPreset = await put({ mode: 'full-access' });
-  assert.equal(semanticPreset.status, 200);
-  assert.deepEqual(writes.at(-1), { mode: 'full-access' });
-});
-
-test('native DSH defaults accept the Proxy-owned mode vocabulary', async () => {
-  const defaults: AgentProxyDefaults = { model: '', thinking: '', mode: '' };
-  const writes: Array<Partial<AgentProxyDefaults>> = [];
-  const agents = {
-    getAgent: () => ({
-      id: 'agent-dsh',
-      name: 'DeepSeek Harness',
-      pluginId: 'dsh',
-      cliPath: null,
-      defaults: { ...defaults },
-    }),
-    updateAgent: async (_id: string, patch: { defaults?: Partial<AgentProxyDefaults> }) => {
-      writes.push(patch.defaults ?? {});
-      Object.assign(defaults, patch.defaults);
-      return {};
-    },
-    agentStatus: async () => ({}),
-  } as unknown as AgentManager;
-  const app = new Hono();
-  registerAgentRoutes(app, {
-    agents,
-    closeProxy: async () => undefined,
-    capabilities: async () => ({
-      catalogRevision: 'dsh-native',
-      input: [{ type: 'text' }],
-      configOptions: [{
-        id: 'approval_policy',
-        displayName: 'Approval policy',
-        binding: 'turn',
-        role: 'approval_mode',
-        control: 'select',
-        required: false,
-        defaultValue: 'ask',
-        choices: [
-          { value: 'ask', displayName: 'Ask' },
-          { value: 'never', displayName: 'Never' },
-        ],
-      }],
-      slashCommands: [],
-    }),
-  });
-
-  const response = await app.request('/api/agents/agent-dsh', {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ defaults: { mode: 'never' } }),
-  });
-  assert.equal(response.status, 200);
-  assert.deepEqual(writes, [{ mode: 'never' }]);
-});
-
-test('Proxy defaults validate effort against the catalog resolved for the selected model', async () => {
-  const defaults: AgentProxyDefaults = { model: 'default', thinking: 'medium', mode: 'ask' };
-  const writes: Array<Partial<AgentProxyDefaults>> = [];
-  const baseCatalog: ProxyCatalog = {
-    catalogRevision: 'claude-models',
-    input: [{ type: 'text' }],
-    configOptions: [
-      {
-        id: 'model',
-        displayName: 'Model',
-        binding: 'turn',
-        role: 'model',
-        control: 'select',
-        required: false,
-        defaultValue: 'default',
-        choices: [
-          { value: 'default', displayName: 'Default' },
-          { value: 'opus', displayName: 'Opus' },
-        ],
-      },
-      {
-        id: 'effort',
-        displayName: 'Effort',
-        binding: 'turn',
-        role: 'effort',
-        control: 'select',
-        required: false,
-        defaultValue: 'medium',
-        choices: [
-          { value: 'low', displayName: 'Low' },
-          { value: 'medium', displayName: 'Medium' },
-          { value: 'high', displayName: 'High' },
-        ],
-      },
-      {
-        id: 'approval_mode',
-        displayName: 'Approval mode',
-        binding: 'turn',
-        role: 'approval_mode',
-        control: 'select',
-        required: false,
-        defaultValue: 'ask',
-        choices: [
-          { value: 'ask', displayName: 'Ask' },
-          { value: 'auto', displayName: 'Auto' },
-        ],
-      },
-    ],
-    slashCommands: [],
-  };
-  const resolveCalls: unknown[] = [];
-  const agents = {
-    getAgent: () => ({
-      id: 'agent-claude',
-      name: 'Claude Code',
-      pluginId: 'claude',
-      cliPath: null,
-      defaults: { ...defaults },
-    }),
-    updateAgent: async (_id: string, patch: { defaults?: Partial<AgentProxyDefaults> }) => {
-      writes.push(patch.defaults ?? {});
-      Object.assign(defaults, patch.defaults);
-      return {};
-    },
-    agentStatus: async () => ({}),
-  } as unknown as AgentManager;
-  const app = new Hono();
-  registerAgentRoutes(app, {
-    agents,
-    closeProxy: async () => undefined,
-    capabilities: async () => baseCatalog,
-    resolveDefaultsCatalog: async (id, catalog, config) => {
-      resolveCalls.push({ id, revision: catalog.catalogRevision, config });
-      return {
-        ...catalog,
-        configOptions: catalog.configOptions.map(option => option.role === 'effort'
-          ? {
-              ...option,
-              defaultValue: 'high',
-              choices: [
-                { value: 'low', displayName: 'Low' },
-                { value: 'high', displayName: 'High' },
-                { value: 'max', displayName: 'Max' },
-              ],
-            }
-          : option),
-      };
-    },
-  });
-
-  const response = await app.request('/api/agents/agent-claude', {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ defaults: { model: 'opus', thinking: 'max' } }),
-  });
-  assert.equal(response.status, 200);
-  assert.deepEqual(resolveCalls, [{
-    id: 'claude',
-    revision: 'claude-models',
-    // The resolve request carries the full effective defaults (triplet +
-    // options), not just the model, so dependent lists stay consistent.
-    config: {
-      sessionConfig: {},
-      turnConfig: { model: 'opus', effort: 'max', approval_mode: 'ask' },
-    },
-  }]);
-  assert.deepEqual(writes, [{ model: 'opus', thinking: 'max' }]);
+  for (const mode of ['on-request', 'full-access', 'future-native-mode']) {
+    const response = await app.request('/api/agents/agent-codex', {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ defaults: { mode } }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(defaults.mode, mode);
+    assert.equal(defaults.model, 'saved-model');
+    assert.equal(defaults.thinking, 'saved-effort');
+  }
+  assert.equal(writes.length, 3);
+  assert.equal(probes, 0);
 });
 
 test('Agent install routes drain CLI use before mutation without self-locking Proxy updates', async () => {

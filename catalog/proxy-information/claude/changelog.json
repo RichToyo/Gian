@@ -1,8 +1,134 @@
 {
   "schemaVersion": 1,
   "pluginId": "claude",
-  "currentVersion": "0.3.11",
+  "currentVersion": "0.3.14",
   "entries": [
+    {
+      "version": "0.3.14",
+      "firstPublishedAt": "2026-10-25T04:45:01Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichToyo/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.14",
+          "publishedAt": "2026-10-25T04:45:01Z",
+          "releaseUrl": "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.14",
+          "manifestUrl": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.14/gian-proxy-claude-0.3.14-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "1e6f0e9be420622cfa50dbbe4270eebf0d6dc43ff25a8b9f966aa41e2df73500",
+          "archive": {
+            "url": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.14/gian-proxy-claude-0.3.14-darwin-arm64.tar.gz",
+            "sha256": "b6312797db51280a5b7d6e1e071870fca7ddaa1a279e62489acbaf527a3c0bd0",
+            "size": 626193
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.310"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Update the managed Claude Code Runtime to official 2.1.310 (GitHub latest v2.1.310 and npm latest; the vendor /stable pointer still reads 2.1.308, recorded as a lagging rolling pointer, not prerelease evidence). Match the official manifest SHA-256 and size and verify the nine selected startup flags. Retain MCP SDK 1.32.0 and bounded HTTP input. The 2.1.310 changelog review found no documented headless spawn/wire compatibility changes. Exact artifacts pass hosted qualification; authenticated Provider turns and App/Desktop acceptance are not claimed.",
+          "evidence": [
+            "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.14",
+            "https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.14/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.13",
+      "firstPublishedAt": "2026-10-23T19:02:22Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichToyo/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.13",
+          "publishedAt": "2026-10-23T19:02:22Z",
+          "releaseUrl": "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.13",
+          "manifestUrl": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.13/gian-proxy-claude-0.3.13-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "34040019edac12c957f4fae71dac1f86adac08f260c47c7e889adfa521e52441",
+          "archive": {
+            "url": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.13/gian-proxy-claude-0.3.13-darwin-arm64.tar.gz",
+            "sha256": "4a80be0fe89cb60900e7ff5654dc94d25b8e0290432e8c0a7fe5001b7150dd21",
+            "size": 588216
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.309"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Update the managed Claude Code Runtime to official 2.1.309 (GitHub latest v2.1.309 and npm latest; the vendor /stable pointer still reads 2.1.308 and is recorded as lagging, not as proof of prerelease). Match the official manifest SHA-256 and size and verify the nine selected startup flags. Retain MCP SDK 1.32.0 and bounded HTTP input. The 2.1.309 changelog review found no documented headless spawn/wire compatibility changes. Exact artifacts pass hosted qualification; authenticated Provider turns and App/Desktop acceptance are not claimed.",
+          "evidence": [
+            "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.13",
+            "https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.13/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.12",
+      "firstPublishedAt": "2026-10-23T11:48:05Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichToyo/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.12",
+          "publishedAt": "2026-10-23T11:48:05Z",
+          "releaseUrl": "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.12",
+          "manifestUrl": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.12/gian-proxy-claude-0.3.12-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "22323ea4a3eacda651926a4400e881d92f190378625d297f3ff4c6b8ee574423",
+          "archive": {
+            "url": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.12/gian-proxy-claude-0.3.12-darwin-arm64.tar.gz",
+            "sha256": "729834086bdaa49a8533c90c055b055dfc7f52b0a95f5f92643be8e2a550f11c",
+            "size": 588219
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.308"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Update the managed Claude Code Runtime to official 2.1.308, promoted to both latest and stable channels. Match the official manifest SHA-256 and size and verify the selected startup flags. Review the intervening headless, MCP, permission, model and lifecycle changelog changes. Retain MCP SDK 1.32.0 and bounded HTTP input. Exact artifacts pass hosted qualification; authenticated Provider turns and App/Desktop acceptance are not claimed.",
+          "evidence": [
+            "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.12",
+            "https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.12/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.11",
       "firstPublishedAt": "2026-10-21T12:23:15Z",

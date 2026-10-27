@@ -1,10 +1,16 @@
 {
   "schema": 1,
-  "status": "pending-publication",
   "name": "@gian/remote-protocol",
   "repository": "RichToyo/Gian",
   "version": "1.4.0",
   "tag": "remote-protocol-v1.4.0",
   "filename": "gian-remote-protocol-1.4.0.tgz",
-  "note": "Publish and verify the new protocol archive, then import its exact release receipt before exporting Remote. Do not reuse or relabel the published 1.3.0 archive."
+  "url": "https://github.com/RichToyo/Gian/releases/download/remote-protocol-v1.4.0/gian-remote-protocol-1.4.0.tgz",
+  "sourceCommit": "95e8c9f77a5214a115f3bd0e485947f86f241d0f",
+  "size": 95161,
+  "sha256": "356eae9d410586146b5858557b4482131ee0dfdb7d4c2a7db3e458220a8a376f",
+  "integrity": "sha512-vv48nBemhsp7yUBOAZrYeHCJ4HNn4GnROPK2suYb8Jq/PcMqwQ4AR1YBgZZe7BTifR6txroG92u7Y+1bC8c+ZQ==",
+  "dependencies": {
+    "zod": "4.4.3"
+  }
 }

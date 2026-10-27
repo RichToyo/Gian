@@ -9,6 +9,7 @@ import {
 } from '@gian/shared';
 import { WsBroadcaster } from './ws-broadcast.js';
 import { ProxyManager } from '../proxy/manager.js';
+import { prepareInspectionLaunch } from '../proxy/inspection-launch.js';
 import type { LegacyLaunchResolution } from '../proxy/legacy-launch.js';
 import { CustomizationInventoryService } from '../proxy/customization-inventory.js';
 import { SessionManager } from '../session/manager.js';
@@ -88,6 +89,8 @@ import { SessionInboxAdapter } from '../inbox/session-adapter.js';
 import { registerInboxRoutes } from './routes/inbox.js';
 import { createSearchModule, type SearchModule } from '../search/index.js';
 import type { BrowserToolClient } from '../tool/browser-broker.js';
+import { registerMenubarRoutes } from './routes/menubar.js';
+import { createOfficialQuotaService } from '../agents/official-quota-reader.js';
 
 export interface AppContext {
   db: Db;
@@ -128,6 +131,7 @@ export interface AppHandle {
   app: Hono;
   injectWebSocket: ReturnType<typeof createNodeWebSocket>['injectWebSocket'];
   shutdown: () => Promise<void>;
+  startQuotaRefresh: () => void;
   toolService: GianToolService;
   toolCredentials: GianToolCredentialManager;
   remote: RemoteRuntime;
@@ -167,27 +171,12 @@ export function createApp(ctx: AppContext): AppHandle {
     ...(ctx.resolveLegacyLaunch ? { resolveLegacyLaunch: ctx.resolveLegacyLaunch } : {}),
     ...(ctx.agentManager && sessionBindingPlanner
       ? {
-          resolveInspectionLaunch: async (
+          resolveInspectionLaunch: (
             pluginId: string,
             options: import('../proxy/manager.js').InspectionHostOptions,
-          ) => {
-            if (!options.agentId) throw new Error('Inspection requires a saved Agent.');
-            const agent = ctx.agentManager!.getAgent(options.agentId);
-            if (agent.pluginId !== pluginId) {
-              throw new Error('Inspection Agent does not match the requested pluginId.');
-            }
-            const status = await ctx.agentManager!.agentStatus(agent.id, false);
-            const prepared = await sessionBindingPlanner.prepareCurrent({
-              agent,
-              selectedPath: status.runtimeProfile?.path ?? status.cli.path ?? agent.cliPath,
-              runtimeProfile: status.runtimeProfile,
-            });
-            return {
-              binding: prepared.launchBinding,
-              acquireLease: prepared.acquireLease,
-              releaseUnusedLease: prepared.releaseUnusedLease,
-            };
-          },
+          ) => prepareInspectionLaunch(pluginId, options, {
+            agents: ctx.agentManager!, planner: sessionBindingPlanner,
+          }),
         }
       : {}),
   });
@@ -472,20 +461,19 @@ export function createApp(ctx: AppContext): AppHandle {
   // Pre-warm proxy capabilities so model controls are ready before the first
   // session opens. Async, non-blocking; failures are tolerated.
   //
-  // Only saved Agents' (kind, path) pairs warm: the catalog itself never
-  // spawns at boot, and an Agent whose CLI/Proxy is not ready is skipped.
+  // Only saved Agents warm through exact Agent inspection, including their
+  // Custom ownership and HOME. A path-only legacy probe cannot prove either.
+  // The integration catalog itself never spawns at boot; unready Agents skip.
   // `GIAN_SKIP_PROXY_WARMUP=1` lets tests `createApp` an in-memory Hono
   // harness without spawning a real cc-proxy / codex-proxy child.
   if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1' && ctx.agentManager) {
     const agentManager = ctx.agentManager;
-    const warm = (agentId: string, proxy: 'claude' | 'codex', configHome: string | null) => {
-      const cliPath = agentManager.agentRuntimePath(agentId).cliPath;
-      const run = () => sessions.warmCapabilities(proxy, cliPath, configHome).catch(err => {
-        console.warn(`[proxy] warmCapabilities(${proxy}) failed:`, err instanceof Error ? err.message : err);
-      });
-      return agentManager.agentStatus(agentId).then(status => (
-        status.ready ? run() : undefined
-      ));
+    const warm = async (agentId: string, proxy: 'claude' | 'codex') => {
+      try {
+        if ((await agentManager.agentStatus(agentId)).ready) await sessions.agentCapabilities(proxy, agentId);
+      } catch (err) {
+        console.warn(`[proxy] agentCapabilities(${proxy}) warmup failed:`, err instanceof Error ? err.message : err);
+      }
     };
     void Promise.all(
       agentManager.listAgents()
@@ -493,7 +481,6 @@ export function createApp(ctx: AppContext): AppHandle {
         .map(agent => warm(
           agent.id,
           agent.proxy as 'claude' | 'codex',
-          agent.home?.path ?? null,
         )),
     );
   }
@@ -588,6 +575,12 @@ export function createApp(ctx: AppContext): AppHandle {
   registerSessionRoutes(app, ctx.db, sessions);
   registerScheduleRoutes(app, { service: scheduleService, ledger: scheduleLedger });
   registerInboxRoutes(app, inbox);
+  const officialQuota = createOfficialQuotaService({ manager: proxy, agents: ctx.agentManager ?? null,
+    catalog: async () => (await ctx.catalogService?.listLocal())?.items ?? [],
+  });
+  registerMenubarRoutes(app, { db: ctx.db, sessions, approvals, quota: officialQuota,
+    ...(ctx.agentManager ? { agentExists: (id: string) => ctx.agentManager!.listAgents().some(agent => agent.id === id) } : {}),
+  });
   registerNativeSessionRoutes(app, {
     db: ctx.db,
     sessions,
@@ -635,22 +628,6 @@ export function createApp(ctx: AppContext): AppHandle {
       capabilities: async (executor, agentId) => agentId
         ? (await sessions.agentCapabilities(executor, agentId)).catalog
         : sessions.warmCapabilities(executor),
-      resolveDefaultsCatalog: async (executor, catalog, config, agentId) => {
-        if (agentId) {
-          const scoped = await sessions.agentCapabilities(executor, agentId);
-          if (scoped.capabilities['catalog.resolve'] === undefined) return scoped.catalog;
-          return sessions.resolveAgentCatalog(executor, agentId, {
-            catalogRevision: scoped.catalog.catalogRevision, ...config,
-          });
-        }
-        if (sessions.getProtocolCapabilities(executor)?.['catalog.resolve'] === undefined) {
-          return catalog;
-        }
-        return sessions.resolveCatalog(executor, {
-          catalogRevision: catalog.catalogRevision,
-          ...config,
-        });
-      },
     });
     registerCustomizationRoutes(
       app,
@@ -709,7 +686,9 @@ export function createApp(ctx: AppContext): AppHandle {
     scheduleOrchestrator,
     inbox,
     search,
+    startQuotaRefresh: () => officialQuota.start(),
     shutdown: async () => {
+      await officialQuota.stop();
       await ctx.catalogService?.closeInboxObservation();
       await search.dispose();
       sessions.setSessionInbox(null);

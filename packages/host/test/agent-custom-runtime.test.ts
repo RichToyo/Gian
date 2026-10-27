@@ -3,11 +3,18 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { parseProxyPluginId, type ManagedRuntimeGeneration, type SessionProxyBinding } from '@gian/shared';
+import { parseProxyPluginId, sessionRuntimeCliPath, type ManagedRuntimeGeneration, type SessionProxyBinding } from '@gian/shared';
 
 import { AgentCreateError, AgentManager } from '../src/agents/manager.js';
 import type { RuntimeResolver } from '../src/runtime/resolver.js';
+import { RuntimeReadinessCache } from '../src/runtime/readiness-cache.js';
 import { SessionBindingPlanner } from '../src/session/binding-planner.js';
+import { prepareInspectionLaunch } from '../src/proxy/inspection-launch.js';
+import { SessionManager } from '../src/session/manager.js';
+import { openDatabase } from '../src/storage/db.js';
+import { loadConfig } from '../src/storage/config.js';
+import { MemoryRemoteIdentity } from '../src/remote/identity.js';
+import { createApp } from '../src/web/app.js';
 import { fakeOfficialProxy, testResolver } from './runtime-test-harness.js';
 
 async function executable(path: string, version: string): Promise<void> {
@@ -19,7 +26,11 @@ async function executable(path: string, version: string): Promise<void> {
 /** Managed-mode AgentManager whose trusted claude launch is the probing fake
  *  Proxy from the runtime test harness, so a custom Runtime path is really
  *  probed (`path --version`) through the RuntimeResolver. */
-async function customHarness(t: test.TestContext, runtimeKind: 'external' | 'none' = 'external') {
+async function customHarness(
+  t: test.TestContext,
+  runtimeKind: 'external' | 'none' = 'external',
+  verifiedVersions = ['2.1.159'],
+) {
   const root = await mkdtemp(join(tmpdir(), 'gian-custom-runtime-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const proxyEntry = await fakeOfficialProxy(root, 'claude', 'Claude Code', '0.2.4');
@@ -38,7 +49,7 @@ async function customHarness(t: test.TestContext, runtimeKind: 'external' | 'non
             kind: 'external' as const,
             id: 'claude',
             displayName: 'Claude Code',
-            verifiedVersions: ['2.1.159'],
+            verifiedVersions,
           }
           : { kind: 'none' as const },
       }
@@ -57,6 +68,242 @@ async function customHarness(t: test.TestContext, runtimeKind: 'external' | 'non
   const manager = await AgentManager.create(options as never);
   return { root, manager, options };
 }
+
+test('custom version policy agrees across Agent creation, status, catalog inspection, launch and resume', async t => {
+  for (const [version, verification] of [
+    ['2.1.285', 'unverified'], ['2.1.310', 'verified'], ['2.1.311', 'unverified'],
+  ] as const) {
+    await t.test(version, async t => {
+      const { root, manager, options } = await customHarness(t, 'external', ['2.1.310']);
+      const path = join(root, 'bin', 'custom-runtime');
+      await executable(path, `claude ${version}`);
+      const agent = await manager.createAgent({
+        name: 'Custom', pluginId: 'claude', runtime: { kind: 'custom', path }, home: { kind: 'managed' },
+      });
+      const status = await manager.agentStatus(agent.id, true);
+      assert.equal(status.ready, true);
+      assert.equal(status.runtimeProfile?.verification, verification);
+      assert.deepEqual(status.runtimeProfile?.verifiedVersions, ['2.1.310']);
+      assert.equal(status.runtimeProfile?.configHome, agent.home?.path);
+      assert.equal(manager.agentStatusSnapshot(agent.id).runtimeProfile?.verification, verification);
+      const reloaded = await AgentManager.create(options as never);
+      assert.equal((await reloaded.agentStatus(agent.id)).runtimeProfile?.verification, verification);
+
+      const launch = { ...(await options.pluginStore.currentLaunch('claude'))!, source: 'github-release' as const };
+      const planner = new SessionBindingPlanner({
+        resolveCurrent: async () => launch,
+        resolveExact: async () => launch,
+        resolveActiveGeneration: async () => { throw new Error('Custom must not adopt a managed generation'); },
+        agentHasCustomRuntime: id => manager.getAgent(id).runtime?.kind === 'custom',
+        runtimeResolver: options.runtimeResolver,
+      });
+      const inspection = await prepareInspectionLaunch('claude', {
+        agentId: agent.id, cliPath: path, configHome: agent.home?.path,
+        runtimeProfileId: status.runtimeProfile?.id,
+      }, { agents: manager, planner });
+      await inspection.releaseUnusedLease();
+      const prepared = await planner.prepareCurrent({ agent, selectedPath: '/not/the/selected/runtime' });
+      assert.equal(prepared.sessionBinding.runtimeProfile?.verification, verification);
+      assert.equal(sessionRuntimeCliPath(prepared.sessionBinding.runtimeProfile), path);
+      await prepared.releaseUnusedLease();
+      const resumed = await planner.prepareResume(prepared.sessionBinding);
+      assert.equal(resumed.sessionBinding.runtimeProfile?.verification, verification);
+      assert.equal(resumed.sessionBinding.runtimeProfile?.configHome, agent.home?.path);
+      await resumed.releaseUnusedLease();
+      const retained = await planner.prepareExact(prepared.sessionBinding);
+      assert.equal(retained.sessionBinding.runtimeProfile?.verification, verification);
+      await retained.releaseUnusedLease();
+      const captured = await planner.captureLegacyAttach({
+        pluginId: 'claude', agentId: agent.id, selectedPath: path,
+        runtimeProfile: prepared.sessionBinding.runtimeProfile,
+      });
+      assert.equal(captured?.sessionBinding.runtimeProfile?.verification, verification);
+      assert.equal(captured?.sessionBinding.runtimeProfile?.configHome, agent.home?.path);
+      await captured?.releaseUnusedLease();
+
+      // An override path, with no explicit Custom owner, keeps managed policy.
+      const managed = new SessionBindingPlanner({
+        resolveCurrent: async () => launch, resolveExact: async () => launch,
+        agentHasCustomRuntime: () => false, runtimeResolver: options.runtimeResolver,
+      });
+      if (verification === 'unverified' && version === '2.1.285') {
+        await assert.rejects(managed.prepareCurrent({ agent: { ...agent, runtime: null }, selectedPath: path }),
+          (error: unknown) => error instanceof Error && 'code' in error && error.code === 'BINDING_RUNTIME_INCOMPATIBLE');
+        await assert.rejects(managed.prepareResume(prepared.sessionBinding),
+          (error: unknown) => error instanceof Error && 'code' in error && error.code === 'BINDING_RUNTIME_INCOMPATIBLE');
+      }
+      await rm(path);
+      await assert.rejects(planner.prepareResume(prepared.sessionBinding));
+      assert.equal((await manager.agentStatus(agent.id, true)).ready, false);
+    });
+  }
+});
+
+test('custom Agent creation rejects invalid versions, failed probes and non-executable files', async t => {
+  for (const failure of ['invalid-version', 'probe-exit', 'not-executable'] as const) {
+    await t.test(failure, async t => {
+      const { root, manager } = await customHarness(t);
+      const path = join(root, 'bin', 'runtime');
+      await executable(path, failure === 'invalid-version' ? 'not-a-version' : 'claude 2.1.159');
+      if (failure === 'probe-exit') await writeFile(path, '#!/bin/sh\nexit 1\n');
+      if (failure === 'not-executable') await chmod(path, 0o644);
+      await assert.rejects(manager.createAgent({ name: failure, pluginId: 'claude', runtime: { kind: 'custom', path } }),
+        (error: unknown) => error instanceof AgentCreateError);
+      assert.equal(manager.listAgents().length, 0);
+    });
+  }
+});
+
+test('a resolver installed after Manager creation does not require an injected readiness cache', async t => {
+  const { root, options } = await customHarness(t, 'external', ['2.1.310']);
+  const manager = await AgentManager.create({ ...options, runtimeResolver: undefined } as never);
+  manager.setRuntimeResolver(options.runtimeResolver);
+  const path = join(root, 'bin', 'runtime');
+  await executable(path, 'claude 2.1.285');
+  const agent = await manager.createAgent({ name: 'Late resolver', pluginId: 'claude', runtime: { kind: 'custom', path } });
+  for (const refresh of [false, true]) {
+    const status = await manager.agentStatus(agent.id, refresh);
+    assert.equal(status.ready, true);
+    assert.equal(status.runtimeProfile?.verification, 'unverified');
+    assert.equal(status.cli.readinessIssue, undefined);
+  }
+});
+
+test('source-first custom status uses its own older Runtime and source Proxy', async t => {
+  const { root, options } = await customHarness(t);
+  const path = join(root, 'bin', 'source-custom');
+  await executable(path, 'claude 2.1.100');
+  const proxyEntry = (await options.pluginStore.currentLaunch('claude'))!.entryPath;
+  const manager = await AgentManager.create({
+    ...options, managedProxies: false, developmentProxyEntries: { claude: proxyEntry },
+  } as never);
+  const agent = await manager.createAgent({ name: 'Source Custom', pluginId: 'claude', runtime: { kind: 'custom', path } });
+  const status = await manager.agentStatus(agent.id, true);
+  assert.equal(status.ready, true);
+  assert.equal(status.plugin.source, 'development');
+  assert.equal(status.runtimeProfile?.path, path);
+  assert.equal(status.runtimeProfile?.verification, 'unverified');
+  assert.equal(manager.agentRuntimePath(agent.id).cliPath, path);
+});
+
+test('boot warmup inspects the saved Custom Agent rather than launching a path-only legacy probe', async t => {
+  const { root, manager, options } = await customHarness(t, 'external', ['2.1.310']);
+  const path = join(root, 'bin', 'runtime');
+  await executable(path, 'claude 2.1.285');
+  const agent = await manager.createAgent({ name: 'Boot Custom', pluginId: 'claude', runtime: { kind: 'custom', path } });
+  const inspected: string[] = [];
+  let legacyCalls = 0;
+  let finish!: () => void;
+  const warmed = new Promise<void>(resolve => { finish = resolve; });
+  const catalog = { catalogRevision: 'fixture', input: [{ type: 'text' as const }], configOptions: [], slashCommands: [] };
+  t.mock.method(SessionManager.prototype, 'agentCapabilities', async (pluginId: string, agentId: string) => {
+    assert.equal(pluginId, 'claude');
+    inspected.push(agentId);
+    finish();
+    return { catalog, capabilities: {} };
+  });
+  t.mock.method(SessionManager.prototype, 'warmCapabilities', async () => {
+    legacyCalls += 1;
+    finish();
+    return catalog;
+  });
+  const previous = process.env.GIAN_SKIP_PROXY_WARMUP;
+  delete process.env.GIAN_SKIP_PROXY_WARMUP;
+  const db = openDatabase(options.dataDir);
+  const app = createApp({
+    db, config: loadConfig(db), dataDir: options.dataDir, agentManager: manager,
+    runtimeResolver: options.runtimeResolver, remoteIdentity: new MemoryRemoteIdentity(),
+    resolveLegacyLaunch: async () => { throw new Error('Custom boot must not request a legacy launch'); },
+  });
+  try {
+    await warmed;
+    assert.deepEqual(inspected, [agent.id]);
+    assert.equal(legacyCalls, 0);
+  } finally {
+    await app.shutdown();
+    db.close();
+    if (previous === undefined) delete process.env.GIAN_SKIP_PROXY_WARMUP;
+    else process.env.GIAN_SKIP_PROXY_WARMUP = previous;
+  }
+});
+
+test('custom readiness and explicit incompatibility stay blocking in status, creation, inspection and resume', async t => {
+  const { root, manager, options } = await customHarness(t, 'external', ['2.1.310']);
+  const path = join(root, 'bin', 'runtime');
+  await executable(path, 'claude 2.1.285');
+  const agent = await manager.createAgent({ name: 'Custom', pluginId: 'claude', runtime: { kind: 'custom', path } });
+  const launch = { ...(await options.pluginStore.currentLaunch('claude'))!, source: 'github-release' as const };
+  const planner = new SessionBindingPlanner({
+    resolveCurrent: async () => launch, resolveExact: async () => launch,
+    agentHasCustomRuntime: () => true, runtimeResolver: options.runtimeResolver,
+  });
+  const prepared = await planner.prepareCurrent({ agent, selectedPath: path });
+  await prepared.releaseUnusedLease();
+  const resolve = options.runtimeResolver.resolve.bind(options.runtimeResolver);
+  options.runtimeResolver.resolve = async input => {
+    const resolved = await resolve(input);
+    await resolved.lease?.release();
+    return { ...resolved, lease: null, readinessIssue: {
+      code: 'fixture_not_ready', message: 'Custom runtime needs setup.', repairable: false,
+    } };
+  };
+  const reloaded = await AgentManager.create(options as never);
+  const status = await reloaded.agentStatus(agent.id, true);
+  assert.equal(status.ready, false);
+  assert.equal(status.runtimeProfile?.verification, 'unverified');
+  assert.equal(status.cli.readinessIssue?.code, 'fixture_not_ready');
+  await assert.rejects(reloaded.createAgent({ name: 'Blocked', pluginId: 'claude', runtime: { kind: 'custom', path } }));
+  await assert.rejects(prepareInspectionLaunch('claude', { agentId: agent.id }, { agents: reloaded, planner }),
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'fixture_not_ready');
+  await assert.rejects(planner.prepareResume(prepared.sessionBinding),
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'fixture_not_ready');
+  options.runtimeResolver.resolve = async input => {
+    const resolved = await resolve(input);
+    return { ...resolved, profile: { ...resolved.profile, verification: 'incompatible' as const } };
+  };
+  const incompatible = await AgentManager.create(options as never);
+  const blocked = await incompatible.agentStatus(agent.id, true);
+  assert.equal(blocked.ready, false);
+  assert.equal(blocked.cli.readinessIssue?.code, 'RUNTIME_INCOMPATIBLE');
+  await assert.rejects(incompatible.createAgent({ name: 'Incompatible', pluginId: 'claude', runtime: { kind: 'custom', path } }));
+  await assert.rejects(prepareInspectionLaunch('claude', { agentId: agent.id }, { agents: incompatible, planner }),
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'BINDING_RUNTIME_INCOMPATIBLE');
+  await assert.rejects(planner.prepareResume(prepared.sessionBinding),
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'BINDING_RUNTIME_INCOMPATIBLE');
+});
+
+test('custom readiness and retained status never cross managed policy, HOME or invalidation', async t => {
+  const { root, options } = await customHarness(t, 'external', ['2.1.310']);
+  const path = join(root, 'bin', 'runtime');
+  await executable(path, 'claude 2.1.285');
+  const readinessCache = new RuntimeReadinessCache();
+  const manager = await AgentManager.create({ ...options, readinessCache } as never);
+  const agent = await manager.createAgent({ name: 'Custom', pluginId: 'claude', runtime: { kind: 'custom', path } });
+  const homeA = agent.home!.path;
+  const snapshot = readinessCache.get('claude', '0.2.4', path, { configHome: homeA })!;
+  assert.equal(snapshot.profile?.verification, 'unverified');
+  assert.equal(readinessCache.get('claude', '0.2.4', path), null);
+  assert.equal(readinessCache.get('claude', '0.2.4'), null, 'Custom must not become managed Catalog readiness');
+  const homeB = join(root, 'other-home');
+  await mkdir(homeB);
+  await manager.agentStatus(agent.id);
+  await manager.updateAgent(agent.id, { home: { kind: 'custom', path: homeB } });
+  assert.equal(manager.agentStatusSnapshot(agent.id).ready, false);
+  assert.equal(readinessCache.get('claude', '0.2.4', path, { configHome: homeB }), null);
+  const afterHomeChange = await manager.agentStatus(agent.id, true);
+  assert.equal(afterHomeChange.ready, true);
+  assert.equal(afterHomeChange.runtimeProfile?.configHome, homeB);
+  assert.notEqual(afterHomeChange.runtimeProfile?.id, snapshot.profile?.id);
+  readinessCache.invalidate('claude', '0.2.4', path);
+  const invalidated = await manager.agentStatus(agent.id, true);
+  assert.equal(invalidated.ready, false);
+  assert.equal(invalidated.runtimeProfile, null, 'Retained path-only profiles must not resurrect invalidated readiness');
+  assert.equal(invalidated.cli.readinessIssue?.code, 'RUNTIME_MUTATED');
+  await executable(path, 'claude 2.1.310');
+  const fresh = await AgentManager.create(options as never);
+  const refreshed = await fresh.agentStatus(agent.id, true);
+  assert.equal(refreshed.runtimeProfile?.verification, 'verified');
+});
 
 test('create persists a custom Runtime binding, probes the path, and prefers it over the managed generation', async t => {
   const { root, manager, options } = await customHarness(t);
@@ -339,4 +586,62 @@ test('resume of a custom-Runtime Session re-probes the stored path and never ado
     (error: unknown) => error instanceof Error && 'code' in error
       && error.code === 'RUNTIME_PATH_MISSING',
   );
+});
+
+test('unmanaged catalog status stays ready from the custom Runtime probe and fail-closes invalidation', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-custom-catalog-status-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxyEntry = await fakeOfficialProxy(root, 'claude', 'Claude Code', '0.2.4');
+  const runtimePath = join(root, 'bin', 'claude-company');
+  await executable(runtimePath, 'claude 2.1.159');
+  const readinessCache = new RuntimeReadinessCache();
+  const resolver = testResolver(root);
+  let probes = 0;
+  const resolve = resolver.resolve.bind(resolver);
+  resolver.resolve = async (input) => {
+    probes += 1;
+    return resolve(input);
+  };
+  const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.6.5',
+    managedProxies: false,
+    developmentProxyEntries: { claude: proxyEntry },
+    runtimeResolver: resolver,
+    readinessCache,
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  const agent = await manager.createAgent({
+    name: 'Catalog Custom',
+    pluginId: 'claude',
+    home: { kind: 'managed' },
+    runtime: { kind: 'custom', path: runtimePath },
+  });
+  assert.equal(agent.cliPath, null);
+  assert.deepEqual(agent.runtime, { kind: 'custom', path: runtimePath });
+  const probed = probes;
+  assert.ok(probed >= 1);
+
+  const status = await manager.agentStatus(agent.id);
+  assert.equal(probes, probed);
+  assert.equal(status.ready, true);
+  assert.equal(status.cli.path, runtimePath);
+  assert.equal(status.cli.source, 'override');
+  assert.equal(status.runtimeProfile?.path, runtimePath);
+  assert.equal(status.runtimeProfile?.agentId, agent.id);
+
+  const refreshed = await manager.agentStatus(agent.id, true);
+  assert.equal(probes, probed);
+  assert.equal(refreshed.ready, true);
+  assert.equal(refreshed.cli.path, runtimePath);
+  assert.equal(refreshed.runtimeProfile?.path, runtimePath);
+
+  readinessCache.invalidate('claude', '0.2.4', runtimePath);
+  const invalidated = await manager.agentStatus(agent.id, true);
+  assert.equal(probes, probed);
+  assert.equal(invalidated.ready, false);
+  assert.equal(invalidated.cli.readinessIssue?.code, 'RUNTIME_MUTATED');
+  assert.equal(invalidated.cli.path, runtimePath);
 });

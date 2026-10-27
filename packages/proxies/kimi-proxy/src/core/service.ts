@@ -65,7 +65,6 @@ const NATIVE_SESSION_PAGE_SIZE = 100;
 /** Best-effort native abort while fencing a turn must not hang. */
 const FENCE_ABORT_TIMEOUT_MS = 3_000;
 /** Terminal-facet REST budgets: enrichment may never stall a terminal. */
-const FINAL_USAGE_TIMEOUT_MS = 8_000;
 const DIFF_REQUEST_TIMEOUT_MS = 5_000;
 const DIFF_PHASE_BUDGET_MS = 8_000;
 
@@ -167,13 +166,6 @@ export class KimiProxyService {
           gianTurnId,
           'The Kimi event stream overflowed the turn-start buffer; the turn was fenced rather than projected incompletely.',
         );
-      },
-      finalUsage: async () => {
-        const info = await this.runtime.rest.request<KimiSessionInfo>(
-          'GET', `/api/v1/sessions/${record.nativeSessionId}`,
-          { timeoutMs: FINAL_USAGE_TIMEOUT_MS },
-        );
-        return (info.usage ?? null) as Record<string, unknown> | null;
       },
       fileDiff: async (nativeTurnId: number) => this.fetchFileDiff(record.nativeSessionId, nativeTurnId),
     });
@@ -1067,6 +1059,14 @@ export class KimiProxyService {
     return { replayStreamId, events: events as unknown as Array<Record<string, unknown>> };
   }
 
+  async readOfficialQuota(params: import('@gian/proxy-protocol').OfficialQuotaReadParams) {
+    const { queryKimiOfficialQuota } = await import('./official-quota.js');
+    return queryKimiOfficialQuota(async path => {
+      await this.ensureStarted();
+      return this.runtime.rest.request('GET', path, { timeoutMs: 8_000 });
+    }, params);
+  }
+
   // ---- catalog facts ----
 
   async catalogFacts(): Promise<{ models: KimiModelInfo[]; defaultModel: string | null }> {
@@ -1218,6 +1218,7 @@ function mapApiError(code: number): { domain: import('../transport/protocol.js')
       return { domain: 'INVALID_PARAMS', retryable: false };
     case 40401:
       return { domain: 'SESSION_NOT_FOUND', retryable: false };
+    case 40931: // Another native client is writing this session (Kimi 2.3.0).
     case 40901:
       return { domain: 'SESSION_BUSY', retryable: false };
     case 40402:
@@ -1229,6 +1230,7 @@ function mapApiError(code: number): { domain: import('../transport/protocol.js')
     case 41001:
     case 41002:
       return { domain: 'INTERACTION_NOT_FOUND', retryable: false };
+    case 40932: // Native undo reloaded newer history; require a fresh user decision.
     case 40927:
       return { domain: 'CONFLICT', retryable: false };
     case 40110:

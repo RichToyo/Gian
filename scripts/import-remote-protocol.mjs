@@ -3,23 +3,27 @@ import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { protocolCoordinates, protocolRepository, validateProtocolDependency, verifyProtocolArchive } from '../delivery/remote/scripts/protocol-dependency.mjs';
+import { protocolCoordinates, protocolPublicationRepository, protocolRepository, validateProtocolDependency, verifyProtocolArchive } from '../delivery/remote/scripts/protocol-dependency.mjs';
 
 export async function importRemoteProtocol(version, destination, fetcher = fetch) {
-  const expected = protocolCoordinates(version);
+  const selectedRepository = existsSync(destination)
+    ? JSON.parse(readFileSync(destination)).repository
+    : protocolRepository;
+  if (selectedRepository !== protocolRepository && selectedRepository !== protocolPublicationRepository) throw new Error('Protocol coordinates must select an allowed public Gian repository');
+  const expected = protocolCoordinates(version, selectedRepository);
   const request = async url => {
     const response = await fetcher(url, { headers: { Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`Public Gian protocol request failed: ${response.status}`);
     return response;
   };
-  const api = `https://api.github.com/repos/${protocolRepository}`;
+  const api = `https://api.github.com/repos/${selectedRepository}`;
   const release = await (await request(`${api}/releases/tags/${expected.tag}`)).json();
   if (release.draft || release.prerelease || release.tag_name !== expected.tag) throw new Error('Only a published stable Gian protocol package can be imported');
-  const receiptUrl = `https://github.com/${protocolRepository}/releases/download/${expected.tag}/protocol-package.json`;
+  const receiptUrl = `https://github.com/${selectedRepository}/releases/download/${expected.tag}/protocol-package.json`;
   if (!release.assets?.some(asset => asset.name === expected.filename && asset.browser_download_url === expected.url)
     || !release.assets.some(asset => asset.name === 'protocol-package.json' && asset.browser_download_url === receiptUrl)) throw new Error('Published protocol assets are incomplete');
   const coordinate = validateProtocolDependency(await (await request(receiptUrl)).json());
-  if (coordinate.version !== version) throw new Error('Protocol receipt version differs from requested release');
+  if (coordinate.version !== version || coordinate.repository !== selectedRepository) throw new Error('Protocol receipt repository/version differs from requested release');
   let object = (await (await request(`${api}/git/ref/tags/${expected.tag}`)).json()).object;
   for (let i = 0; object?.type === 'tag' && i < 4; i++) object = (await (await request(`${api}/git/tags/${object.sha}`)).json()).object;
   if (object?.type !== 'commit' || object.sha !== coordinate.sourceCommit) throw new Error('Protocol receipt does not match the public tag commit');
@@ -53,5 +57,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const [version, destination] = process.argv.slice(2);
   if (!destination) throw new Error('Usage: import-remote-protocol.mjs <version> <coordinate-file>');
   const result = await importRemoteProtocol(version, destination);
-  console.log(`Pinned ${result.name}@${result.version} from ${protocolRepository}`);
+  console.log(`Pinned ${result.name}@${result.version} from ${result.repository}`);
 }

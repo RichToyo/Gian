@@ -22,7 +22,7 @@ import {
 import { resolveDataDir } from './storage/paths.js';
 import { assertNoEventStorageMaintenance } from './storage/maintenance-lock.js';
 import { sweepColdEvents } from './events/lifecycle.js';
-import { RuntimeResolver } from './runtime/resolver.js';
+import { probeRuntimeVersionForInstall, RuntimeResolver } from './runtime/resolver.js';
 import { RuntimeReadinessCache } from './runtime/readiness-cache.js';
 import { RuntimeControlPlane } from './runtime/control-plane.js';
 import { ManagedRuntimeInstaller } from './runtime/installer.js';
@@ -232,12 +232,12 @@ async function main(): Promise<void> {
       fetch,
       onProgress,
     ),
-    probeVersion: async ({ executable, pluginId }) => {
+    probeVersion: async ({ executable, pluginId, staging }) => {
       const launch = await agentManager.trustedLaunch(pluginId);
       if (!launch || launch.runtime.kind === 'none') {
         throw new Error(`${pluginId} Proxy is unavailable for managed Runtime verification.`);
       }
-      const resolved = await runtimeResolver.resolve({
+      const input = {
         pluginId: parseProxyPluginId(pluginId),
         pluginVersion: launch.pluginVersion,
         agentId: 'runtime-installer',
@@ -245,15 +245,9 @@ async function main(): Promise<void> {
         processScope: launch.processScope,
         runtime: launch.runtime,
         selectedPath: executable,
-      });
-      try {
-        // Installation verifies executable identity, not an Agent's account
-        // or HOME configuration. Those remain Provider-owned setup concerns.
-        if (!resolved.profile.version) throw new Error(`${pluginId} Runtime reported no version.`);
-        return resolved.profile.version;
-      } finally {
-        await resolved.lease?.release();
-      }
+      };
+      // Installation verifies executable identity, not an Agent's account or HOME.
+      return probeRuntimeVersionForInstall(runtimeResolver, input, staging);
     },
   });
   const catalogRefresh = new CatalogRefreshController({
@@ -329,6 +323,7 @@ async function main(): Promise<void> {
   });
 
   handle.injectWebSocket(server);
+  handle.startQuotaRefresh();
 
   let shuttingDown = false;
   const shutdown = async (): Promise<void> => {

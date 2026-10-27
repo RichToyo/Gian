@@ -68,6 +68,66 @@ test('Dev prerelease identity agrees across package, Manifest and source brandin
   await rm(entry);
 });
 
+test('an emitted nested package.json still resolves the real Proxy manifest', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-dev-proxy-nested-package-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = await writeProxy(root, 'fixture-proxy', 'io.gian.fixture');
+  const packageDir = join(root, 'packages', 'proxies', 'fixture-proxy');
+  await writeFile(join(packageDir, 'dist', 'package.json'), JSON.stringify({
+    name: '@gian/fixture-proxy',
+    version: '1.0.0',
+    main: './spawn.js',
+  }));
+
+  const proxiesDir = join(root, 'packages', 'proxies');
+  const entries = await discoverDevelopmentProxyEntries({ proxiesDir });
+  const resolved = await realpath(entry);
+  assert.equal(entries['io.gian.fixture'], resolved);
+  const launch = await loadDevelopmentTrustedLaunch(entry, 'io.gian.fixture');
+  assert.equal(launch.pluginId, 'io.gian.fixture');
+  assert.equal(launch.entryPath, resolved);
+  assert.deepEqual((await readDevelopmentProxyLogo(launch, 'light'))?.bytes, PNG);
+});
+
+test('an existing nested manifest is not replaced by the parent Proxy', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-dev-proxy-nested-manifest-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = await writeProxy(root, 'fixture-proxy', 'io.gian.fixture');
+  const packageDir = join(root, 'packages', 'proxies', 'fixture-proxy');
+  const proxiesDir = join(root, 'packages', 'proxies');
+  await writeFile(join(packageDir, 'dist', 'package.json'), JSON.stringify({
+    name: '@gian/fixture-proxy',
+    version: '1.0.0',
+    main: './spawn.js',
+  }));
+  await writeFile(join(packageDir, 'dist', 'manifest.json'), '{');
+  await assert.rejects(
+    discoverDevelopmentProxyEntries({ proxiesDir }),
+    (error: unknown) => {
+      assert.ok(error instanceof SyntaxError);
+      return true;
+    },
+  );
+
+  const parentManifest = JSON.parse(await readFile(join(packageDir, 'manifest.json'), 'utf8')) as {
+    id: string;
+  };
+  await writeFile(join(packageDir, 'dist', 'manifest.json'), JSON.stringify({
+    ...parentManifest,
+    id: 'io.gian.other',
+  }));
+  await assert.rejects(
+    discoverDevelopmentProxyEntries({ proxiesDir }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'TRUSTED_LAUNCH_IDENTITY');
+      return true;
+    },
+  );
+  const selected = await loadDevelopmentTrustedLaunch(entry);
+  assert.equal(selected.pluginId, 'io.gian.other');
+  assert.equal(selected.entryPath, await realpath(entry));
+});
+
 test('a declared Dev Proxy with missing build output cannot silently disappear', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-dev-proxy-missing-output-'));
   t.after(() => rm(root, { recursive: true, force: true }));

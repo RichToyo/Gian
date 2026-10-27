@@ -36,10 +36,10 @@ const PORT = portIndex >= 0 ? Number(argv[portIndex + 1]) : 58627;
 const TOKEN = scenario.token ?? 'test-token';
 const KIMI_CODE_HOME = process.env.KIMI_CODE_HOME ?? process.env.HOME;
 
-// Persist the token where the supervisor expects it.
+// Native 2.2.0 and 2.3.0 persist this token directly in KIMI_CODE_HOME.
 try {
-  fs.mkdirSync(`${KIMI_CODE_HOME}/server`, { recursive: true });
-  fs.writeFileSync(`${KIMI_CODE_HOME}/server/server.token`, TOKEN, { mode: 0o600 });
+  fs.mkdirSync(KIMI_CODE_HOME, { recursive: true });
+  fs.writeFileSync(`${KIMI_CODE_HOME}/server.token`, TOKEN, { mode: 0o600 });
 } catch { /* best-effort */ }
 
 let requestIdCounter = 1;
@@ -442,7 +442,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/api/v1/healthz') return ok(res, { ok: true });
     if (req.method === 'GET' && path === '/api/v1/meta') {
       return ok(res, {
-        server_version: '2.2.0-fake', server_id: `srv_${ulid()}`,
+        server_version: '2.3.2-fake', server_id: `srv_${ulid()}`,
         started_at: new Date().toISOString(), capabilities: {}, backend: 'v2',
       });
     }
@@ -685,7 +685,7 @@ server.on('upgrade', (req, socket) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   log({ kind: 'listening', port: PORT });
-  process.stdout.write(`Kimi server: http://127.0.0.1:${PORT}/#token=${TOKEN}\n`);
+  if (!scenario.behavior?.hideTokenBanner) process.stdout.write(`Kimi server: http://127.0.0.1:${PORT}/#token=${TOKEN}\n`);
   if (scenario.behavior?.selfDestructMs) {
     const timer = setTimeout(() => process.exit(9), scenario.behavior.selfDestructMs);
     timer.unref();

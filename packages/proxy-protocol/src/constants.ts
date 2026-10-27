@@ -59,6 +59,7 @@ export const OPTIONAL_METHOD_CAPABILITIES = {
   'runtime.install.plan': 'runtime.install.plan',
   'customization.list': 'customization.list',
   'customization.detail': 'customization.list',
+  'account.quota.read': 'account.quota.read',
 } as const;
 
 export const CAPABILITY_NAMES = [
@@ -88,6 +89,7 @@ export const CAPABILITY_NAMES = [
   'runtime.probe',
   'runtime.install.plan',
   'customization.list',
+  'account.quota.read',
   /** Version-gated protocol increment (additive): the Proxy classifies its
    *  mode config options with `modeKind` on every configOption. Hosts below
    *  the gate fall back to the legacy product-kind allowlist; Proxies above

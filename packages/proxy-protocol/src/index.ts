@@ -10,3 +10,4 @@ export * from './schemas.js';
 export * from './replay-tracker.js';
 export * from './sidechat-resume-store.js';
 export * from './stable-id.js';
+export * from './official-quota.js';

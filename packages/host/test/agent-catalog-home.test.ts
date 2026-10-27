@@ -7,8 +7,6 @@ import { capabilityReasonFromRpcData, GENERIC_CAPABILITY_FAILURE } from '../src/
 import { SessionManager } from '../src/session/manager.js';
 import { registerProxyRoutes } from '../src/web/routes/proxy.js';
 import { registerAgentRoutes, integrationErrorResponse } from '../src/web/routes/agents.js';
-import { normalizeProtocolCatalog } from '../src/proxy/protocol-v2-session-client.js';
-import { projectedCatalog } from '../../proxies/antigravity-proxy/test/fixtures/config-options.js';
 
 function catalog(model: string): ProxyCatalog {
   return {
@@ -79,7 +77,7 @@ test('inspection failure releases the Agent borrow instead of using another HOME
   assert.equal(released, true);
 });
 
-test('saving Agent defaults validates against that Agent catalog and resolve context', async () => {
+test('saving Agent defaults never borrows a Runtime or another Agent HOME', async () => {
   const current = { id: 'mix', pluginId: 'claude', proxy: 'claude', defaults: { model: '', thinking: '', mode: '' } };
   const contexts: Array<string | undefined> = [];
   const app = new Hono();
@@ -87,21 +85,21 @@ test('saving Agent defaults validates against that Agent catalog and resolve con
     agents: {
       getAgent: () => current,
       updateAgent: async (_id: string, patch: object) => ({ ...current, ...patch }),
-      agentStatus: async () => current,
+      agentStatusSnapshot: () => ({ ...current, plugin: { defaults: current.defaults } }),
+      agentStatus: async () => { throw new Error('status must not probe'); },
     } as never,
     closeProxy: async () => undefined,
     capabilities: async (_kind, agentId) => { contexts.push(agentId); return catalog('router-glm'); },
-    resolveDefaultsCatalog: async (_kind, value, _config, agentId) => { contexts.push(agentId); return value; },
   });
   const response = await app.request('/api/agents/mix', {
     method: 'PATCH', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ defaults: { model: 'router-glm' } }),
   });
   assert.equal(response.status, 200, await response.text());
-  assert.deepEqual(contexts, ['mix', 'mix']);
+  assert.deepEqual(contexts, []);
 });
 
-test('Agent defaults save native Antigravity modes unchanged and reject unsupported pairs without writing', async () => {
+test('Agent defaults save native Antigravity preferences unchanged without live semantic validation', async () => {
   let defaults: AgentProxyDefaults = {
     model: 'gemini-3.8-flash', thinking: 'high', mode: 'default', options: {},
   };
@@ -116,11 +114,11 @@ test('Agent defaults save native Antigravity modes unchanged and reject unsuppor
         defaults = { ...defaults, ...patch.defaults };
         return current();
       },
-      agentStatus: async () => current(),
+      agentStatusSnapshot: () => ({ ...current(), plugin: { defaults } }),
+      agentStatus: async () => { throw new Error('status must not probe'); },
     } as never,
     closeProxy: async () => undefined,
-    capabilities: async () => normalizeProtocolCatalog(projectedCatalog()),
-    resolveDefaultsCatalog: async (_plugin, _catalog, config) => normalizeProtocolCatalog(projectedCatalog(config.turnConfig)),
+    capabilities: async () => { throw new Error('save must not initialize Antigravity'); },
   });
   const patch = (value: Partial<AgentProxyDefaults>) => app.request('/api/agents/agy', {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ defaults: value }),
@@ -131,11 +129,11 @@ test('Agent defaults save native Antigravity modes unchanged and reject unsuppor
     assert.equal((await response.json()).agent.defaults.mode, mode);
     assert.deepEqual(defaults, { model: 'gemini-3.8-flash', thinking: 'high', mode, options: {} });
   }
-  const before = structuredClone(defaults);
-  assert.notEqual((await patch({ thinking: 'max' })).status, 200);
-  assert.notEqual((await patch({ mode: 'ask' })).status, 200);
-  assert.equal(writes, 3);
-  assert.deepEqual(defaults, before);
+  assert.equal((await patch({ thinking: 'max' })).status, 200);
+  assert.equal((await patch({ mode: 'ask' })).status, 200);
+  assert.equal(writes, 5);
+  assert.equal(defaults.thinking, 'max');
+  assert.equal(defaults.mode, 'ask');
 });
 
 test('Integration failures log stage, identity and error code with credentials redacted', t => {

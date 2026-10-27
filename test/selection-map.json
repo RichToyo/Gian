@@ -17,6 +17,22 @@
   },
   "rules": [
     {
+      "id": "inspection-launch-identity",
+      "patterns": ["packages/host/src/proxy/inspection-launch.ts"],
+      "modules": ["host"],
+      "scopes": ["unit"],
+      "checks": ["typecheck"],
+      "reason": "Installation versus resolved Runtime identity, Agent/HOME fencing and unused lease cleanup are covered by menubar-quota.test.ts with a real binding planner and synthetic Runtime."
+    },
+    {
+      "id": "menubar-core",
+      "patterns": ["packages/shared/src/menubar.ts", "packages/shared/test/menubar.test.mjs", "packages/host/src/usage/**", "packages/host/src/agents/*quota*.ts", "packages/host/src/web/routes/menubar.ts", "packages/host/migrations/093_menubar_usage.sql", "packages/host/test/menubar-*.test.ts", "packages/desktop/src/menubar-*", "packages/desktop/test/menubar-*.test.ts", "packages/proxies/*/src/core/official-quota.ts", "packages/proxies/dsh-bridge/src/official-quota.ts", "packages/proxies/*/test/official-quota.test.ts", "packages/proxy-protocol/src/official-quota*.ts", "packages/proxy-protocol/test/official-quota.test.ts", "packages/web/menubar.html", "packages/web/src/menubar/**", "packages/web/vite.config.ts"],
+      "modules": ["shared", "host", "desktop", "proxy-protocol", "cc-proxy", "codex-proxy", "kimi-proxy", "grok-proxy", "dsh-proxy", "antigravity-proxy", "web"],
+      "scopes": ["unit", "integration"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Independent menubar contracts, passive local usage facts, source baselines, Todo navigation, qualified official-account adapters and restricted Desktop bridge. Provider/Desktop acceptance remains separately selected."
+    },
+    {
       "id": "catalog-localization",
       "patterns": ["packages/proxy-catalog-contract/src/localization.ts", "packages/shared/src/proxy-catalog-projection.ts", "catalog/proxy-information/**"],
       "modules": ["scripts", "proxy-catalog-contract", "shared", "host", "web"],
@@ -1015,18 +1031,27 @@
         "packages/shared/src/managed-runtime.ts",
         "packages/host/src/agents/**",
         "packages/host/src/session/binding-planner.ts",
+        "packages/host/src/session/proxy-session-coordinator.ts",
+        "packages/host/src/runtime/classify-version.ts",
+        "packages/host/src/runtime/readiness-cache.ts",
+        "packages/host/src/runtime/resolver.ts",
+        "packages/host/src/web/app.ts",
         "packages/host/src/web/routes/agents.ts",
         "packages/host/test/agent-custom-runtime.test.ts",
+        "packages/host/test/catalog-home-cache.test.ts",
+        "packages/host/test/runtime-resolver.test.ts",
         "packages/host/test/agents-routes.test.ts",
         "packages/web/src/views/agent-dialog.tsx",
         "packages/web/src/views/AgentsView.tsx",
         "packages/web/src/agents/AgentDetailPanel.tsx",
         "packages/web/src/operations/**",
         "packages/web/test/agents-view.test.tsx",
-        "docs/adr/0094-custom-agent-runtime-binding.md"
+        "docs/adr/0102-custom-agent-runtime-binding.md",
+        "docs/adr/0106-custom-runtime-verification-history.md"
       ],
       "optionalPatterns": [
-        "docs/adr/0094-custom-agent-runtime-binding.md"
+        "docs/adr/0102-custom-agent-runtime-binding.md",
+        "docs/adr/0106-custom-runtime-verification-history.md"
       ],
       "modules": [
         "shared",
@@ -1041,7 +1066,7 @@
         "typecheck",
         "quality:test-catalog"
       ],
-      "reason": "Custom Agent Runtime binding (ADR-0094) spans the Agent model, Host probing and session binding, REST routes, and the Agents dialog."
+      "reason": "Custom Agent Runtime binding (ADR-0102/0106) spans explicit ownership/version policy, HOME-scoped readiness, safe catalog probes, Agent inspection/warmup, session creation/resume, REST routes and the Agents dialog."
     },
     {
       "id": "search-backend",

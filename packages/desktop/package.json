@@ -1,7 +1,7 @@
 {
   "name": "@gian/desktop",
   "productName": "Gian",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "private": true,
   "description": "macOS desktop shell for the Gian coding agent workspace",
   "author": "RichLogic",
@@ -50,6 +50,8 @@
     "files": [
       "dist/**/*",
       "renderer/**/*",
+      "resources/icon.icns",
+      "resources/gian-menubarTemplate*.png",
       "package.json"
     ],
     "extraResources": [

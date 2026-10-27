@@ -4,6 +4,16 @@ import type { OpenRuntimeProfile } from '@gian/shared';
 
 export type RuntimeVersionClass = OpenRuntimeProfile['verification'];
 
+/** Custom Agent versions record validation history, not a supported floor.
+ * Only a valid exact match is verified; probe/readiness guards run separately. */
+export function classifyCustomRuntimeVersion(
+  version: string | null,
+  verifiedVersions: readonly string[],
+): RuntimeVersionClass {
+  if (version === null || !parseSemver(version)) return 'incompatible';
+  return verifiedVersions.includes(version) ? 'verified' : 'unverified';
+}
+
 /**
  * Host Runtime version policy:
  * 1. Unparseable versions are incompatible.

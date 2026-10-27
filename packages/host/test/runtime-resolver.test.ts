@@ -1,16 +1,21 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
-import { appendFile, chmod, lstat, mkdir, mkdtemp, open, readFile, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 
 import { SUPPORTED_PROTOCOL_VERSIONS } from '@gian/proxy-protocol';
-import { parseProxyPluginId } from '@gian/shared';
+import { parseProxyPluginId, type ManagedRuntimeInstallPlan } from '@gian/shared';
 
 import { recordRuntimeArtifact } from '../src/runtime/artifact-reuse.js';
-import { classifyRuntimeVersion } from '../src/runtime/classify-version.js';
+import { ManagedRuntimeInstaller } from '../src/runtime/installer.js';
+import { ManagedRuntimeGenerationStore } from '../src/runtime/generation-store.js';
+import { fixtureInstallPlan } from './runtime-install-fixtures.js';
+import { classifyCustomRuntimeVersion, classifyRuntimeVersion } from '../src/runtime/classify-version.js';
 import {
   hostRuntimeFingerprint,
   RuntimeFingerprintError,
@@ -20,7 +25,7 @@ import {
   MAX_RUNTIME_FINGERPRINT_DEPTH,
   MAX_RUNTIME_FINGERPRINT_FILES,
 } from '../src/runtime/fingerprint.js';
-import { RuntimeResolver, RuntimeResolverError, openRuntimeIdentity } from '../src/runtime/resolver.js';
+import { RuntimeResolver, RuntimeResolverError, openRuntimeIdentity, probeRuntimeVersionForInstall } from '../src/runtime/resolver.js';
 import { isPublicHttpsSetupUrl } from '../src/runtime/setup-url.js';
 import { ProxyManager } from '../src/proxy/manager.js';
 import { ProtocolV2SessionClient } from '../src/proxy/protocol-v2-session-client.js';
@@ -46,7 +51,7 @@ async function writeExecutable(path: string, source: string): Promise<void> {
 function runtimeFixtureSource(options: {
   pluginId?: string;
   version?: string;
-  mode?: 'normal' | 'none' | 'hang' | 'mutate' | 'mismatch' | 'bad-version' | 'old-version' | 'relative' | 'session-side-effect' | 'malformed' | 'readiness' | 'wrong-id' | 'hung-tree' | 'managed-tree';
+  mode?: 'normal' | 'none' | 'hang' | 'mutate' | 'mismatch' | 'bad-version' | 'old-version' | 'relative' | 'session-side-effect' | 'malformed' | 'readiness' | 'wrong-id' | 'hung-tree' | 'managed-tree' | 'managed-files' | 'managed-files-mutate';
   setupUrl?: string;
 } = {}): string {
   const pluginId = options.pluginId ?? 'io.gian.fixture';
@@ -122,8 +127,20 @@ rl.on('line', async (line) => {
     return;
   }
   if (req.method === 'runtime.probe') {
+    if (process.env.GIAN_FIXTURE_PROBES) {
+      fs.appendFileSync(process.env.GIAN_FIXTURE_PROBES, JSON.stringify([req.params.path, process.env.GIAN_AGENT_HOME ?? null]) + '\\n');
+    }
     if (mode === 'hang') return;
     const requested = req.params.path;
+    if (mode === 'managed-files' || mode === 'managed-files-mutate') {
+      const { dirname, join } = await import('node:path');
+      const companion = join(dirname(requested), 'harness.bin');
+      if (mode === 'managed-files-mutate') fs.appendFileSync(companion, 'changed');
+      reply({ runtimeId: 'fixture', displayName: 'Fixture CLI', path: requested,
+        version: '1.2.3', configHome: null,
+        contentRoots: [{ path: requested, mode: 'file' }, { path: companion, mode: 'file' }] });
+      return;
+    }
     if (mode === 'managed-tree') {
       const { dirname } = await import('node:path');
       reply({
@@ -794,6 +811,83 @@ test('SemVer classification uses exact match, prerelease order, and unverified n
   assert.equal(classifyRuntimeVersion(null, ['1.0.0']), 'verified');
 });
 
+test('Custom Runtime verification history is not a minimum version policy', () => {
+  const verified = ['2.1.304', '2.1.310'];
+  assert.equal(classifyCustomRuntimeVersion('2.1.285', verified), 'unverified');
+  assert.equal(classifyCustomRuntimeVersion('2.1.304', verified), 'verified');
+  assert.equal(classifyCustomRuntimeVersion('2.1.311', verified), 'unverified');
+  assert.equal(classifyCustomRuntimeVersion('2.1.304-rc.1', verified), 'unverified');
+  assert.equal(classifyCustomRuntimeVersion('2.1.285', []), 'unverified');
+  assert.equal(classifyCustomRuntimeVersion('invalid', ['invalid']), 'incompatible');
+  assert.equal(classifyCustomRuntimeVersion(null, verified), 'incompatible');
+  assert.equal(classifyRuntimeVersion('2.1.285', verified), 'incompatible');
+});
+
+test('custom ownership and HOME isolate active probes, profiles and invalidation', async t => {
+  const { root, entry } = await writeFixture(t, runtimeFixtureSource({ mode: 'old-version' }));
+  const path = join(root, 'bin', 'runtime');
+  await writeExecutable(path, '#!/bin/sh\necho 0.1.0\n');
+  const log = join(root, 'probes.jsonl');
+  const resolver = new RuntimeResolver({
+    dataDir: join(root, 'data'), updateLockDataDir: join(root, 'locks'), hostVersion: '0.1.0',
+    bootstrapEnv: { GIAN_FIXTURE_PROBES: log },
+  });
+  const input = externalInput(entry, path);
+  const homeA = { configHome: join(root, 'home-a') };
+  const homeB = { configHome: join(root, 'home-b') };
+  const results: Array<Awaited<ReturnType<RuntimeResolver['resolve']>>> = [];
+  try {
+    const managed = await resolver.resolve(input);
+    results.push(managed);
+    assert.equal(managed.profile.verification, 'incompatible');
+    const a = await resolver.resolve({ ...input, customRuntime: homeA });
+    results.push(a);
+    const b = await resolver.resolve({ ...input, customRuntime: homeB });
+    results.push(b);
+    const again = await resolver.resolve({ ...input, customRuntime: homeA });
+    results.push(again);
+    assert.equal(a.profile.verification, 'unverified');
+    assert.deepEqual(a.profile.verifiedVersions, ['1.2.3']);
+    assert.equal(a.profile.configHome, homeA.configHome);
+    assert.equal(b.profile.configHome, homeB.configHome);
+    assert.notEqual(a.profile.id, managed.profile.id);
+    assert.notEqual(a.profile.id, b.profile.id);
+    assert.equal(a.profile.id, again.profile.id);
+    const probes = () => readFile(log, 'utf8').then(data => data.trim().split('\n').map(line => JSON.parse(line)));
+    assert.deepEqual(await probes(), [[path, null], [path, homeA.configHome], [path, homeB.configHome]]);
+    resolver.invalidate(PLUGIN_ID, path);
+    results.push(await resolver.resolve({ ...input, customRuntime: homeA }));
+    assert.equal((await probes()).length, 4);
+  } finally {
+    for (const resolved of results) await resolved.lease?.release();
+    await resolver.drain(PLUGIN_ID);
+  }
+});
+
+test('Custom Runtime policy preserves probe, identity, fingerprint and readiness guards', async t => {
+  for (const mode of ['bad-version', 'mismatch', 'wrong-id', 'malformed', 'mutate'] as const) {
+    await t.test(mode, async t => {
+      const { root, entry } = await writeFixture(t, runtimeFixtureSource({ mode }));
+      const path = join(root, 'bin', 'runtime');
+      await writeExecutable(path, '#!/bin/sh\necho 1.2.3\n');
+      await assert.rejects(resolverFor(root).resolve({
+        ...externalInput(entry, path), customRuntime: { configHome: null },
+      }));
+    });
+  }
+  const { root, entry } = await writeFixture(t, runtimeFixtureSource({ mode: 'readiness' }));
+  const path = join(root, 'bin', 'runtime');
+  await writeExecutable(path, '#!/bin/sh\necho 1.2.3\n');
+  const blocked = await resolverFor(root).resolve({
+    ...externalInput(entry, path), customRuntime: { configHome: null },
+  });
+  assert.equal(blocked.lease, null);
+  assert.equal(blocked.readinessIssue?.code, 'fixture_not_ready');
+  await assert.rejects(resolverFor(root).resolve({
+    ...externalInput(entry, join(root, 'missing')), customRuntime: { configHome: null },
+  }), (error: unknown) => error instanceof RuntimeResolverError && error.code === 'RUNTIME_ROOT_MISSING');
+});
+
 test('fingerprint uses one global budget and rejects unauthorized configHome', async (t) => {
   const root = await tempRoot(t);
   const selected = join(root, 'bin', 'tool');
@@ -1185,4 +1279,170 @@ test('managed file fingerprints keep the external limit unless every root is one
     fileFingerprint(root, small, [small, huge], store),
     'RUNTIME_FINGERPRINT_BUDGET',
   );
+});
+
+test('staging inventory limits trust to listed regular files in the exact owned tree', async (t) => {
+  const root = await tempRoot(t);
+  const store = join(root, 'runtimes');
+  const staging = join(store, '.staging-12345678-1234-1234-1234-123456789abc');
+  const server = join(staging, 'server.par');
+  const harness = join(staging, 'harness.bin');
+  await mkdir(staging, { recursive: true });
+  await writeFile(server, 'server');
+  await sparseFile(harness, MAX_RUNTIME_FINGERPRINT_BYTES + 1);
+  const input = fileFingerprint(root, server, [server, harness], store);
+  const evidence = { directory: staging, files: ['server.par', 'harness.bin'] };
+  await expectFingerprintCode(input, 'RUNTIME_FINGERPRINT_BUDGET');
+  assert.match(await hostRuntimeFingerprint({ ...input, staging: evidence }), /^[a-f0-9]{64}$/);
+  await expectFingerprintCode({ ...input, staging: { ...evidence, files: ['server.par'] } }, 'RUNTIME_FINGERPRINT_BUDGET');
+  await expectFingerprintCode({ ...input, staging: { ...evidence, directory: store } }, 'RUNTIME_FINGERPRINT_BUDGET');
+
+  const outside = join(root, 'outside.bin');
+  await writeFile(outside, 'outside');
+  await expectFingerprintCode({ ...fileFingerprint(root, server, [server, outside], store), staging: evidence }, 'RUNTIME_ROOT_ESCAPE');
+  const link = join(staging, 'link.bin');
+  await symlink(outside, link);
+  await expectFingerprintCode({ ...fileFingerprint(root, server, [server, link], store),
+    staging: { ...evidence, files: ['server.par', 'link.bin'] } }, 'RUNTIME_ROOT_ESCAPE');
+  const nested = join(staging, 'linked-dir');
+  await symlink(root, nested);
+  await expectFingerprintCode({ ...fileFingerprint(root, server, [server, join(nested, 'outside.bin')], store),
+    staging: { ...evidence, files: ['server.par', 'linked-dir/outside.bin'] } }, 'RUNTIME_ROOT_ESCAPE');
+
+  const overflow = join(staging, 'z-overflow.bin');
+  await sparseFile(overflow, MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES);
+  await expectFingerprintCode({ ...fileFingerprint(root, server, [server, overflow], store),
+    staging: { ...evidence, files: ['server.par', 'z-overflow.bin'] } }, 'RUNTIME_FINGERPRINT_BUDGET');
+
+  const packageRoot = join(staging, 'pkg');
+  const nestedServer = join(packageRoot, 'bin', 'server');
+  await mkdir(dirname(nestedServer), { recursive: true });
+  await writeFile(nestedServer, 'server');
+  const directoryInput = { selectedPath: nestedServer, configHome: null, homeDir: root, managedStoreRoot: store,
+    contentRoots: [{ path: packageRoot, mode: 'directory' as const }],
+    staging: { directory: staging, files: ['pkg/bin/server'] } };
+  assert.match(await hostRuntimeFingerprint(directoryInput), /^[a-f0-9]{64}$/);
+  await writeFile(join(packageRoot, 'unlisted'), 'unexpected');
+  await expectFingerprintCode(directoryInput, 'RUNTIME_ROOT_INVALID');
+});
+
+function runtimeArchive(companionSize: number): Buffer {
+  const members: Buffer[] = [];
+  for (const [name, bytes] of [
+    ['server.par', Buffer.from('server')],
+    ['harness.bin', Buffer.alloc(companionSize)],
+  ] as const) {
+    const header = Buffer.alloc(512);
+    header.write(name, 0);
+    header.write('0000755\0', 100);
+    header.write(`${bytes.length.toString(8).padStart(11, '0')}\0`, 124);
+    header[156] = 0x30;
+    header.write('ustar\0', 257);
+    header.write('00', 263);
+    header.fill(' ', 148, 156);
+    const checksum = header.reduce((sum, byte) => sum + byte, 0);
+    header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
+    members.push(header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512));
+  }
+  members.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(members));
+}
+
+async function writeInstallerFixture(
+  t: { after: (fn: () => Promise<void>) => void },
+  source: string,
+): Promise<{ root: string; entry: string }> {
+  const root = await tempRoot(t);
+  const entry = join(root, 'plugins', PLUGIN_ID, '1.0.0', 'proxy.mjs');
+  await writeExecutable(entry, source);
+  return { root, entry };
+}
+
+test('installer carries verified staging inventory through a fresh uncached resolver probe', { timeout: 120_000 }, async (t) => {
+  const { root, entry } = await writeInstallerFixture(t, runtimeFixtureSource({ mode: 'managed-files' }));
+  const archive = runtimeArchive(MAX_RUNTIME_FINGERPRINT_BYTES + 1);
+  const digest = createHash('sha256').update(archive).digest('hex');
+  const plan: ManagedRuntimeInstallPlan = {
+    generationId: 'staging-test', pluginId: PLUGIN_ID, platform: 'darwin-arm64',
+    proxy: { pluginVersion: '1.0.0', manifestSha256: 'a'.repeat(64), artifactSha256: 'b'.repeat(64),
+      entryPath: entry, processScope: 'session', protocolRange: '>=2.2 <3.0' },
+    runtime: { kind: 'native-binary', runtimeId: 'fixture', version: '1.2.3',
+      asset: { url: 'https://releases.example.test/runtime.tar.gz', sha256: digest, size: archive.length },
+      format: 'tar.gz', entryRelativePath: 'server.par' },
+    companions: [], certificate: { id: 'certificate-1', sha256: 'd'.repeat(64) },
+  };
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const probeLog = join(root, 'probe.log');
+  const resolver = new RuntimeResolver({ dataDir: join(root, 'resolver-data'), updateLockDataDir: join(root, 'locks'),
+    hostVersion: '0.1.0', homeDir: root, managedStoreRoot: join(root, 'runtimes'),
+    bootstrapEnv: { GIAN_FIXTURE_PROBES: probeLog } });
+  let probeCallbacks = 0;
+  let uncachedResolutionChecked = false;
+  const installer = new ManagedRuntimeInstaller({ dataDir: root, store, planInstallation: fixtureInstallPlan,
+    download: async () => archive,
+    probeVersion: async ({ executable, staging }) => {
+      probeCallbacks += 1;
+      assert.ok(staging);
+      assert.deepEqual([...staging.files].sort(), ['harness.bin', 'server.par']);
+      await assert.rejects(readdir(join(root, 'runtimes', 'receipts')), { code: 'ENOENT' });
+      const input = externalInput(entry, executable, 'runtime-installer');
+      const version = await probeRuntimeVersionForInstall(resolver, input, staging);
+      assert.deepEqual(await resolver.detectExternalChanges(), []);
+      await assert.rejects(resolver.resolve(input), (error: unknown) =>
+        error instanceof RuntimeResolverError && error.code === 'RUNTIME_FINGERPRINT_BUDGET');
+      const probes = (await readFile(probeLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line)[0]);
+      assert.deepEqual(probes, [executable, executable]);
+      uncachedResolutionChecked = true;
+      return version;
+    },
+  });
+  const installed = await installer.install(plan);
+  assert.equal(probeCallbacks, 1);
+  assert.equal(uncachedResolutionChecked, true);
+  assert.equal(installed.runtime?.entryPath, join(root, 'runtimes', 'fixture', '1.2.3', digest, 'server.par'));
+  assert.equal(installed.state, 'staged');
+});
+
+test('installer rejects companion mutation during staged probe and removes staging without receipt', async (t) => {
+  const { root, entry } = await writeInstallerFixture(t, runtimeFixtureSource({ mode: 'managed-files-mutate' }));
+  const archive = runtimeArchive(32);
+  const digest = createHash('sha256').update(archive).digest('hex');
+  const plan: ManagedRuntimeInstallPlan = {
+    generationId: 'mutation-test', pluginId: PLUGIN_ID, platform: 'darwin-arm64',
+    proxy: { pluginVersion: '1.0.0', manifestSha256: 'a'.repeat(64), artifactSha256: 'b'.repeat(64),
+      entryPath: entry, processScope: 'session', protocolRange: '>=2.2 <3.0' },
+    runtime: { kind: 'native-binary', runtimeId: 'fixture', version: '1.2.3',
+      asset: { url: 'https://releases.example.test/runtime.tar.gz', sha256: digest, size: archive.length },
+      format: 'tar.gz', entryRelativePath: 'server.par' },
+    companions: [], certificate: { id: 'certificate-1', sha256: 'd'.repeat(64) },
+  };
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const probeLog = join(root, 'probe.log');
+  const resolver = new RuntimeResolver({ dataDir: join(root, 'resolver-data'), updateLockDataDir: join(root, 'locks'),
+    hostVersion: '0.1.0', homeDir: root, managedStoreRoot: join(root, 'runtimes'),
+    bootstrapEnv: { GIAN_FIXTURE_PROBES: probeLog } });
+  let probeCallbacks = 0;
+  let completedProbe = false;
+  let stagedExecutable = '';
+  const installer = new ManagedRuntimeInstaller({ dataDir: root, store, planInstallation: fixtureInstallPlan,
+    download: async () => archive,
+    probeVersion: async ({ executable, staging }) => {
+      probeCallbacks += 1;
+      assert.ok(staging);
+      stagedExecutable = executable;
+      const version = await probeRuntimeVersionForInstall(resolver, externalInput(entry, executable), staging);
+      completedProbe = true;
+      return version;
+    },
+  });
+  await assert.rejects(installer.install(plan), { code: 'RUNTIME_MUTATED' });
+  assert.equal(probeCallbacks, 1);
+  assert.equal(completedProbe, true);
+  assert.deepEqual((await readFile(probeLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line)[0]),
+    [stagedExecutable]);
+  assert.deepEqual(await readdir(join(root, 'runtimes')), ['generations']);
+  await assert.rejects(readdir(join(root, 'runtimes', 'receipts')), { code: 'ENOENT' });
+  assert.deepEqual(await store.list(PLUGIN_ID), []);
 });

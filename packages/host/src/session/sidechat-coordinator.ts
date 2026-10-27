@@ -190,6 +190,7 @@ export class SidechatCoordinator {
     private readonly store: SidechatTransientStore,
     private readonly proxy: ProxyManager,
     private readonly broadcaster: WsBroadcaster,
+    private readonly onUsage?: (parentSessionId: string, sidechat: import('./sidechat-store.js').SidechatRecord, notification: unknown) => void,
   ) {}
 
   has(sidechatId: string): boolean {
@@ -528,6 +529,8 @@ export class SidechatCoordinator {
   }
 
   handleNotification(sidechatId: string, notification: unknown): void {
+    const usageRecord = this.store.get(sidechatId);
+    if (usageRecord) this.onUsage?.(usageRecord.parentSessionId, usageRecord, notification);
     // Intentional product decision (owner-confirmed 2026-09): Side Chat turns
     // NEVER raise system notifications (`attention`). A Side Chat is a
     // foreground auxiliary panel of its parent Session; its completion state

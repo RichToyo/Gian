@@ -486,6 +486,9 @@ export class HostProtocolValidator {
     const requiredCapability = OPTIONAL_METHOD_CAPABILITIES[
       request.method as keyof typeof OPTIONAL_METHOD_CAPABILITIES
     ];
+    if (request.method === 'account.quota.read' && this.negotiated?.protocol.version !== PROTOCOL_V23) {
+      throw requestViolation('CAPABILITY_NOT_SUPPORTED', 'Account quota requires gian.proxy/2.3.');
+    }
     if (
       requiredCapability !== undefined
       && this.negotiated?.capabilities[requiredCapability] === undefined

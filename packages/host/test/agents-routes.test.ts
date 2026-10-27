@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
 import test from 'node:test';
-import type { ConfigValue, ProxyCatalog, UserAgentStatus } from '@gian/shared';
+import type { ProxyCatalog, UserAgentStatus } from '@gian/shared';
 import { AgentManager } from '../src/agents/manager.js';
 import type { CatalogService } from '../src/catalog/service.js';
 import { registerAgentRoutes } from '../src/web/routes/agents.js';
@@ -65,10 +65,7 @@ async function makeApp(
     configOptions: [],
     slashCommands: [],
   },
-  resolveDefaultsCatalog?: (
-    catalog: ProxyCatalog,
-    config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
-  ) => Promise<ProxyCatalog>,
+  inspectCatalog?: () => Promise<ProxyCatalog>,
   hasRunningSessionsForAgent?: (agentId: string) => number,
   seedAgents?: Array<Record<string, unknown>>,
   pickRuntime?: () => Promise<
@@ -76,6 +73,7 @@ async function makeApp(
     | { kind: 'canceled' }
     | { kind: 'error'; error: string }
   >,
+  managedProxies = false,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gian-agents-route-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -102,7 +100,7 @@ async function makeApp(
     allowCreateWithoutCatalog: true,
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
-    managedProxies: false,
+    managedProxies,
     developmentProxyEntries: await developmentEntries(root),
     runtimeResolver: testResolver(root),
     ...(environmentCliPaths ? { environmentCliPaths } : {}),
@@ -113,10 +111,7 @@ async function makeApp(
   registerAgentRoutes(app, {
     agents,
     closeProxy: async () => undefined,
-    capabilities: async () => catalog,
-    ...(resolveDefaultsCatalog
-      ? { resolveDefaultsCatalog: async (_kind, base, config) => resolveDefaultsCatalog(base, config) }
-      : {}),
+    capabilities: inspectCatalog ?? (async () => catalog),
     ...(pickHome ? { pickHome } : {}),
     ...(pickRuntime ? { pickRuntime } : {}),
     ...(hasRunningSessionsForAgent ? { hasRunningSessionsForAgent } : {}),
@@ -611,61 +606,63 @@ test('POST /api/agents rejects an uninstalled reverse-domain pluginId', async t 
   assert.equal(persisted.agents.length, 0);
 });
 
-test('PATCH /api/agents/:id validates Grok defaults against its pluginId Catalog', async () => {
-  const defaults = { model: '', thinking: '', mode: '', options: {} };
-  const grok = {
-    id: 'agent-grok', name: 'Grok', pluginId: 'grok', proxy: null,
-    cliPath: null, home: null, defaults,
-  };
-  const catalog: ProxyCatalog = {
-    catalogRevision: 'grok-models', input: [{ type: 'text' }], slashCommands: [],
-    configOptions: [{
-      id: 'model', displayName: 'Model', binding: 'session', role: 'model',
-      control: 'select', required: false, defaultValue: 'grok-4.7',
-      choices: [{ value: 'grok-4.7', displayName: 'Grok 4.7' }],
-    }, {
-      id: 'permission_mode', displayName: 'Mode', binding: 'session', role: 'approval_mode',
-      control: 'select', required: false, defaultValue: 'default',
-      choices: [{ value: 'default', displayName: 'Default' }],
-    }],
-  };
-  const seen: string[] = [];
-  const agents = {
-    getAgent: () => grok,
-    updateAgent: async (_id: string, patch: { defaults?: Partial<typeof defaults> }) => {
-      Object.assign(grok.defaults, patch.defaults);
-      return grok;
-    },
-    agentStatus: async () => ({
-      ...grok, ready: true, proxyName: 'Grok Build',
-      cli: { state: 'ready', path: '/managed/grok', version: '1.0.41', source: 'managed' },
-      plugin: { state: 'ready', path: '/managed/proxy', version: '0.3.6', source: 'github-release', defaults: grok.defaults },
-      runtimeProfile: null, officialInstallUrl: '',
-    }),
-  } as unknown as AgentManager;
-  const app = new Hono();
-  registerAgentRoutes(app, {
-    agents,
-    closeProxy: async () => undefined,
-    capabilities: async pluginId => { seen.push(pluginId); return catalog; },
-  });
-  const response = await app.request('/api/agents/agent-grok', {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ defaults: { model: 'grok-4.7', mode: 'default' } }),
-  });
-  assert.equal(response.status, 200);
-  assert.deepEqual(seen, ['grok']);
-  assert.equal(grok.defaults.model, 'grok-4.7');
-  assert.equal(grok.defaults.mode, 'default');
+test('PATCH defaults is local on cold managed, custom, and source Agent status', async t => {
+  for (const [managed, runtime] of [
+    [true, undefined], [true, { kind: 'custom', path: '/missing/custom-cli' }], [false, undefined],
+  ] as const) {
+    const { agents, root } = await makeApp(t, undefined, undefined, DSH_LIKE_CATALOG,
+      undefined, undefined, [{
+        id: 'offline-agent', name: 'Offline', pluginId: 'io.acme.fixture', proxy: null,
+        cliPath: null, runtime, home: null,
+        defaults: { model: 'old-model', thinking: 'old-effort', mode: 'old-mode', options: {} },
+      }], undefined, managed);
+    let probes = 0;
+    agents.agentStatus = async () => { probes += 1; throw new Error('Runtime unavailable'); };
+    agents.trustedLaunch = async () => { probes += 1; throw new Error('Proxy unavailable'); };
+    const app = new Hono();
+    registerAgentRoutes(app, {
+      agents, closeProxy: async () => { probes += 1; },
+      capabilities: async () => { probes += 1; throw new Error('Provider offline'); },
+    });
+    const response = await app.request('/api/agents/offline-agent', {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ defaults: { options: { provider: 'future-provider' } } }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    const body = await response.json() as { agent: UserAgentStatus };
+    assert.equal(body.agent.ready, false, 'a cold response must not invent readiness');
+    assert.equal(body.agent.cli.readinessIssue?.code, 'RUNTIME_STATUS_NOT_CHECKED');
+    assert.equal(body.agent.defaults.model, 'old-model');
+    assert.deepEqual(body.agent.defaults.options, { provider: 'future-provider' });
+    assert.deepEqual(body.agent.runtime ?? null, runtime ?? null);
+    const disk = JSON.parse(await readFile(join(root, 'data', 'agents.json'), 'utf8'));
+    assert.equal(disk.agents[0].defaults.model, 'old-model');
+    assert.deepEqual(disk.agents[0].defaults.options, { provider: 'future-provider' });
+    assert.equal(probes, 0, 'save and response must not inspect Proxy or Runtime');
+  }
+});
 
-  const unknown = await app.request('/api/agents/agent-grok', {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ defaults: { model: 'grok-unknown' } }),
-  });
-  assert.equal(unknown.status, 400);
-  assert.equal(grok.defaults.model, 'grok-4.7');
+test('consecutive preference saves retain observed facts, but HOME changes invalidate them', async t => {
+  const { app, agents, bins } = await makeApp(t);
+  const saved = await agents.createAgent({ name: 'Writer', proxy: 'claude', cliPath: bins.claude });
+  const observed = await agents.agentStatus(saved.id);
+  assert.equal(observed.ready, true);
+  agents.agentStatus = async () => { throw new Error('save must not re-probe status'); };
+  for (const defaults of [{ model: 'future-model' }, { thinking: 'future-effort' }]) {
+    const response = await app.request(`/api/agents/${saved.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ defaults }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    const body = await response.json() as { agent: UserAgentStatus };
+    assert.equal(body.agent.ready, observed.ready);
+    assert.deepEqual(body.agent.cli, observed.cli);
+    assert.equal(body.agent.plugin.version, observed.plugin.version);
+    assert.deepEqual(body.agent.plugin.defaults, body.agent.defaults);
+  }
+  assert.equal(agents.getAgent(saved.id).defaults.model, 'future-model');
+  await agents.updateAgent(saved.id, { home: { kind: 'managed' } });
+  assert.equal(agents.agentStatusSnapshot(saved.id).ready, false);
 });
 
 test('PATCH /api/agents/:id accepts role-less option defaults, deletes on null', async t => {
@@ -694,7 +691,75 @@ test('PATCH /api/agents/:id accepts role-less option defaults, deletes on null',
   assert.deepEqual(agents.getAgent(agent.id).defaults.options, {});
 });
 
-test('PATCH /api/agents/:id rejects malformed or unadvertised option defaults', async t => {
+for (const intervening of ['invalidation', 'newer-observation'] as const) {
+  test(`preference commit does not revive stale Runtime facts after ${intervening}`, async t => {
+    const { agents, bins } = await makeApp(t);
+    const saved = await agents.createAgent({ name: 'Writer', proxy: 'claude', cliPath: bins.claude });
+    const observed = await agents.agentStatus(saved.id);
+    const internals = agents as unknown as {
+      saveConfig: (...args: unknown[]) => Promise<void>;
+      invalidateAgentStatus: (id: string) => void;
+      agentStatusCache: Map<string, { value: UserAgentStatus; expiresAt: number }>;
+    };
+    const save = internals.saveConfig.bind(agents);
+    let started!: () => void;
+    let release!: () => void;
+    const writing = new Promise<void>(resolve => { started = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    t.mock.method(internals, 'saveConfig', async (...args: unknown[]) => {
+      started();
+      await blocked;
+      await save(...args);
+    });
+    const update = agents.updateAgent(saved.id, { defaults: { model: 'new-preference' } });
+    await writing;
+    if (intervening === 'invalidation') internals.invalidateAgentStatus(saved.id);
+    else internals.agentStatusCache.set(saved.id, {
+      value: { ...observed, cli: { ...observed.cli, version: 'new-observation' } },
+      expiresAt: 123,
+    });
+    release();
+    await update;
+    const status = agents.agentStatusSnapshot(saved.id);
+    if (intervening === 'invalidation') {
+      assert.equal(status.ready, false);
+      assert.equal(status.cli.readinessIssue?.code, 'RUNTIME_STATUS_NOT_CHECKED');
+    } else {
+      assert.equal(status.cli.version, 'new-observation');
+      assert.equal(internals.agentStatusCache.get(saved.id)?.expiresAt, 123, 'freshness must not be extended');
+    }
+    assert.equal(status.defaults.model, 'new-preference');
+  });
+}
+
+test('defaults-only writes skip Codex reconciliation but HOME changes preserve it', async t => {
+  const { agents, bins } = await makeApp(t);
+  const saved = await agents.createAgent({ name: 'Codex', proxy: 'codex', cliPath: bins.codex });
+  let reconciles = 0;
+  agents.reconcileManagedSkills = async () => { reconciles += 1; return []; };
+  await agents.updateAgent(saved.id, { defaults: { model: 'future-model' } });
+  assert.equal(reconciles, 0);
+  await agents.updateAgent(saved.id, { home: { kind: 'managed' } });
+  assert.equal(reconciles, 1);
+});
+
+test('a failed local defaults commit preserves in-memory and disk preferences', async t => {
+  const { app, agents, bins, root } = await makeApp(t);
+  const saved = await agents.createAgent({ name: 'Writer', proxy: 'claude', cliPath: bins.claude });
+  const before = await readFile(join(root, 'data', 'agents.json'), 'utf8');
+  const preferences = structuredClone(saved.defaults);
+  t.mock.method(agents as unknown as { saveConfig: () => Promise<void> }, 'saveConfig',
+    async () => { throw new Error('disk unavailable'); });
+  const response = await app.request(`/api/agents/${saved.id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { model: 'future-model' } }),
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(agents.getAgent(saved.id).defaults, preferences);
+  assert.equal(await readFile(join(root, 'data', 'agents.json'), 'utf8'), before);
+});
+
+test('PATCH /api/agents/:id rejects malformed and unbounded defaults atomically', async t => {
   const { app, agents, bins } = await makeApp(t, undefined, undefined, DSH_LIKE_CATALOG);
   const created = await app.request('/api/agents', {
     method: 'POST',
@@ -711,33 +776,33 @@ test('PATCH /api/agents/:id rejects malformed or unadvertised option defaults', 
   assert.equal((await patch({ options: ['provider'] })).status, 400);
   assert.equal((await patch({ options: { provider: { nested: true } } })).status, 400);
   assert.equal((await patch({ options: { 'bad key': 'x' } })).status, 400);
-  // Unknown option id in a known catalog.
-  assert.equal((await patch({ options: { nope: 'x' } })).status, 400);
-  // Role-bearing ids stay in the triplet.
-  assert.equal((await patch({ options: { model: 'deepseek-chat' } })).status, 400);
-  // Value outside the advertised choices.
-  assert.equal((await patch({ options: { provider: 'vendor-c' } })).status, 400);
+  assert.equal((await patch({ model: 7 })).status, 400);
+  assert.equal((await patch({ model: 'x'.repeat(4097) })).status, 400);
+  assert.equal((await patch({ unknown: true })).status, 400);
+  assert.equal((await patch({ options: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, true])) })).status, 400);
+  assert.equal((await patch({ options: { provider: 'x'.repeat(4097) } })).status, 400);
+  const overflow = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: '{"defaults":{"options":{"number":1e999}}}',
+  });
+  assert.equal(overflow.status, 400);
   assert.deepEqual(agents.getAgent(agent.id).defaults.options, {});
+  assert.equal((await patch({
+    options: Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`k${i}`, true])),
+  })).status, 200);
+  const before = structuredClone(agents.getAgent(agent.id).defaults);
+  assert.equal((await patch({ model: 'must-not-commit', options: { extra: true } })).status, 400);
+  assert.deepEqual(agents.getAgent(agent.id).defaults, before);
 });
 
-test('PATCH /api/agents/:id adopts resolved dependent invalidations into the same patch', async t => {
-  const resolvedCatalog: ProxyCatalog = {
-    ...DSH_LIKE_CATALOG,
-    configOptions: DSH_LIKE_CATALOG.configOptions.map(option => (
-      option.id === 'model'
-        ? { ...option, choices: [{ value: 'vendor-b-model', displayName: 'Vendor B Model' }] }
-        : option
-    )),
-  };
+test('PATCH /api/agents/:id preserves unrelated preferences without resolving dependent metadata', async t => {
+  let probes = 0;
   const { app, agents, bins } = await makeApp(
     t,
     undefined,
     undefined,
     DSH_LIKE_CATALOG,
-    async catalog => ({
-      ...resolvedCatalog,
-      resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
-    }),
+    async () => { probes += 1; throw new Error('Provider unavailable'); },
   );
   const created = await app.request('/api/agents', {
     method: 'POST',
@@ -753,8 +818,7 @@ test('PATCH /api/agents/:id adopts resolved dependent invalidations into the sam
   const { agent } = await created.json() as { agent: UserAgentStatus };
   assert.equal(agents.getAgent(agent.id).defaults.model, 'deepseek-chat');
 
-  // Switching the provider invalidates the stored model; the Host clears it
-  // in the same atomic patch instead of rejecting the provider change.
+  // A provider edit must not rewrite the stored model.
   const switched = await app.request(`/api/agents/${agent.id}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
@@ -763,17 +827,17 @@ test('PATCH /api/agents/:id adopts resolved dependent invalidations into the sam
   assert.equal(switched.status, 200);
   const defaults = agents.getAgent(agent.id).defaults;
   assert.deepEqual(defaults.options, { provider: 'vendor-b' });
-  assert.equal(defaults.model, '');
+  assert.equal(defaults.model, 'deepseek-chat');
 
-  // An explicitly patched invalid value still 400s — only untouched defaults
-  // are auto-cleared.
+  // Semantic choices are deliberately deferred to new-session creation.
   const invalid = await app.request(`/api/agents/${agent.id}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ defaults: { model: 'deepseek-chat' } }),
   });
-  assert.equal(invalid.status, 400);
-  assert.equal(agents.getAgent(agent.id).defaults.model, '');
+  assert.equal(invalid.status, 200);
+  assert.equal(agents.getAgent(agent.id).defaults.model, 'deepseek-chat');
+  assert.equal(probes, 0);
 });
 
 test('PATCH /api/agents/:id accepts option defaults shape-only on an empty catalog', async t => {
@@ -846,7 +910,7 @@ const MODE_KIND_CATALOG: ProxyCatalog = {
   slashCommands: [],
 };
 
-test('PATCH mode defaults validate via catalog semantics, not the proxy alias', async t => {
+test('PATCH mode defaults do not depend on catalog semantics or the proxy alias', async t => {
   const { app, agents } = await makeApp(t, undefined, undefined, MODE_KIND_CATALOG, undefined, undefined, [FIXTURE_SEED]);
   const agent = agents.getAgent('agent-fixture-1');
   // The catalog stamps modeKind='provider-native'; the fixture pluginId is
@@ -860,14 +924,14 @@ test('PATCH mode defaults validate via catalog semantics, not the proxy alias', 
   assert.equal(patched.status, 200, JSON.stringify(await patched.json()));
   assert.equal(agents.getAgent(agent.id).defaults.mode, 'vendor-a');
 
-  // An unadvertised native mode value still rejects.
+  // Offline preferences may name a future native choice.
   const invalid = await app.request(`/api/agents/${agent.id}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ defaults: { mode: 'not-advertised' } }),
   });
-  assert.equal(invalid.status, 400);
-  assert.match((await invalid.json() as { error: string }).error, /not advertised by the Proxy/);
+  assert.equal(invalid.status, 200);
+  assert.equal(agents.getAgent(agent.id).defaults.mode, 'not-advertised');
 });
 
 test('GET agent status keeps a null proxy alias readable without gating readiness text', async t => {

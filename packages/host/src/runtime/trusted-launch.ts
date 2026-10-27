@@ -275,22 +275,33 @@ export async function readDevelopmentProxyLogo(
   return { bytes: await readFile(path), mediaType: asset.mediaType, sha256: asset.sha256 };
 }
 
+async function namedProxyPackage(dir: string): Promise<boolean> {
+  try {
+    const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as {
+      name?: unknown;
+    };
+    return typeof pkg.name === 'string'
+      && pkg.name.startsWith('@gian/')
+      && pkg.name.endsWith('-proxy');
+  } catch {
+    return false;
+  }
+}
+
 export async function packageDirectoryFromEntry(entryPath: string): Promise<string> {
   let dir = dirname(entryPath);
   for (let i = 0; i < 8; i += 1) {
-    try {
-      const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as {
-        name?: string;
-      };
-      if (
-        typeof pkg.name === 'string'
-        && pkg.name.startsWith('@gian/')
-        && pkg.name.endsWith('-proxy')
-      ) {
+    if (await namedProxyPackage(dir)) {
+      // Compiler output can copy package.json beside the entry. A directory
+      // is the package root only when its Manifest is present. An existing
+      // Manifest is never skipped: validation fail-closes on a malformed or
+      // wrong-id file instead of accepting a parent package.
+      try {
+        await lstat(join(dir, 'manifest.json'));
         return dir;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
-    } catch {
-      // Keep walking toward the package root.
     }
     const parent = dirname(dir);
     if (parent === dir) break;

@@ -620,9 +620,16 @@ test('turn lifecycle: prompt payload, event projection, single terminal, barrier
     // usage from agent.status.updated usage.total
     const usage = notifications.find((line) => line.method === 'usage.updated');
     assert.ok(usage, 'usage projected');
-    const conversation = ((usage!.payload.params as { data: { conversation: { inputTokens?: number; outputTokens?: number } } }).data.conversation);
-    assert.equal(conversation.inputTokens, 110);
-    assert.equal(conversation.outputTokens, 10);
+    const conversation = ((usage!.payload.params as { data: { conversation: {
+      mode: string; inputTokens: number; outputTokens: number; cachedInputTokens: number; totalTokens: number;
+    } } }).data.conversation);
+    assert.deepEqual(conversation, {
+      mode: 'absolute',
+      inputTokens: 110,
+      outputTokens: 10,
+      cachedInputTokens: 20,
+      totalTokens: 120,
+    });
 
     // outer sequence continuity 1..N
     const sequences = notifications.map((line) => (line.payload.params as { sequence: number }).sequence);
@@ -1906,6 +1913,18 @@ test('max-steps failures complete with limit_reached instead of turn.failed', as
     const terminal = await harness.waitNotificationFor((line) => line.method === 'turn.completed' || line.method === 'turn.failed');
     assert.equal(terminal.method, 'turn.completed');
     assert.equal(((terminal.payload.params as { data: { stopReason: string } }).data.stopReason), 'limit_reached');
+  } finally {
+    await harness.close();
+  }
+});
+
+// The persisted native token is authoritative even when silent startup has no URL.
+test('native server.token starts authenticated requests without a token banner', async () => {
+  const harness = startHarness({ behavior: { hideTokenBanner: true } });
+  try {
+    await initialize(harness);
+    const response = await harness.request('catalog.list', {});
+    assert.equal(response.kind, 'result', JSON.stringify(response.payload));
   } finally {
     await harness.close();
   }

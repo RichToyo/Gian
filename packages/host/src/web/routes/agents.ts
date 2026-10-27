@@ -1,16 +1,15 @@
 import type { Hono } from 'hono';
 import type {
   AgentProxyDefaults,
-  ConfigOption,
   ConfigValue,
   Executor,
   LegacyExecutorId,
   ManagedRuntimeInstallStreamFrame,
   ProxyCatalog,
 } from '@gian/shared';
-import { catalogModeSemantics, executorIdForPluginId, isApprovalMode, isProductExecutor } from '@gian/shared';
+import { executorIdForPluginId, isProductExecutor } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
-import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError, mergeAgentProxyDefaults } from '../../agents/manager.js';
+import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError } from '../../agents/manager.js';
 import { AgentHomeError } from '../../agents/home.js';
 import { isProxyPluginId, parseProxyPluginId, resolvePluginIdInput } from '@gian/shared';
 import { RuntimeResolverError, type RuntimeResolver } from '../../runtime/resolver.js';
@@ -193,146 +192,22 @@ function managesRuntimePaths(agents: AgentManager): boolean {
   return typeof method === 'function' && method.call(agents) === true;
 }
 
-function optionChoices(catalog: ProxyCatalog, role: string): string[] {
-  const option = catalog.configOptions.find((item) => item.role === role);
-  return (option?.choices ?? []).map((choice) => String(choice.value));
-}
-
-function validateProxyDefaults(
-  executorId: Executor,
-  defaults: AgentProxyDefaults,
-  patch: Partial<AgentProxyDefaults>,
-  catalog: ProxyCatalog,
-): void {
-  const models = optionChoices(catalog, 'model');
-  if (defaults.model && models.length > 0 && !models.includes(defaults.model)) {
-    throw new Error('model is not advertised by the Proxy');
-  }
-  const efforts = optionChoices(catalog, 'effort');
-  if (defaults.thinking && efforts.length > 0 && !efforts.includes(defaults.thinking)) {
-    throw new Error('thinking/effort is not supported by the selected Proxy model');
-  }
-  const approvalModes = optionChoices(catalog, 'approval_mode');
-  const executionModes = optionChoices(catalog, 'execution_mode');
-  // `catalog.modeSemantics`-gated: modeKind markers win; the legacy
-  // product-kind allowlist only covers Proxies below the gate. Binding is
-  // never consulted for the Gian-preset vs native distinction.
-  const nativeModeSemantics = catalogModeSemantics(executorId, catalog) === 'provider-native';
-  if (defaults.mode) {
-    if (nativeModeSemantics) {
-      const nativeModes = approvalModes.length > 0 ? approvalModes : executionModes;
-      if (nativeModes.length > 0 && !nativeModes.includes(defaults.mode)) {
-        throw new Error('mode is not advertised by the Proxy');
-      }
-    } else {
-      const semanticModes = approvalModes.length > 0
-        && approvalModes.every(isApprovalMode)
-        ? approvalModes
-        : [];
-      if (!isApprovalMode(defaults.mode)) {
-        throw new Error('mode is not a Gian approval preset');
-      }
-      if (semanticModes.length > 0 && !semanticModes.includes(defaults.mode)) {
-        throw new Error('mode is not advertised by the Proxy');
-      }
-      if (patch.mode !== undefined && semanticModes.length === 0) {
-        throw new Error('Proxy does not advertise product-level approval modes');
-      }
-    }
-  }
-  // Role-less option defaults. An offline/empty catalog accepts shape only;
-  // `null` deletes a key and is always allowed.
-  const catalogKnown = catalog.configOptions.length > 0;
-  for (const [id, value] of Object.entries(patch.options ?? {})) {
-    if (value === null || !catalogKnown) continue;
-    const option = catalog.configOptions.find(item => item.id === id);
-    if (!option) throw new Error(`option is not advertised by the Proxy: ${id}`);
-    if (option.role) {
-      throw new Error(`option ${id} is role-bearing; use the matching defaults field`);
-    }
-    if (option.choices && option.choices.length > 0) {
-      if (!option.choices.some(choice => Object.is(choice.value, value))) {
-        throw new Error(`option ${id} value is not advertised by the Proxy`);
-      }
-    } else if (option.control === 'boolean' && typeof value !== 'boolean') {
-      throw new Error(`option ${id} must be a boolean`);
-    } else if (option.control === 'number' && typeof value !== 'number') {
-      throw new Error(`option ${id} must be a number`);
-    } else if ((option.control === 'text' || option.control === 'select') && typeof value !== 'string') {
-      throw new Error(`option ${id} must be a string`);
-    }
-  }
-}
-
-/** Map effective Agent defaults onto the catalog's own ids and bindings so
- *  `catalog.resolve` can compute dependent choice lists (provider → models). */
-function configsFromDefaults(
-  catalog: ProxyCatalog,
-  defaults: AgentProxyDefaults,
-): { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } {
-  const sessionConfig: Record<string, ConfigValue> = {};
-  const turnConfig: Record<string, ConfigValue> = {};
-  const assign = (option: ConfigOption, value: ConfigValue): void => {
-    (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = value;
-  };
-  for (const option of catalog.configOptions) {
-    if (option.role === 'model' && defaults.model) assign(option, defaults.model);
-    else if (option.role === 'effort' && defaults.thinking) assign(option, defaults.thinking);
-    else if ((option.role === 'approval_mode' || option.role === 'execution_mode') && defaults.mode) {
-      assign(option, defaults.mode);
-    } else if (!option.role) {
-      const value = defaults.options?.[option.id];
-      if (value !== undefined) assign(option, value);
-    }
-  }
-  return { sessionConfig, turnConfig };
-}
-
-/** A resolved catalog invalidates stored values that no longer appear in its
- *  (dependent) choice lists. Fold those invalidations into the same atomic
- *  patch — e.g. a provider change clears the stored model — while values the
- *  caller explicitly patched stay theirs to get wrong (and get a 400). */
-function adoptResolvedInvalidations(
-  patch: Partial<AgentProxyDefaults>,
-  next: AgentProxyDefaults,
-  catalog: ProxyCatalog,
-): void {
-  const clearTriplet = (field: 'model' | 'thinking' | 'mode', role: string): void => {
-    if (patch[field] !== undefined) return;
-    const value = next[field];
-    if (!value) return;
-    const option = catalog.configOptions.find(item => item.role === role);
-    if (option?.choices?.length && !option.choices.some(choice => Object.is(choice.value, value))) {
-      patch[field] = '';
-      next[field] = '';
-    }
-  };
-  clearTriplet('model', 'model');
-  clearTriplet('thinking', 'effort');
-  clearTriplet('mode', 'approval_mode');
-  clearTriplet('mode', 'execution_mode');
-  for (const [id, value] of Object.entries(next.options ?? {})) {
-    if (patch.options?.[id] !== undefined) continue;
-    const option = catalog.configOptions.find(item => item.id === id);
-    // Unknown ids stay on disk (apply-time tolerance); known options whose
-    // value fell out of the resolved choices get deleted.
-    if (option?.choices?.length && !option.choices.some(choice => Object.is(choice.value, value))) {
-      patch.options = { ...(patch.options ?? {}), [id]: null };
-      delete next.options[id];
-    }
-  }
-}
-
 const PROXY_DEFAULT_OPTION_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 
 function normalizeDefaultsPatch(
   body: Record<string, unknown>,
 ): Partial<AgentProxyDefaults> | { error: string } {
   const patch: Partial<AgentProxyDefaults> = {};
+  if (Object.keys(body).some(key => !['model', 'thinking', 'mode', 'options'].includes(key))) {
+    return { error: 'unknown defaults field' };
+  }
   for (const key of ['model', 'thinking', 'mode'] as const) {
     const value = body[key];
     if (value !== undefined && typeof value !== 'string') {
       return { error: `${key} must be a string` };
+    }
+    if (typeof value === 'string' && value.length > 4096) {
+      return { error: `${key} exceeds 4096 characters` };
     }
     if (typeof value === 'string') patch[key] = value;
   }
@@ -341,8 +216,9 @@ function normalizeDefaultsPatch(
       return { error: 'options must be an object' };
     }
     const options: Record<string, ConfigValue> = {};
+    if (Object.keys(body.options).length > 64) return { error: 'options exceeds 64 entries' };
     for (const [id, value] of Object.entries(body.options as Record<string, unknown>)) {
-      if (!PROXY_DEFAULT_OPTION_ID.test(id)) {
+      if (!PROXY_DEFAULT_OPTION_ID.test(id) || id === '__proto__') {
         return { error: `options key is invalid: ${id}` };
       }
       if (
@@ -352,6 +228,10 @@ function normalizeDefaultsPatch(
         && typeof value !== 'boolean'
       ) {
         return { error: `options.${id} must be a string, number, boolean, or null` };
+      }
+      if ((typeof value === 'number' && !Number.isFinite(value))
+        || (typeof value === 'string' && value.length > 4096)) {
+        return { error: `options.${id} value exceeds local bounds` };
       }
       options[id] = value;
     }
@@ -452,12 +332,6 @@ export function registerAgentRoutes(
     runtimeDelivery?: ManagedRuntimeDeliveryService;
     closeProxy: (id: Executor) => Promise<void>;
     capabilities: (id: Executor, agentId?: string) => Promise<ProxyCatalog>;
-    resolveDefaultsCatalog?: (
-      id: Executor,
-      catalog: ProxyCatalog,
-      config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
-      agentId?: string,
-    ) => Promise<ProxyCatalog>;
     catalogService?: CatalogService;
     /** Test seam around the native folder picker; production uses pickPath. */
     pickHome?: () => ReturnType<typeof pickPath>;
@@ -795,12 +669,22 @@ export function registerAgentRoutes(
     if (executor(id)) return c.json({ error: 'unsupported agent' }, 404);
     let body: Record<string, unknown>;
     try {
-      body = await c.req.json<Record<string, unknown>>();
+      const input = await readBoundedJson(c);
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        return c.json({ error: 'body must be an object' }, 400);
+      }
+      body = input as Record<string, unknown>;
+      if (Object.keys(body).some(key => ![
+        'name', 'enabled', 'cliPath', 'runtime', 'home', 'pluginId', 'proxy', 'defaults',
+      ].includes(key))) return c.json({ error: 'unknown Agent field' }, 400);
     } catch {
       return c.json({ error: 'invalid JSON body' }, 400);
     }
     try {
       const current = options.agents.getAgent(id);
+      const preferenceOnly = Object.keys(body).every(key => (
+        key === 'defaults' || key === 'name' || key === 'enabled'
+      ));
       const patch: Parameters<AgentManager['updateAgent']>[1] = {};
       if (body.name !== undefined) {
         if (typeof body.name !== 'string') return c.json({ error: 'name must be a string' }, 400);
@@ -864,21 +748,7 @@ export function registerAgentRoutes(
         const normalized = normalizeDefaultsPatch(body.defaults as Record<string, unknown>);
         if ('error' in normalized) return c.json({ error: normalized.error }, 400);
         defaultsPatch = normalized;
-        // Defaults stay write-through (no restart), but they must remain
-        // values the Agent's Proxy actually advertises. Identity is the
-        // Agent's pluginId; the legacy proxy alias never gates defaults.
-        const pluginId = current.pluginId;
-        const next = mergeAgentProxyDefaults(current.defaults, defaultsPatch);
-        const catalog = await options.capabilities(pluginId, id);
-        const hasOptionDefaults = Object.keys(next.options ?? {}).length > 0;
-        const resolved = options.resolveDefaultsCatalog && (next.model || hasOptionDefaults)
-          ? await options.resolveDefaultsCatalog(pluginId, catalog, configsFromDefaults(catalog, next), id)
-          : null;
-        const validationCatalog = resolved ?? catalog;
-        if (resolved && 'resolvedDefaults' in resolved) {
-          adoptResolvedInvalidations(defaultsPatch, next, validationCatalog);
-        }
-        validateProxyDefaults(pluginId, next, defaultsPatch, validationCatalog);
+        // Preferences for future Sessions, not a live Runtime operation.
         patch.defaults = defaultsPatch;
       }
       const agent = await (async () => {
@@ -897,7 +767,9 @@ export function registerAgentRoutes(
       })();
       return c.json({
         agent: publicAgentStatus(
-          await options.agents.agentStatus(agent.id, true),
+          preferenceOnly
+            ? options.agents.agentStatusSnapshot(agent.id)
+            : await options.agents.agentStatus(agent.id, true),
           managesRuntimePaths(options.agents),
         ),
       });

@@ -16,7 +16,7 @@ The entry point requires an absolute managed binary path:
 node dist/src/cli/spawn.js --kimi-bin /absolute/path/to/kimi
 ```
 
-Current development candidate: **0.4.5**. Successful question dismissal
+Current Proxy version: **0.4.10**. Successful question dismissal
 accepts the native 40909 response only for the dismiss endpoint with its
 verified success payload; REST and WebSocket resolution share one terminal
 fact, including when the native event arrives before the response.
@@ -37,18 +37,33 @@ stored transcripts are not rewritten.
 
 ## Runtime baseline
 
-- Kimi Code CLI `2.2.0` (the Manifest and certified Runtime candidate select
+- Kimi Code CLI `2.3.2` (the Manifest and pinned Runtime candidate select
   the same exact official archive). Evidence baseline: the
   server's own OpenAPI 3.0.3 (`/openapi.json`) and AsyncAPI 3.1.0
   (`/asyncapi.json`) documents, plus `packages/kap-server` sources embedded in
   the official binary (`protocol/error-codes.ts`, `transport/ws/*`,
-  `middleware/*`). Re-verified for 2.2.0: the published server-api reference
-  diff from 2.1.1 is purely additive (Remote Control endpoints, optional
-  fields) and a live 2.2.0 `/openapi.json` + `/asyncapi.json` probe confirms
-  every REST route and WS message type this proxy uses.
+  `middleware/*`). Re-verified for 2.3.0: the published server-api reference
+  diff from 2.2.0 adds optional fields, endpoints and native concurrency
+  errors. Codes 40931/40932 map to SESSION_BUSY/CONFLICT without automatic retry.
+  A live 2.3.0 `/openapi.json` + `/asyncapi.json` probe confirms
+  every REST route and WS message type this proxy uses. For the 2.3.1 patch,
+  the exact kap-server source diff (rest-session.ts, sessions.ts,
+  workspaces.ts, openapi/transforms.ts) shows: an added optional
+  session-takeover action this Proxy never calls, and a workspace trust
+  lookup that now reads the trust store directly instead of creating a
+  workspace instance first. Session/message/WS surfaces are unchanged. A
+  live 2.3.1 native server probe (isolated HOME, production supervisor and
+  token path, no user locks, no Provider turn) confirms 112 REST paths: the
+  only addition is `/api/v1/sessions/{session_id}:takeover`, with no existing
+  path or method removed. The 2.3.2 patch changes no kap-server file at all
+  (22 changed files across agent-core swarm/tooling, transcript folding and
+  docs; the swarm removal disables tool-driven swarm entry until the user
+  enables swarm mode - shared code that CAN affect web-runtime behavior, so
+  this Proxy declares and enables no swarm policy and relies on generic
+  isError/replay handling).
 - The proxy spawns its own dedicated server instance on a proxy-chosen free
   port (loopback only, `--no-open --log-level silent`). The bearer token comes
-  from `$KIMI_CODE_HOME/server/server.token` (persisted by the CLI; rotated
+  from `$KIMI_CODE_HOME/server.token` (persisted by the CLI; rotated
   via `kimi web rotate-token`). A crashed server is detected via the child
   exit promise and surfaced as retryable `runtime.error`.
 - Sessions live in the shared Kimi store (`~/.kimi-code/sessions`); the proxy

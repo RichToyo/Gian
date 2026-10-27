@@ -777,6 +777,97 @@ function openProfile(agentId: string, path = '/tmp/fixture-runtime'): import('@g
   };
 }
 
+test('new managed launches and inspection select the active exact tuple, not the newer current Proxy', async () => {
+  const pluginId = parseProxyPluginId('io.gian.fixture');
+  const active: ManagedRuntimeGeneration = {
+    schemaVersion: 1, generationId: 'old-certified', pluginId, platform: 'darwin-arm64',
+    proxy: {
+      pluginVersion: '1.0.0', manifestSha256: '1'.repeat(64), artifactSha256: '2'.repeat(64),
+      entryPath: '/tmp/old-proxy.mjs', processScope: 'session', protocolRange: '^2.2',
+    },
+    runtime: {
+      runtimeId: 'fixture-runtime', version: '1.0.0', artifactSha256: '3'.repeat(64),
+      entryPath: '/tmp/old-cli', ownership: 'managed',
+    },
+    companions: [], certificate: { id: 'cert', sha256: '4'.repeat(64) }, state: 'active',
+    installedAt: '2026-09-01T00:00:00.000Z', activatedAt: '2026-09-01T00:00:00.000Z',
+  };
+  const agent: UserAgent = {
+    id: 'new-agent', name: 'Fixture', pluginId, proxy: null, cliPath: null,
+    defaults: { model: '', thinking: '', mode: '', options: {} },
+  };
+  let currentCalls = 0;
+  let exactCalls = 0;
+  const paths: Array<string | null> = [];
+  const launch = fakeExternalLaunch(pluginId, '1.0.0', active.proxy.manifestSha256, active.proxy.entryPath);
+  const options = {
+    resolveCurrent: async () => {
+      currentCalls += 1;
+      return fakeExternalLaunch(pluginId, '2.0.0', '9'.repeat(64), '/tmp/new-proxy.mjs');
+    },
+    resolveActiveGeneration: async () => active,
+    resolveExact: async (input: { pluginId: string; pluginVersion: string; expectedManifestSha256: string }) => {
+      exactCalls += 1;
+      assert.deepEqual(input, { pluginId, pluginVersion: '1.0.0', expectedManifestSha256: active.proxy.manifestSha256 });
+      return launch;
+    },
+    runtimeResolver: {
+      resolve: async (input: { agentId: string; selectedPath: string | null }) => {
+        paths.push(input.selectedPath);
+        return {
+          profile: openProfile(input.agentId, input.selectedPath!),
+          lease: { binaryPath: input.selectedPath!, version: '1.0.0', source: 'managed' as const,
+            env: Object.freeze({}), release: async () => {} },
+        };
+      },
+    } as unknown as RuntimeResolver,
+  };
+  const prepared = await new SessionBindingPlanner(options).prepareCurrent({
+    agent, selectedPath: '/tmp/stale-status-cli',
+  });
+  assert.equal(prepared.sessionBinding.pluginVersion, '1.0.0');
+  assert.deepEqual(paths, ['/tmp/old-cli']);
+  assert.equal(currentCalls, 0);
+  assert.equal(exactCalls, 1);
+  await prepared.releaseUnusedLease();
+  let releasedMismatch = false;
+  await assert.rejects(new SessionBindingPlanner({
+    ...options,
+    runtimeResolver: {
+      resolve: async () => ({
+        profile: { ...openProfile(agent.id, '/tmp/old-cli'), version: '2.0.0' },
+        lease: { binaryPath: '/tmp/old-cli', version: '2.0.0', source: 'managed',
+          env: Object.freeze({}), release: async () => { releasedMismatch = true; } },
+      }),
+    } as unknown as RuntimeResolver,
+  }).prepareCurrent({ agent, selectedPath: '/tmp/old-cli' }),
+  (error: unknown) => error instanceof Error && 'code' in error && error.code === 'BINDING_GENERATION_MISMATCH');
+  assert.equal(releasedMismatch, true);
+  for (const mismatch of [
+    { pluginId: parseProxyPluginId('io.gian.other') },
+    { pluginVersion: '2.0.0' },
+    { manifestSha256: '9'.repeat(64) },
+    { processScope: 'shared' as const },
+  ]) {
+    await assert.rejects(new SessionBindingPlanner({
+      ...options, resolveExact: async () => ({ ...launch, ...mismatch }),
+    }).prepareCurrent({ agent, selectedPath: null }),
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'BINDING_GENERATION_MISMATCH');
+  }
+  const custom = await new SessionBindingPlanner({
+    ...options, resolveActiveGeneration: async () => { throw new Error('custom must not adopt managed Runtime'); },
+  }).prepareCurrent({ agent: { ...agent, runtime: { kind: 'custom', path: '/tmp/custom-cli' } }, selectedPath: '/tmp/old-cli' });
+  assert.equal(custom.sessionBinding.pluginVersion, '2.0.0');
+  assert.equal(sessionRuntimeCliPath(custom.sessionBinding.runtimeProfile), '/tmp/custom-cli');
+  await custom.releaseUnusedLease();
+  const fallback = await new SessionBindingPlanner({
+    ...options, resolveActiveGeneration: async () => null,
+  }).prepareCurrent({ agent, selectedPath: '/tmp/source-cli' });
+  assert.equal(fallback.sessionBinding.pluginVersion, '2.0.0');
+  assert.equal(sessionRuntimeCliPath(fallback.sessionBinding.runtimeProfile), '/tmp/source-cli');
+  await fallback.releaseUnusedLease();
+});
+
 test('resume follows the active certified Proxy and CLI without the old package', async () => {
   const pluginId = parseProxyPluginId('io.gian.fixture');
   const oldPath = '/tmp/fixture-runtime-1';

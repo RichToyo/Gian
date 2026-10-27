@@ -13,27 +13,27 @@ const repository = 'RichToyo/Gian-Proxies';
 export const proxyReleaseNotes = {
   claude: {
     id: 'claude', directory: 'claude',
-    text: 'Publish an English-only Claude Proxy from RichToyo with MCP SDK 1.32.0 and bounded HTTP input before SDK validation. Retain Claude Code Runtime 2.1.304 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Update the managed Claude Code Runtime to official 2.1.310 (GitHub latest v2.1.310 and npm latest; the vendor /stable pointer still reads 2.1.308, recorded as a lagging rolling pointer, not prerelease evidence). Match the official manifest SHA-256 and size and verify the nine selected startup flags. Retain MCP SDK 1.32.0 and bounded HTTP input. The 2.1.310 changelog review found no documented headless spawn/wire compatibility changes. Exact artifacts pass hosted qualification; authenticated Provider turns and App/Desktop acceptance are not claimed.',
   },
   codex: {
     id: 'codex', directory: 'codex',
-    text: 'Publish an English-only Codex Proxy from RichToyo, including the managed gian-session Skill. Retain Codex CLI 0.163.0 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Republish the Codex Proxy at 0.3.9 with the shared security repair set: Proxy Protocol SDK 1.0.3 (zod exactly 4.6.6, wire unchanged), body-parser 2.4.0 and undici 8.12.2. The verified Codex CLI Runtime stays 0.164.0. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   dsh: {
     id: 'ai.deepseek.harness', directory: 'ai.deepseek.harness',
-    text: 'Publish an English-only DeepSeek Harness Proxy from RichToyo with the existing Bridge 0.1.7. Retain Runtime 0.2.1-rc.2 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Republish the DeepSeek Harness Proxy at 0.3.8 with the shared security repair set: Proxy Protocol SDK 1.0.3 (zod exactly 4.6.6, wire unchanged) and a dependency-repaired managed Runtime whose lock resolves a single zod 4.6.7 and undici 8.12.2 (CLI stays 0.2.1-rc.2; the repaired bytes live under the new 0.3.8 tag, never overwriting 0.3.7). Bundled Bridge remains 0.1.7. Exact artifacts pass hosted qualification; real Provider turns are not claimed.',
   },
   kimi: {
     id: 'kimi', directory: 'kimi',
-    text: 'Publish an English-only Kimi Proxy from RichToyo. Retain Kimi Code Runtime 2.2.0 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Update the managed Kimi Code Runtime to official 2.3.2, matching the GitHub release asset digest. The 2.3.1-to-2.3.2 diff touches no kap-server file, so the transport/API is unchanged; shared agent-core tool-driven swarm entry is disabled until the user enables swarm mode (swarmService.enter("tool") throws, AgentSwarm resolve/execute return isError when inactive, transcript folding ignores tool-triggered activation), which can affect web-runtime behavior - this Proxy declares and enables no swarm policy and its generic isError/replay handling stays compatible. A bounded no-Provider native probe confirms 2.3.2 reports 2.3.2, serves the same 112 REST paths and the production token layout (raw evidence preserved). Exact artifacts pass hosted qualification; real Provider turns are not claimed.',
   },
   grok: {
     id: 'grok', directory: 'grok',
-    text: 'Publish an English-only Grok Proxy from RichToyo. Retain Grok CLI 1.0.62 and the existing wire protocol. Native approval behavior under auto/always_approve remains unverified without an authenticated session. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Update the managed Grok CLI to official stable 1.0.70 (x.ai/cli stable, the official GCS mirror and npm latest agree; downloaded bytes are byte-identical across both sources). Verify the spawn flags and ACP initialize contract on the new binary (agentVersion 1.0.70, grokShell; session creation stays auth-gated, raw evidence preserved). Per-version 1.0.68-1.0.70 release notes remain NOT_OBSERVED in the accessible official changelog. Exact artifacts pass hosted qualification; native authenticated approval behavior remains unverified.',
   },
   antigravity: {
     id: 'io.gian.antigravity', directory: 'io.gian.antigravity',
-    text: 'Publish an English-only Antigravity Proxy from RichToyo. Retain the official ACP Runtime 1.4.1 and the existing wire protocol. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Update the upstream Antigravity ACP Runtime to 1.4.3, the current ACP registry version. The official dl.google.com ZIP passes strict production pair validation with pinned bytes; a bounded no-credential ACP initialize reports antigravity-acp 1.4.3 with a capability shape identical to 1.4.1 (raw old/new evidence retained). Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
   },
   zcode: {
     id: 'com.zhipu.zcode', directory: 'com.zhipu.zcode',

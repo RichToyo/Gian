@@ -47,6 +47,19 @@ function generation(root: string, proxyEntry: string, cliEntry: string): Managed
   };
 }
 
+test('source-first Dev never consults an installed active-generation store', () => {
+  const context = {
+    options: {
+      managedProxies: false,
+      generationStore: {
+        hasPendingActivation: () => { throw new Error('must not consult installed generations'); },
+        activeCached: () => { throw new Error('must not consult installed generations'); },
+      },
+    },
+  } as unknown as AgentManager;
+  assert.equal(AgentManager.prototype.activeRuntimeGeneration.call(context, 'claude'), null);
+});
+
 test('managed Agents share one certified Runtime while native and isolated HOMEs stay separate', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-managed-agent-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -128,6 +141,11 @@ test('managed Agents share one certified Runtime while native and isolated HOMEs
   assert.equal(persisted.schemaVersion, 6);
   assert.equal('cliPath' in persisted.agents[0]!, false);
   assert.deepEqual(persisted.agents.map(item => item.home), [first.home, second.home]);
+  manager.trustedLaunch = async () => { throw new Error('newer current pointer must not affect active status'); };
+  const activeStatus = await manager.agentStatus(first.id, true);
+  assert.equal(activeStatus.ready, true);
+  assert.equal(activeStatus.plugin.version, candidate.proxy.pluginVersion);
+  assert.equal(activeStatus.cli.path, cliEntry);
 });
 
 test('a provisioned GianDev CLI is ready when no certified generation is active', async t => {

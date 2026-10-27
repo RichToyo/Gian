@@ -15,3 +15,4 @@ export {
   RUNTIME_BOOTSTRAP_ENV,
   RUNTIME_BOOTSTRAP_VALUE,
 } from './constants.js';
+export { hasBoundQuotaHome, quotaIdentity, quotaState, quotaFailure } from './official-quota-control.js';

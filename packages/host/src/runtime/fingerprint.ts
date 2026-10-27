@@ -5,7 +5,7 @@ import { dirname, relative, resolve, sep } from 'node:path';
 
 import { isCanonicalAbsolutePath } from '@gian/shared';
 
-import { readRuntimeArtifactReceipt } from './artifact-reuse.js';
+import { ownedRuntimeDirectory, readRuntimeArtifactReceipt } from './artifact-reuse.js';
 import {
   assertAuthorizedFilesystemIdentity,
   authorizedConfigHomeDir,
@@ -49,6 +49,9 @@ export type RuntimeContentRoot = {
   path: string;
   mode: 'file' | 'directory';
 };
+
+/** Ephemeral Host installer evidence, never a Proxy-provided probe field. */
+export type RuntimeStagingInventory = { directory: string; files: readonly string[] };
 
 export class RuntimeFingerprintError extends Error {
   readonly code: string;
@@ -154,6 +157,42 @@ async function verifiedManagedFileRoots(input: {
   return new Set(relatives.keys());
 }
 
+async function verifiedStagingFileRoots(input: {
+  selectedPath: string;
+  contentRoots: readonly RuntimeContentRoot[];
+  managedStoreRoot?: string;
+  staging?: RuntimeStagingInventory;
+}): Promise<Set<string> | null> {
+  const store = input.managedStoreRoot;
+  const staging = input.staging;
+  if (!store || !staging || !isCanonicalAbsolutePath(store)
+    || !isCanonicalAbsolutePath(staging.directory)
+    || dirname(staging.directory) !== store
+    || !/^\.staging-[0-9a-f-]{36}$/.test(relative(store, staging.directory))
+    || staging.files.length > MAX_MANAGED_RUNTIME_FINGERPRINT_FILES
+    || input.contentRoots.length < 2
+    || input.contentRoots.some(root => root.mode !== 'file')) return null;
+  try {
+    if (!await ownedRuntimeDirectory(store, staging.directory)) return null;
+    const allowed = new Set(staging.files);
+    const roots = new Set<string>();
+    for (const root of input.contentRoots) {
+      if (!isCanonicalAbsolutePath(root.path) || !isContained(staging.directory, root.path)) return null;
+      const rel = posixRelative(staging.directory, root.path);
+      if (!rel || !allowed.has(rel)) return null;
+      if (dirname(root.path) !== staging.directory
+        && !await ownedRuntimeDirectory(staging.directory, dirname(root.path))) return null;
+      const info = await lstat(root.path);
+      if (!info.isFile() || info.isSymbolicLink()
+        || await realpath(root.path) !== resolve(await realpath(staging.directory), rel)) return null;
+      roots.add(root.path);
+    }
+    return roots.has(input.selectedPath) ? roots : null;
+  } catch {
+    return null;
+  }
+}
+
 function countEntry(budget: FingerprintBudget): void {
   budget.entries += 1;
   const maxEntries = budget.maxEntries ?? MAX_RUNTIME_FINGERPRINT_ENTRIES;
@@ -243,6 +282,7 @@ async function walkDirectory(
   depth: number,
   budget: FingerprintBudget,
   parts: string[],
+  allowedFiles?: ReadonlySet<string>,
 ): Promise<void> {
   const maxDepth = budget.maxDepth ?? MAX_RUNTIME_FINGERPRINT_DEPTH;
   if (depth > maxDepth) {
@@ -274,7 +314,7 @@ async function walkDirectory(
     countEntry(budget);
     if (info.isDirectory()) {
       parts.push(`dir:${relative(root, child) || '.'}`);
-      await walkDirectory(root, child, depth + 1, budget, parts);
+      await walkDirectory(root, child, depth + 1, budget, parts, allowedFiles);
       continue;
     }
     if (!info.isFile()) {
@@ -282,6 +322,9 @@ async function walkDirectory(
         'RUNTIME_ROOT_INVALID',
         `Runtime content root is not a regular file: ${child}`,
       );
+    }
+    if (allowedFiles && !allowedFiles.has(child)) {
+      throw new RuntimeFingerprintError('RUNTIME_ROOT_INVALID', `Runtime staging file was not inventoried: ${child}`);
     }
     budget.files += 1;
     const maxFiles = budget.maxFiles ?? MAX_RUNTIME_FINGERPRINT_FILES;
@@ -309,6 +352,7 @@ async function fingerprintRoot(
   selectedPath: string,
   allowSelectedLauncherSymlink: boolean,
   budget: FingerprintBudget,
+  allowedFiles?: ReadonlySet<string>,
 ): Promise<string[]> {
   let info: Stats;
   try {
@@ -383,7 +427,7 @@ async function fingerprintRoot(
   }
   countEntry(budget);
   const parts = [`dir:${root.path}`];
-  await walkDirectory(root.path, root.path, 0, budget, parts);
+  await walkDirectory(root.path, root.path, 0, budget, parts, allowedFiles);
   return parts;
 }
 
@@ -393,6 +437,7 @@ export async function hostRuntimeFingerprint(input: {
   contentRoots: readonly RuntimeContentRoot[];
   homeDir?: string;
   managedStoreRoot?: string;
+  staging?: RuntimeStagingInventory;
 }): Promise<string> {
   assertCanonicalPath(input.selectedPath, 'selected Runtime path');
   const homeDir = input.homeDir ?? authorizedConfigHomeDir();
@@ -422,7 +467,7 @@ export async function hostRuntimeFingerprint(input: {
   const sorted = [...input.contentRoots].sort((left, right) => left.path.localeCompare(right.path));
   const parts: string[] = [];
   const budget = { files: 0, bytes: 0, entries: 0 };
-  const managedFiles = await verifiedManagedFileRoots(input);
+  const managedFiles = await verifiedStagingFileRoots(input) ?? await verifiedManagedFileRoots(input);
   const managedFileBudget: FingerprintBudget | null = managedFiles
     ? {
       files: 0,
@@ -443,6 +488,23 @@ export async function hostRuntimeFingerprint(input: {
     const managedFile = managedFiles?.has(root.path) === true;
     const managedPackageRoot = !managedFile && sorted.length === 1 && root.mode === 'directory'
       && isManagedPackageRoot(root.path, input.selectedPath, input.managedStoreRoot);
+    let allowedStagingFiles: Set<string> | undefined;
+    if (managedPackageRoot && input.staging) {
+      const store = input.managedStoreRoot;
+      const staging = input.staging;
+      if (!store || dirname(staging.directory) !== store
+        || !/^\.staging-[0-9a-f-]{36}$/.test(relative(store, staging.directory))
+        || !isContained(staging.directory, root.path)
+        || staging.files.length > MAX_MANAGED_RUNTIME_FINGERPRINT_FILES
+        || !await ownedRuntimeDirectory(store, staging.directory)
+        || !await ownedRuntimeDirectory(staging.directory, root.path)) {
+        throw new RuntimeFingerprintError('RUNTIME_ROOT_INVALID', 'Runtime staging directory is not owned.');
+      }
+      allowedStagingFiles = new Set(staging.files.map(path => resolve(staging.directory, path)));
+      if (!allowedStagingFiles.has(input.selectedPath)) {
+        throw new RuntimeFingerprintError('RUNTIME_ROOT_INVALID', 'Runtime staging entry was not inventoried.');
+      }
+    }
     if (!managedPackageRoot && !managedFile && !isAnchored(root.path, input.selectedPath, input.configHome)) {
       throw new RuntimeFingerprintError(
         'RUNTIME_ROOT_ESCAPE',
@@ -475,7 +537,7 @@ export async function hostRuntimeFingerprint(input: {
       : isSelectedLauncher
       ? { files: 0, bytes: 0, entries: 0, maxBytes: MAX_RUNTIME_LAUNCHER_BYTES }
       : budget;
-    parts.push(...await fingerprintRoot(root, input.selectedPath, !managedFile, rootBudget));
+    parts.push(...await fingerprintRoot(root, input.selectedPath, !managedFile, rootBudget, allowedStagingFiles));
   }
   return createHash('sha256').update(parts.join('\n')).digest('hex');
 }

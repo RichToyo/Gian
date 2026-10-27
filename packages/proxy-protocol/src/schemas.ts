@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 
 import { z } from 'zod';
 import { runtimeInstallPlanParamsSchema, runtimeInstallPlanResultSchema } from './runtime-install.js';
+import { officialQuotaReadParamsSchema, officialQuotaReadResultSchema } from './official-quota.js';
 
 import {
   ACTIVITY_STATUSES,
@@ -867,6 +868,7 @@ export const proxyRequestSchema = z.discriminatedUnion('method', [
   requestSchema('runtime.install.plan', runtimeInstallPlanParamsSchema),
   requestSchema('customization.list', customizationListParamsSchema),
   requestSchema('customization.detail', customizationDetailParamsSchema),
+  requestSchema('account.quota.read', officialQuotaReadParamsSchema),
 ]);
 
 export const runtimeErrorSchema = z.strictObject({
@@ -1419,6 +1421,7 @@ export const resultSchemas = {
   'runtime.install.plan': runtimeInstallPlanResultSchema,
   'customization.list': customizationListResultSchema,
   'customization.detail': customizationDetailResultSchema,
+  'account.quota.read': officialQuotaReadResultSchema,
 } as const;
 
 export type ManifestV2 = z.infer<typeof manifestV2Schema>;

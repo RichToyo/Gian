@@ -1,5 +1,12 @@
 # Proxy Protocol Changelog
 
+## 1.0.4
+
+- Add the optional read-only official-account quota capability and validated
+  quota request/result exports, including explicit CLI-account provenance.
+- Keep existing wire-version negotiation and published 1.0.3 package bytes
+  unchanged. Quota reads do not accept prompts, credentials or arbitrary URLs.
+
 ## 1.0.3
 
 - Pin Zod 4.6.6 to address GHSA-mrhx-c7xc-m3w5.

@@ -175,6 +175,13 @@ export function AgentsView({ ws, terminalPreferences, focusAgent }: {
     setError('');
     const settled: OperationRun = await waitForRunSettle(store, dispatch(name, input).id);
     if (settled.phase === 'confirmed') {
+      if (name === 'agent.patch' && input !== null && typeof input === 'object' && 'patch' in input
+        && input.patch && typeof input.patch === 'object'
+        && Object.keys(input.patch).every(key => ['defaults', 'name', 'enabled'].includes(key))) {
+        const updated = settled.result as UserAgentStatus;
+        setAgents(current => current.map(agent => agent.id === updated.id ? updated : agent));
+        return true;
+      }
       await refresh();
       return true;
     }
