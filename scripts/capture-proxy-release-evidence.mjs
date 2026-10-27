@@ -13,27 +13,27 @@ const repository = 'RichToyo/Gian-Proxies';
 export const proxyReleaseNotes = {
   claude: {
     id: 'claude', directory: 'claude',
-    text: 'Update the managed Claude Code Runtime to official 2.1.310 (GitHub latest v2.1.310 and npm latest; the vendor /stable pointer still reads 2.1.308, recorded as a lagging rolling pointer, not prerelease evidence). Match the official manifest SHA-256 and size and verify the nine selected startup flags. Retain MCP SDK 1.32.0 and bounded HTTP input. The 2.1.310 changelog review found no documented headless spawn/wire compatibility changes. Exact artifacts pass hosted qualification; authenticated Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Add first-party account quota inspection for the Gian menu bar and preserve cumulative usage identity for local Token statistics. Use Proxy Protocol SDK 1.0.4 and retain Claude Code 2.1.310. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   codex: {
     id: 'codex', directory: 'codex',
-    text: 'Republish the Codex Proxy at 0.3.9 with the shared security repair set: Proxy Protocol SDK 1.0.3 (zod exactly 4.6.6, wire unchanged), body-parser 2.4.0 and undici 8.12.2. The verified Codex CLI Runtime stays 0.164.0. Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Add read-only ChatGPT subscription quota inspection through the bound Codex account, without sending a model prompt. Use Proxy Protocol SDK 1.0.4 and retain Codex CLI 0.164.0. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   dsh: {
     id: 'ai.deepseek.harness', directory: 'ai.deepseek.harness',
-    text: 'Republish the DeepSeek Harness Proxy at 0.3.8 with the shared security repair set: Proxy Protocol SDK 1.0.3 (zod exactly 4.6.6, wire unchanged) and a dependency-repaired managed Runtime whose lock resolves a single zod 4.6.7 and undici 8.12.2 (CLI stays 0.2.1-rc.2; the repaired bytes live under the new 0.3.8 tag, never overwriting 0.3.7). Bundled Bridge remains 0.1.7. Exact artifacts pass hosted qualification; real Provider turns are not claimed.',
+    text: 'Add official DeepSeek balance inspection and step-level usage identity for local Token statistics. Use Proxy Protocol SDK 1.0.4 and bundled Bridge 0.1.8; retain the dependency-repaired DeepSeek Harness 0.2.1-rc.2 Runtime. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   kimi: {
     id: 'kimi', directory: 'kimi',
-    text: 'Update the managed Kimi Code Runtime to official 2.3.2, matching the GitHub release asset digest. The 2.3.1-to-2.3.2 diff touches no kap-server file, so the transport/API is unchanged; shared agent-core tool-driven swarm entry is disabled until the user enables swarm mode (swarmService.enter("tool") throws, AgentSwarm resolve/execute return isError when inactive, transcript folding ignores tool-triggered activation), which can affect web-runtime behavior - this Proxy declares and enables no swarm policy and its generic isError/replay handling stays compatible. A bounded no-Provider native probe confirms 2.3.2 reports 2.3.2, serves the same 112 REST paths and the production token layout (raw evidence preserved). Exact artifacts pass hosted qualification; real Provider turns are not claimed.',
+    text: 'Add official-account quota inspection through the local Kimi server API. Record authoritative live cumulative usage without emitting placeholder session totals at finalization. Use Proxy Protocol SDK 1.0.4 and retain Kimi Code 2.3.2. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   grok: {
     id: 'grok', directory: 'grok',
-    text: 'Update the managed Grok CLI to official stable 1.0.70 (x.ai/cli stable, the official GCS mirror and npm latest agree; downloaded bytes are byte-identical across both sources). Verify the spawn flags and ACP initialize contract on the new binary (agentVersion 1.0.70, grokShell; session creation stays auth-gated, raw evidence preserved). Per-version 1.0.68-1.0.70 release notes remain NOT_OBSERVED in the accessible official changelog. Exact artifacts pass hosted qualification; native authenticated approval behavior remains unverified.',
+    text: 'Add first-party Grok account and billing inspection through prefixed native ACP extension methods, without creating a session or sending a prompt. Use Proxy Protocol SDK 1.0.4 and retain Grok CLI 1.0.70. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   antigravity: {
     id: 'io.gian.antigravity', directory: 'io.gian.antigravity',
-    text: 'Update the upstream Antigravity ACP Runtime to 1.4.3, the current ACP registry version. The official dl.google.com ZIP passes strict production pair validation with pinned bytes; a bounded no-credential ACP initialize reports antigravity-acp 1.4.3 with a capability shape identical to 1.4.1 (raw old/new evidence retained). Exact artifacts pass hosted qualification; real Provider turns and App/Desktop acceptance are not claimed.',
+    text: 'Add read-only quota inspection for the separate official Antigravity CLI account and normalize supported native quota groups. Preserve observed token usage and match managed staging inventories to their actual fingerprints. Use Proxy Protocol SDK 1.0.4 and retain ACP Runtime 1.4.3. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   zcode: {
     id: 'com.zhipu.zcode', directory: 'com.zhipu.zcode',
@@ -153,7 +153,7 @@ function capture(sequence, certificatePath, baseIndexPath, releaseDir, providers
           basis: 'verified-declaration',
         },
         companionDeclarations: provider === 'dsh'
-          ? [{ id: '@gian/dsh-bridge', version: '0.1.7', basis: 'bundled-package-source' }]
+          ? [{ id: '@gian/dsh-bridge', version: '0.1.8', basis: 'bundled-package-source' }]
           : [],
         protocolRange: manifest.protocol.range,
         manifestSchema: manifest.schemaVersion,

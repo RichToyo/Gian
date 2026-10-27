@@ -26,5 +26,5 @@ export function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.3.10-Dev';
+  return '0.3.10';
 }
