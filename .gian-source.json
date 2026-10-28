@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "4249b89018b36b8554c4753c99491e96f41d910a",
+  "sourceCommit": "f1922d0ac194490d47e8504c410d785864de914d",
   "workingTree": false,
   "files": [
     {
@@ -4034,7 +4034,7 @@
     {
       "path": "packages/host/test/menubar-quota.test.ts",
       "mode": 420,
-      "sha256": "b539eb9760930aa4f484864407cbf0682cb0ded70e3ab56b4899edbd05d4dc01"
+      "sha256": "9b83f21e4597a84d7fb0d2c20b73381cc767fdf9424ad1e4486cd517d641c68f"
     },
     {
       "path": "packages/host/test/menubar-range.test.ts",

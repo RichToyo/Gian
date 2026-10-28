@@ -429,7 +429,8 @@ describe('menubar official quota orchestration (synthetic, no Provider)', () => 
     let now = 100;
     let calls = 0;
     let failure: QuotaReadError | null = null;
-    const service = new OfficialQuotaService(async () => [binding(async () => { calls++; if (failure) throw failure; return data; })], () => now);
+    let currentData = data;
+    const service = new OfficialQuotaService(async () => [binding(async () => { calls++; if (failure) throw failure; return currentData; })], () => now);
     await service.refresh('a1');
     now = 10_000;
     failure = new QuotaReadError('rate_limited', 60_000);
@@ -443,7 +444,14 @@ describe('menubar official quota orchestration (synthetic, no Provider)', () => 
     now += OFFICIAL_QUOTA_INTERVAL_MS;
     await service.refreshDue(); assert.equal(calls, 3, 'sign-in failures do not trigger background login attempts');
     failure = null;
-    assert.equal((await service.refresh('a1')).accounts[0]?.status, 'ready');
+    currentData = { ...data, windows: data.windows.map(window => ({
+      ...window, usedRatio: 0.25, resetAt: now + window.windowDurationMinutes * 60_000,
+    })) };
+    const recovered = (await service.refresh('a1')).accounts[0];
+    assert.equal(recovered?.status, 'ready');
+    assert.equal(recovered?.freshness, 'fresh');
+    assert.equal(recovered?.fetchedAt, now);
+    assert.deepEqual(recovered?.windows, currentData.windows);
     assert.equal(calls, 4, 'manual refresh rechecks after native sign-in');
   });
   it('never publishes an uninstalled or switched binding late result', async () => {
