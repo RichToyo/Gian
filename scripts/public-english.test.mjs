@@ -126,7 +126,6 @@ test('publication workflows scan the exact revision before upload or deploy', ()
     ['delivery/proxies/.github/workflows/catalog.yml', ['release-product.mjs catalog']],
     ['delivery/proxies/.github/workflows/catalog-docs.yml', ['release-product.mjs catalog']],
     ['delivery/remote/.github/workflows/release.yml', ['docker save', 'gh release create']],
-    ['delivery/remote/.github/workflows/deploy.yml', ['scripts/deploy-ssh.mjs']],
   ];
   for (const [path, markers] of publications) {
     if (!privateCheckout && !isPublicPath(path)) {
@@ -171,4 +170,26 @@ test('publication workflows scan the exact revision before upload or deploy', ()
   const english = read('.github/workflows/public-english.yml');
   assert.equal(english, read('delivery/proxies/.github/workflows/public-english.yml'));
   assert.equal(english, read('delivery/remote/.github/workflows/public-english.yml'));
+});
+
+test('retired Remote deployment workflow only prints local instructions and fails', () => {
+  const workflow = readFileSync(new URL('../delivery/remote/.github/workflows/deploy.yml', import.meta.url), 'utf8');
+  // Pin the complete inert workflow so new jobs, actions or shell operations
+  // cannot silently turn the retired entry point back into a deployment.
+  assert.equal(workflow, `name: Deploy Remote (retired)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  local-deployment-required:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Hosted deployment is disabled
+        run: |
+          echo 'Remote deployment is now an explicit local download/upload step.'
+          echo 'Use scripts/deploy-ssh.mjs from a current source checkout; see README.md.'
+          echo 'This workflow performs no SSH, registry pull or service operation.'
+          exit 1
+`);
 });

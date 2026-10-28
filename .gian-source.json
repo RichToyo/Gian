@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "cfe294f70e009574bb793fc1497c7c4cdc56557b",
+  "sourceCommit": "99e92628b594d38bec97a5462016c8b4cc573fcd",
   "workingTree": false,
   "files": [
     {
@@ -10049,7 +10049,7 @@
     {
       "path": "packages/web/test/menubar-todo.test.tsx",
       "mode": 420,
-      "sha256": "e5dc874e9da56e57f2f3cc945b72310a5856fe5f5ae7ef769ae2c0a0ecd40c43"
+      "sha256": "267a2d5aa9d910bec8a28ddc2271a6498e942777e52d5223e91b1ccb0962adfe"
     },
     {
       "path": "packages/web/test/native-sessions.test.tsx",
@@ -10319,7 +10319,7 @@
     {
       "path": "packages/web/test/session-navigation-entry.test.tsx",
       "mode": 420,
-      "sha256": "31063507a657c6d4ccc2e64df220e05456a0cbc8d2e73802630b5cf51770cbb5"
+      "sha256": "10d96a3a25342dcbf84070cf6b030da40691b314677e6757b337a318e32cfed2"
     },
     {
       "path": "packages/web/test/session-overlays.test.ts",
@@ -11179,7 +11179,7 @@
     {
       "path": "scripts/public-english.test.mjs",
       "mode": 420,
-      "sha256": "60e836d96777e05a0ecbd01e11a03e8feda46dae5471e696ad47cf7c95006783"
+      "sha256": "62e369639b0c17aeb0ff3783ed92f9e7f84ed0f126e7530346da7463df0c90a7"
     },
     {
       "path": "scripts/quality-lock.mjs",

@@ -45,8 +45,18 @@ describe('TodoSection', () => {
   });
 
   it('uses the generic bot mark when the Agent identity is unknown', () => {
-    const { container } = renderSection({ expanded: true });
-    expect(container.querySelectorAll('.mb-agent-generic')).toHaveLength(2);
+    const items = [
+      makeTodo({ sessionId: 'known', pluginId: 'codex', agentId: 'codex' }),
+      makeTodo({ sessionId: 'missing-agent', pluginId: null, agentId: null }),
+    ];
+    const { container } = renderSection({ items, total: items.length, expanded: true });
+    const rows = container.querySelectorAll('.mb-todo');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelector('.mb-agent-generic')).toBeNull();
+    expect(rows[0].querySelector('.mb-t-ico img')?.getAttribute('src')).toBe('/api/proxies/codex/logo/light');
+    expect(rows[1].querySelector('.mb-agent-generic svg')).not.toBeNull();
+    expect(rows[1].querySelector('.mb-t-ico img')).toBeNull();
+    expect(container.querySelectorAll('.mb-agent-generic')).toHaveLength(1);
   });
 
   it('shows all status words in neutral English', () => {

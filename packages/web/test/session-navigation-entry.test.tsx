@@ -1669,6 +1669,8 @@ describe('P1a session navigation entries', () => {
       await waitFor(() => expect(scrolledWhileHidden.length).toBeGreaterThan(0), { timeout: 3000 });
       expect(scrolledWhileHidden.every(concealed => concealed === false)).toBe(true);
     } finally {
+      // Unsubscribe mounted components before restoring browser-API mocks.
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -1698,6 +1700,7 @@ describe('P1a session navigation entries', () => {
       await waitFor(() => expect(scrolledWhileHidden.length).toBeGreaterThan(0), { timeout: 3000 });
       expect(scrolledWhileHidden.every(concealed => concealed === false)).toBe(true);
     } finally {
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -1765,6 +1768,7 @@ describe('P1a session navigation entries', () => {
       expect(workbenchSheet().style.display).not.toBe('none');
       expect(attr('data-mode')).toBe('sessions');
     } finally {
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -1804,6 +1808,7 @@ describe('P1a session navigation entries', () => {
       expect(scrolled.every(node => node.getAttribute('data-wt-id') === 'ws:workspace-nav')).toBe(true);
       expect(navigationWorktreeRow().textContent).toContain('gian-dev-release-0-6-7');
     } finally {
+      cleanup();
       releaseGitLoads();
       vi.restoreAllMocks();
     }
@@ -1850,6 +1855,7 @@ describe('P1a session navigation entries', () => {
       expect(navigationWorktreeRow().textContent).toContain('gian-dev-release-0-6-7');
       expect(attr('data-mode') === 'tasks' || attr('data-mode') === 'sessions').toBe(true);
     } finally {
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -1922,6 +1928,7 @@ describe('P1a session navigation entries', () => {
       expect(realGetElementById('settings-control-chat.fontSize')).not.toBeNull();
       expect(workbenchSheet().style.display).not.toBe('none');
     } finally {
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -1964,6 +1971,7 @@ describe('P1a session navigation entries', () => {
       expect(fontScrolls).toEqual([]);
       expect(realGetElementById('settings-control-chat.fontSize')).not.toBeNull();
     } finally {
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -2005,6 +2013,7 @@ describe('P1a session navigation entries', () => {
       expect(realGetElementById('settings-control-chat.fontSize')).not.toBeNull();
       expect(workbenchSheet().style.display).not.toBe('none');
     } finally {
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -2080,6 +2089,7 @@ describe('P1a session navigation entries', () => {
       await waitFor(() => expect(fontScrolls).toEqual(['visible']));
       expect(livePolls.size).toBe(0);
     } finally {
+      cleanup();
       vi.restoreAllMocks();
     }
   });
@@ -2153,6 +2163,7 @@ describe('P1a session navigation entries', () => {
       await user.click(await screen.findByRole('button', { name: /^Font size/ }));
       await waitFor(() => expect(fontScrolls).toEqual(['visible']));
     } finally {
+      cleanup();
       for (const entry of held) realClearTimeout(entry.id);
       vi.restoreAllMocks();
     }
