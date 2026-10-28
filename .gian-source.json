@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "f1922d0ac194490d47e8504c410d785864de914d",
+  "sourceCommit": "e8a2202e45f528fc89e01d46fa03e88fc4382a90",
   "workingTree": false,
   "files": [
     {
@@ -489,7 +489,7 @@
     {
       "path": "catalog/proxy-information/evidence/current-combinations.json",
       "mode": 420,
-      "sha256": "e50c2617a076fa750e3f2e17cd27c28615d419181594af5887620f25f86ef122"
+      "sha256": "fe64ec49bff79191f54b30e3e9f430d65cd13b0cfcf3c158c0db2f0b357b266e"
     },
     {
       "path": "catalog/proxy-information/evidence/dsh-bridge-versions.json",
@@ -499,7 +499,7 @@
     {
       "path": "catalog/proxy-information/evidence/manifests.json",
       "mode": 420,
-      "sha256": "7fec71b252e8ba76094aa80273390e002a115eda4ea103145324791600d32ad6"
+      "sha256": "af1714e9f36c3330d76252246d1e25aef1329f9a4da416353b191e9ffe1f39b2"
     },
     {
       "path": "catalog/proxy-information/evidence/README.md",
@@ -509,7 +509,7 @@
     {
       "path": "catalog/proxy-information/evidence/releases.json",
       "mode": 420,
-      "sha256": "c2decf04f9bbd9e7b21796e83c0c8eede83c9ceb3405b406df93fba2356c6405"
+      "sha256": "f34f580f18cdb158fdc5e0cd84b4826b07a025b2c78a5d3682b54ff1923c0050"
     },
     {
       "path": "catalog/proxy-information/grok/basic.md",
@@ -559,12 +559,12 @@
     {
       "path": "catalog/proxy-information/kimi/changelog.json",
       "mode": 420,
-      "sha256": "311f4fc6cb653b6d75dcc6c40cd0ced072c00fc6ec67d74592a2448202237e1f"
+      "sha256": "ffb8f60262783cc4adc5c188d28d3c7f3f5092140dc889f8b1a50b6d7937f007"
     },
     {
       "path": "catalog/proxy-information/kimi/changelog.md",
       "mode": 420,
-      "sha256": "0d17c0161b7c6b656512c2e43cb7e6d077a1338182d8bf6aae49757cc7d5b444"
+      "sha256": "14f8795fe3bf41a73a80363dbf78bd2861f56b30176b1f6ca5147e94394621fc"
     },
     {
       "path": "catalog/proxy-information/kimi/tutorial.md",
@@ -584,7 +584,7 @@
     {
       "path": "catalog/proxy-information/project.test.mjs",
       "mode": 420,
-      "sha256": "53e40461b22d04cb51d7ed5e3ee7f5ba917c1343c5344bb079224af42bd1851e"
+      "sha256": "12070e4b3817716bb4652ad5585fbbdc0865cb24455f529634d2c06b33f38dfc"
     },
     {
       "path": "catalog/proxy-information/README.md",
@@ -599,7 +599,7 @@
     {
       "path": "CHANGELOG.md",
       "mode": 420,
-      "sha256": "0892651019d9f5b7623b84813842884eca0d74b56a8cba1a7346c8408f799136"
+      "sha256": "a68c7cabfcd697ae879ad6e39be3e357ecc6e56cf6f64484f43cc1a65b1ba730"
     },
     {
       "path": "CONTRIBUTING.md",
@@ -10739,12 +10739,12 @@
     {
       "path": "pnpm-lock.yaml",
       "mode": 420,
-      "sha256": "5177f278e7021d691e66ab5e1dd454c73d1d6ed855e1ce7c9633db36b835282b"
+      "sha256": "5380a10c0edf0130869f4b56242db0a9a2f930b9abce67192bf934082b51b97a"
     },
     {
       "path": "pnpm-workspace.yaml",
       "mode": 420,
-      "sha256": "e2cd0bfbf9df636c149bbbd86b4c5491b548f46d09603152b1e703befd5c6129"
+      "sha256": "bb4dc57eb36a4a395d6bc3bc325d8db8c7f090c7c5009282ee7efd180d12334f"
     },
     {
       "path": "README.md",

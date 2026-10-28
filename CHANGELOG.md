@@ -30,6 +30,8 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 
 ### Fixed
 
+- Update the App's DOMPurify and Remote schema-validation dependencies to
+  patched versions without changing protocol wire formats.
 - Resolve explicitly selected model settings before validating a new session,
   including when no Agent defaults have been saved.
 - Keep calendar-day chart labels distinct from hourly and rolling ranges,
