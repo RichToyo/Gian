@@ -774,6 +774,13 @@ test('new Sessions honor semantic and legacy approval overrides over stale prefe
     ? { ...option, modeKind: 'gian-preset' as const, defaultValue: 'ask',
       choices: ['ask', 'auto', 'full-access'].map(value => ({ value, displayName: value })) }
     : option);
+  fixture.capabilities['catalog.resolve'] = 1;
+  let resolves = 0;
+  fixture.resolve = config => {
+    resolves += 1;
+    assert.deepEqual(config.turnConfig, { model: 'fixture-model', effort: 'high', permission_mode: 'ask' });
+    return fixture.catalog;
+  };
   const h = setupOpenNativeMode('stale-mode', 'turn', fixture);
   try {
     h.agent.defaults = {
@@ -788,6 +795,9 @@ test('new Sessions honor semantic and legacy approval overrides over stale prefe
     assert.equal(session.turn_config?.permission_mode, 'ask');
     assert.equal(session.model, 'fixture-model');
     assert.equal(session.thinking_effort, 'high');
+    assert.equal(resolves, 1);
+    assert.equal(h.agent.defaults.model, 'stale-model');
+    assert.equal(h.agent.defaults.thinking, 'stale-effort');
   } finally {
     h.db.close();
     rmSync(h.dir, { recursive: true, force: true });

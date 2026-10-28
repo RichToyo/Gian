@@ -91,7 +91,9 @@ test('media review is an exact path and digest, never an extension or SVG waiver
 
 test('reviewed bytes match the manifest and private snapshots stay out', () => {
   const reviews = loadMediaReviews(readFileSync(mediaReviewPath(), 'utf8'));
-  assert.equal(reviews.size, 31);
+  assert.equal(reviews.size, 33);
+  assert.ok(reviews.has('packages/desktop/resources/gian-menubarTemplate.png'));
+  assert.ok(reviews.has('packages/desktop/resources/gian-menubarTemplate@2x.png'));
   for (const review of reviews.values()) {
     const bytes = readFileSync(new URL(`../${review.path}`, import.meta.url));
     assert.equal(createHash('sha256').update(bytes).digest('hex'), review.sha256, review.path);
@@ -123,7 +125,7 @@ test('publication workflows scan the exact revision before upload or deploy', ()
     ['delivery/proxies/.github/workflows/qualify.yml', ['actions/upload-artifact@v4']],
     ['delivery/proxies/.github/workflows/catalog.yml', ['release-product.mjs catalog']],
     ['delivery/proxies/.github/workflows/catalog-docs.yml', ['release-product.mjs catalog']],
-    ['delivery/remote/.github/workflows/release.yml', ['docker push', 'gh release create']],
+    ['delivery/remote/.github/workflows/release.yml', ['docker save', 'gh release create']],
     ['delivery/remote/.github/workflows/deploy.yml', ['scripts/deploy-ssh.mjs']],
   ];
   for (const [path, markers] of publications) {

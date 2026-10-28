@@ -1712,16 +1712,24 @@ test('Kimi applies Proxy-owned model and thinking defaults through native config
   }
 });
 
-test('Kimi skips a stale default when ACP no longer advertises that semantic role', async () => {
-  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => ({
+test('Kimi rejects a stale default when ACP no longer advertises that semantic role', async () => {
+  const defaults = {
     model: '',
     thinking: 'high',
     mode: '',
-  }));
+  };
+  const savedDefaults = structuredClone(defaults);
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => defaults);
+  const sessionId = randomUUID();
   try {
-    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
-    assert.deepEqual(session.executor_config.values, { mode: 'default' });
-    assert.equal(proxyMgr.client.lastCreateParams?.sessionConfig?.thinking, undefined);
+    await assert.rejects(sessions.createSession({ id: sessionId, workspace_id: wsId, executor: 'kimi' }),
+      (error: unknown) => error instanceof Error && 'code' in error
+        && error.code === 'CONFIG_VALUE_INVALID' && /no advertised selector/.test(error.message));
+    assert.equal(proxyMgr.client.lastCreateParams, null);
+    assert.deepEqual(proxyMgr.disposeCalls, [sessionId]);
+    assert.equal(proxyMgr.get(), undefined);
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number }).count, 0);
+    assert.deepEqual(defaults, savedDefaults);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -4341,6 +4349,10 @@ test('setModel atomically re-resolves effort for catalog-capable proxies', async
         thinking_effort: 'low',
         session_config: { sandbox_profile: 'workspace' },
       });
+    assert.equal(proxyMgr.client.resolveCalls.length, 1);
+    assert.deepEqual(proxyMgr.client.resolveCalls[0]?.sessionConfig, { sandbox_profile: 'workspace' });
+    assert.deepEqual(proxyMgr.client.resolveCalls[0]?.turnConfig, { model: 'gpt-fast' });
+    const resolvesBeforeSetModel = proxyMgr.client.resolveCalls.length;
       sessions.persistTurnConfigOptions(session.id, catalogOptions, 'rev-1');
     // The stale low effort survives until the model switch — exactly the
     // production defect (k3 low → kimi-for-coding on).
@@ -4375,8 +4387,9 @@ test('setModel atomically re-resolves effort for catalog-capable proxies', async
     );
 
     // The resolve request carried the target model WITHOUT the stale effort.
-    assert.equal(proxyMgr.client.resolveCalls.length, 1);
-    assert.deepEqual(proxyMgr.client.resolveCalls[0]?.turnConfig, { model: 'gpt-standard' });
+    const modelResolves = proxyMgr.client.resolveCalls.slice(resolvesBeforeSetModel);
+    assert.equal(modelResolves.length, 1);
+    assert.deepEqual(modelResolves[0]?.turnConfig, { model: 'gpt-standard' });
 
     // Exactly one canonical session:updated carrying every changed field.
     const modelBroadcasts = broadcaster.messages
@@ -4391,7 +4404,7 @@ test('setModel atomically re-resolves effort for catalog-capable proxies', async
     assert.equal(fields.thinking_effort, 'medium');
     assert.deepEqual(fields.turn_config, { model: 'gpt-standard', thinking: 'medium' });
     assert.deepEqual((fields.turn_config_options as Array<{ id: string }>).map(option => option.id), ['model', 'thinking']);
-    assert.deepEqual(proxyMgr.client.resolveCalls[0]?.sessionConfig, { sandbox_profile: 'workspace' });
+    assert.deepEqual(modelResolves[0]?.sessionConfig, { sandbox_profile: 'workspace' });
     await sessions.sendMessage(session.id, 'after model switch');
     assert.deepEqual(proxyMgr.client.startTurnCalls.at(-1)?.config, { model: 'gpt-standard', thinking: 'medium' });
     assert.equal(typeof fields.turn_config_revision, 'string');
@@ -4446,8 +4459,8 @@ test('legacy mixed-binding turn snapshots cannot dispatch or persist immutable s
 });
 
 
-for (const thinking of ['on', 'off'] as const) {
-  test(`first non-default model turn resolves on the owning ProtocolV2Client: ${thinking}`, async (t) => {
+for (const [phase, thinking] of [['create', 'on'], ['create', 'off'], ['send', 'on'], ['send', 'off']] as const) {
+  test(`${phase === 'create' ? 'explicit non-default model creation' : 'first persisted non-default model turn'} resolves on the owning ProtocolV2Client: ${thinking}`, async (t) => {
     const { dir, db, wsId, proxyMgr, sessions } = setup();
     const entry = join(dir, 'model-toggle-proxy.mjs');
     const log = join(dir, 'model-toggle-requests.jsonl');
@@ -4481,10 +4494,13 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
     process: { scope: 'session' }, capabilities: { 'catalog.resolve': 1 },
   });
   else if (request.method === 'catalog.list') reply(catalog());
-  else if (request.method === 'catalog.resolve') reply({
-    ...catalog(request.params.turnConfig.model),
-    resolvedDefaults: { sessionConfig: {}, turnConfig: { model: request.params.turnConfig.model, thinking: 'on' } },
-  });
+  else if (request.method === 'catalog.resolve') {
+    const model = request.params.turnConfig.model ?? 'k3';
+    reply({
+      ...catalog(model),
+      resolvedDefaults: { sessionConfig: {}, turnConfig: { model, thinking: model === 'highspeed' ? 'on' : 'low' } },
+    });
+  }
   else if (request.method === 'session.create') reply({ session: {
     id: request.params.sessionId, streamId: 'model-stream', state: 'idle',
     sessionConfig: request.params.config, createdAt: stamp, updatedAt: stamp,
@@ -4525,12 +4541,50 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
       return client;
     };
     proxyMgr.get = (id?: string) => clients.get(id ?? 'missing');
-    const session = await sessions.createSession({
-      workspace_id: wsId, executor: 'claude', model: 'highspeed',
-      turn_config: { model: 'highspeed', thinking },
+    proxyMgr.dispose = async id => {
+      proxyMgr.disposeCalls.push(id);
+      clients.delete(id);
+      await host.shutdown();
+    };
+    const readRequests = () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
+      method: string;
+      params: { sessionConfig?: Record<string, unknown>; turnConfig?: Record<string, unknown>; config?: Record<string, unknown> };
+    });
+    const sessionId = randomUUID();
+    const create = sessions.createSession({
+      id: sessionId, workspace_id: wsId, executor: 'claude',
+      ...(phase === 'create' ? { model: 'highspeed', turn_config: { model: 'highspeed', thinking } } : {}),
       session_config: { sandbox_profile: 'workspace' },
     });
-    assert.equal(session.turn_config_options, undefined, 'no manual or create-time pre-resolution');
+    if (phase === 'create' && thinking === 'off') {
+      await assert.rejects(create, /thinking value was not advertised/);
+      const requests = readRequests();
+      const resolves = requests.filter(request => request.method === 'catalog.resolve');
+      assert.equal(resolves.length, 1);
+      assert.deepEqual(resolves[0]?.params.turnConfig, { model: 'highspeed', thinking: 'off' });
+      assert.equal(requests.some(request => request.method === 'session.create' || request.method === 'turn.start'), false);
+      assert.deepEqual(proxyMgr.disposeCalls, [sessionId]);
+      assert.equal(clients.has(sessionId), false);
+      assert.equal((db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number }).count, 0);
+      return;
+    }
+    const session = await create;
+    const creationRequests = readRequests();
+    const creationResolves = creationRequests.filter(request => request.method === 'catalog.resolve');
+    assert.equal(creationResolves.length, 1);
+    assert.deepEqual(creationResolves[0]?.params.sessionConfig, { sandbox_profile: 'workspace' });
+    assert.deepEqual(creationResolves[0]?.params.turnConfig,
+      phase === 'create' ? { model: 'highspeed', thinking } : {});
+    assert.ok(creationRequests.findIndex(request => request.method === 'catalog.resolve')
+      < creationRequests.findIndex(request => request.method === 'session.create'));
+    assert.equal(session.turn_config_options, undefined, 'creation validation does not fabricate an attached-session snapshot');
+    if (phase === 'send') {
+      // Existing persisted selections still require live resolution before
+      // their first send, independently of new-session validation.
+      db.prepare('UPDATE sessions SET model = ?, thinking_effort = ?, turn_config_json = ? WHERE id = ?')
+        .run('highspeed', thinking, JSON.stringify({ model: 'highspeed', thinking }), session.id);
+    }
+    const requestsBeforeSend = creationRequests.length;
     const send = sessions.sendMessage(session.id, 'first non-default model turn');
     if (thinking === 'on') {
       await send;
@@ -4540,9 +4594,8 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
     } else {
       await assert.rejects(send, /thinking value was not advertised/);
     }
-    const requests = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
-      method: string; params: { turnConfig?: Record<string, unknown>; config?: Record<string, unknown> };
-    });
+    const requests = readRequests().slice(requestsBeforeSend);
+    assert.equal(requests.filter(request => request.method === 'catalog.resolve').length, 1);
     const resolveIndex = requests.findIndex(request => request.method === 'catalog.resolve');
     assert.ok(resolveIndex >= 0, 'sendMessage must resolve on its real client');
     assert.deepEqual(requests[resolveIndex]?.params.turnConfig, { model: 'highspeed', thinking });

@@ -11,7 +11,11 @@ test('capture authors English RichToyo release notes without rewriting historica
   assert.equal(source.includes('history-copy'), false);
   assert.match(source.toString(), /const repository = 'RichToyo\/Gian-Proxies'/);
   assert.match(source.toString(), /assert.equal\(certificate.repository, repository\)/);
-  assert.match(proxyReleaseNotes.claude.text, /SDK 1\.32\.0.*bounded HTTP input/);
+  assert.match(proxyReleaseNotes.claude.text, /first-party account quota/);
+  for (const provider of ['claude', 'codex', 'dsh', 'kimi', 'grok', 'antigravity']) {
+    assert.match(proxyReleaseNotes[provider].text, /Proxy Protocol SDK 1\.0\.4/);
+    assert.match(proxyReleaseNotes[provider].text, /acceptance are not claimed/);
+  }
   assert.match(proxyReleaseNotes.zcode.text, /without altering original upstream source or notices/);
   assert.match(proxyReleaseNotes.codex.text, /0\.164\.0/);
   assert.match(proxyReleaseNotes.claude.text, /2\.1\.310/);

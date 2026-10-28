@@ -494,7 +494,9 @@ export class ProxySessionCoordinator {
             : args.executorDefaults?.options?.[option.id];
         if (value !== undefined && value !== null && value !== '') values[option.id] = value;
       }
-      if (args.executorDefaults && initialized.capabilities['catalog.resolve'] !== undefined
+      // Explicit configuration also needs the selected model's choices,
+      // even when this caller has no saved Agent preferences.
+      if (initialized.capabilities['catalog.resolve'] !== undefined
         && (Object.keys(creationConfig.sessionConfig).length > 0
           || Object.keys(creationConfig.turnConfig).length > 0)) {
         if (!client.resolveCatalog) throw new Error('catalog.resolve is not available');

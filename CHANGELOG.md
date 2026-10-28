@@ -7,7 +7,7 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
-## [0.6.9] - 2026-10-27
+## [0.6.9] - 2026-10-28
 
 ### Added
 
@@ -30,6 +30,8 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 
 ### Fixed
 
+- Resolve explicitly selected model settings before validating a new session,
+  including when no Agent defaults have been saved.
 - Select one matching active Proxy/Runtime combination instead of combining
   a newly installed Proxy with an older active CLI.
 - Treat explicit Custom Runtime versions as verification history rather than
