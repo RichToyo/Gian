@@ -35,6 +35,7 @@ const HOST_SESSION = resolve('src/proxy/protocol-v2-session-client.ts');
 const CUSTOMIZATION_SERVICE = resolve('src/proxy/customization-inventory.ts');
 const RUNTIME_RESOLVER = resolve('src/runtime/resolver.ts');
 const RUNTIME_INSTALLER = resolve('src/runtime/installer.ts');
+const OFFICIAL_QUOTA_READER = resolve('src/agents/official-quota-reader.ts');
 const RUNTIME_BOOTSTRAP = resolve('../proxy-protocol/src/runtime-bootstrap-server.ts');
 
 const CANONICAL = new Set<string>([
@@ -77,7 +78,7 @@ function methodsFromAdapter(adapter: typeof V2_ADAPTERS[number]): Set<string> {
 }
 
 function methodsCalledByHost(): Set<string> {
-  const text = [HOST_CLIENT, HOST_SESSION, CUSTOMIZATION_SERVICE, RUNTIME_RESOLVER, RUNTIME_INSTALLER]
+  const text = [HOST_CLIENT, HOST_SESSION, CUSTOMIZATION_SERVICE, RUNTIME_RESOLVER, RUNTIME_INSTALLER, OFFICIAL_QUOTA_READER]
     .map(path => readFileSync(path, 'utf8'))
     .join('\n');
   const out = new Set<string>();

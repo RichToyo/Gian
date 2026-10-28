@@ -1,4 +1,4 @@
-import type { UsageBucket } from '@gian/shared';
+import type { UsageBucket, UsageSelection } from '@gian/shared';
 import { bucketRangeLabel, formatExact, formatTokens, ongoingBucketIndex } from './format.js';
 
 /* Compact trend: each bar is the tokens newly consumed inside its time bucket
@@ -8,11 +8,13 @@ import { bucketRangeLabel, formatExact, formatTokens, ongoingBucketIndex } from 
 export function Sparkline({
   buckets,
   asOf,
+  selection,
   width = 132,
   height = 30,
 }: {
   buckets: readonly UsageBucket[];
   asOf: number;
+  selection: UsageSelection;
   width?: number;
   height?: number;
 }) {
@@ -26,7 +28,7 @@ export function Sparkline({
       {buckets.map((bucket, i) => {
         if (bucket.tokens == null) return null;
         const h = bucket.tokens <= 0 ? 1.5 : Math.max(1.5, (bucket.tokens / max) * (height - 3));
-        const label = `${bucketRangeLabel(bucket, i === current)} · ${formatExact(bucket.tokens)} tokens (${formatTokens(bucket.tokens)})`;
+        const label = `${bucketRangeLabel(bucket, i === current, selection)} · ${formatExact(bucket.tokens)} tokens (${formatTokens(bucket.tokens)})`;
         return (
           <rect
             key={bucket.from}

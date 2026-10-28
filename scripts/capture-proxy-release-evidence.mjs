@@ -25,7 +25,7 @@ export const proxyReleaseNotes = {
   },
   kimi: {
     id: 'kimi', directory: 'kimi',
-    text: 'Add official-account quota inspection through the local Kimi server API. Record authoritative live cumulative usage without emitting placeholder session totals at finalization. Use Proxy Protocol SDK 1.0.4 and retain Kimi Code 2.3.2. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
+    text: 'Fix TodoList and plan-review A-B-A updates reusing an event identity and blocking subsequent output and turn completion. Preserve adjacent-plan suppression and native-event replay idempotency. Upgrade the managed Kimi Code Runtime to official 2.3.3 with pinned archive bytes. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   grok: {
     id: 'grok', directory: 'grok',

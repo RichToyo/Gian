@@ -12,15 +12,18 @@ test('capture authors English RichToyo release notes without rewriting historica
   assert.match(source.toString(), /const repository = 'RichToyo\/Gian-Proxies'/);
   assert.match(source.toString(), /assert.equal\(certificate.repository, repository\)/);
   assert.match(proxyReleaseNotes.claude.text, /first-party account quota/);
-  for (const provider of ['claude', 'codex', 'dsh', 'kimi', 'grok', 'antigravity']) {
+  for (const provider of ['claude', 'codex', 'dsh', 'grok', 'antigravity']) {
     assert.match(proxyReleaseNotes[provider].text, /Proxy Protocol SDK 1\.0\.4/);
+  }
+  for (const provider of ['claude', 'codex', 'dsh', 'kimi', 'grok', 'antigravity']) {
     assert.match(proxyReleaseNotes[provider].text, /acceptance are not claimed/);
   }
+  assert.match(proxyReleaseNotes.kimi.text, /TodoList and plan-review A-B-A updates/);
   assert.match(proxyReleaseNotes.zcode.text, /without altering original upstream source or notices/);
   assert.match(proxyReleaseNotes.codex.text, /0\.164\.0/);
   assert.match(proxyReleaseNotes.claude.text, /2\.1\.310/);
   assert.match(proxyReleaseNotes.dsh.text, /0\.2\.1-rc\.2/);
-  assert.match(proxyReleaseNotes.kimi.text, /2\.3\.2/);
+  assert.match(proxyReleaseNotes.kimi.text, /2\.3\.3/);
   assert.match(proxyReleaseNotes.grok.text, /1\.0\.70/);
   assert.match(proxyReleaseNotes.zcode.text, /0\.17\.0/);
   assert.match(proxyReleaseNotes.antigravity.text, /1\.4\.3/);

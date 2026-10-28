@@ -19,6 +19,7 @@
     "initialize": "initializeResultSchema",
     "catalog.list": "catalogResultSchema",
     "catalog.resolve": "catalogResolveResultSchema",
+    "account.quota.read": "officialQuotaReadResultSchema",
     "session.create": "sessionCreateResultSchema",
     "session.get": "sessionGetResultSchema",
     "session.rename": "okResultSchema",
@@ -143,6 +144,7 @@
         "input.localFile",
         "input.localImage",
         "catalog.resolve",
+        "account.quota.read",
         "session.rename",
         "session.native.list",
         "session.replay",
@@ -184,6 +186,7 @@
       "capabilities": [
         "input.localImage",
         "input.skill",
+        "account.quota.read",
         "session.rename",
         "session.native.list",
         "session.replay",
@@ -234,6 +237,7 @@
         "sidechat",
         "session.fork",
         "catalog.resolve",
+        "account.quota.read",
         "integration.mcp.streamableHttp",
         "interaction",
         "event.reasoning",
@@ -270,6 +274,7 @@
         "input.localFile",
         "input.localImage",
         "session.rename",
+        "account.quota.read",
         "session.native.list",
         "session.native.delete",
         "session.replay",
@@ -315,6 +320,7 @@
         "catalog.resolve",
         "session.replay",
         "session.create.hostBindingProof",
+        "account.quota.read",
         "event.reasoning",
         "event.usage",
         "event.step",
@@ -347,12 +353,12 @@
       "cheapestConfig": { "model": "$catalog-default", "thinking": "$catalog-default", "mode": "$catalog-default" },
       "capabilities": [
         "catalog.resolve", "catalog.modeSemantics", "interaction", "event.reasoning", "event.plan", "event.usage",
-        "runtime.discover", "runtime.probe", "runtime.install.plan"
+        "runtime.discover", "runtime.probe", "runtime.install.plan", "account.quota.read"
       ],
       "conditionalCapabilities": ["integration.mcp.streamableHttp", "session.native.list"],
       "implementedMethods": [
         "initialize", "catalog.list", "catalog.resolve", "session.create", "session.get", "session.native.list",
-        "runtime.discover", "runtime.probe", "runtime.install.plan", "turn.start", "turn.interrupt", "interaction.respond", "session.close", "shutdown"
+        "runtime.discover", "runtime.probe", "runtime.install.plan", "account.quota.read", "turn.start", "turn.interrupt", "interaction.respond", "session.close", "shutdown"
       ],
       "unsupportedMethods": [
         "session.rename", "session.native.delete", "session.replay", "sidechat.create", "sidechat.resume", "sidechat.close",
@@ -434,6 +440,31 @@
       "steps": ["send current catalog revision", "resolve cheapest valid config", "send stale revision", "send invalid config"],
       "providers": {"claude":"required","codex":"unsupported","kimi":"required","grok":"unsupported","dsh":"required","zcode":"required","antigravity":"conditional"},
       "providerNotes": {"antigravity":"Advertised exact family/Thinking/native Mode resolution is fenced; a cold resolve requires the default-HOME CLI catalog, attached resolves use live ACP choices."}
+    },
+    {
+      "id": "account.official_quota",
+      "category": "account",
+      "trigger": "control",
+      "purpose": "Inspect only the explicitly selected first-party account quota or balance through gian.proxy/2.3 without creating a Session or sending a model prompt. This catalog entry is a test specification, not execution evidence; the real control runner currently has no quota handler and must report NOT_RUN.",
+      "methods": ["account.quota.read"],
+      "notifications": [],
+      "steps": [
+        "Require separately authorized read-only account inspection and the selected managed Runtime/HOME binding; never discover or copy unrelated credentials",
+        "Initialize gian.proxy/2.3 and require the advertised account.quota.read capability before inspection",
+        "Send account.quota.read with the selected model and provider plus a fresh valid identityNonce; do not send session.create, turn.start or any prompt",
+        "Validate the response against officialQuotaReadResultSchema, including actual quota windows, exact balance decimals and identity-local failure states",
+        "Require an eligible authenticated first-party fixture for ready-state acceptance; auth_required, excluded, unsupported, error or a missing runner remain explicit gaps, never PASS"
+      ],
+      "providers": {"claude":"conditional","codex":"conditional","kimi":"conditional","grok":"conditional","dsh":"conditional","zcode":"unsupported","antigravity":"conditional"},
+      "providerNotes": {
+        "claude":"The Proxy implements read-only official subscription quota. Third-party endpoints are excluded; a model prompt is forbidden. The real quota runner handler remains NOT_RUN.",
+        "codex":"The Proxy implements account identity and ChatGPT subscription rate-limit reads through app-server. API-key and third-party configurations are excluded. The real quota runner handler remains NOT_RUN.",
+        "kimi":"The Proxy implements official OAuth usage inspection through its bound local server API; actual account windows are retained without inventing a weekly limit. The real quota runner handler remains NOT_RUN.",
+        "grok":"The Proxy implements prefixed native authentication and billing extension reads, rechecking identity without creating a Session. The real quota runner handler remains NOT_RUN.",
+        "dsh":"The pinned Bridge implements official DeepSeek balance inspection only for the eligible official provider; other providers are excluded. The real quota runner handler remains NOT_RUN.",
+        "zcode":"This Proxy does not implement or advertise account.quota.read; never infer quota from context occupancy or Token statistics.",
+        "antigravity":"The Proxy implements quota-group inspection for the separate official CLI account, not ACP context occupancy. The real quota runner handler remains NOT_RUN."
+      }
     },
     {
       "id": "config.validation",

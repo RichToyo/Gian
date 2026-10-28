@@ -32,6 +32,8 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 
 - Resolve explicitly selected model settings before validating a new session,
   including when no Agent defaults have been saved.
+- Keep calendar-day chart labels distinct from hourly and rolling ranges,
+  including the ongoing day and daylight-saving transitions.
 - Select one matching active Proxy/Runtime combination instead of combining
   a newly installed Proxy with an older active CLI.
 - Treat explicit Custom Runtime versions as verification history rather than
@@ -46,6 +48,8 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
   supported native quota-group response formats.
 - Record complete Kimi main-agent cumulative usage with cache counted once,
   without using context occupancy or placeholder REST totals as consumption.
+- Preserve Kimi plan-event identities so repeated plan transitions do not
+  block later output or turn completion.
 
 ### Known Limitations
 

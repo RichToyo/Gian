@@ -39,18 +39,6 @@ export function formatDayTime(d: Date): string {
   return `${formatDay(d)}, ${formatTime(d)}`;
 }
 
-const DAY_MS = 86_400_000;
-
-function isLocalMidnight(ms: number): boolean {
-  const d = new Date(ms);
-  return d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0;
-}
-
-function isHourAligned(ms: number): boolean {
-  const d = new Date(ms);
-  return d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0;
-}
-
 /** Index of the in-progress bucket: the Host truncates the current bucket at
  * asOf, so it is the last bucket whose [from, to) contains asOf. -1 when the
  * selection lies entirely in the past. */
@@ -62,28 +50,25 @@ export function ongoingBucketIndex(buckets: readonly UsageBucket[], asOf: number
   return found;
 }
 
-/** Accurate bucket time range for the bar tooltip. Calendar day buckets are
- * midnight-aligned and read "Wed, Oct 21"; rolling 24h buckets carry their
- * exact times; sub-day buckets show a time range. The ongoing bucket never
- * claims a future endpoint. */
-export function bucketRangeLabel(bucket: UsageBucket, ongoing: boolean): string {
+/** Selection owns bucket granularity: elapsed duration cannot distinguish
+ * truncated days, midnight hours, or 23/25-hour DST calendar days. */
+export function bucketRangeLabel(bucket: UsageBucket, ongoing: boolean, selection: UsageSelection): string {
   const from = new Date(bucket.from);
   const to = new Date(bucket.to);
-  const span = bucket.to - bucket.from;
-  if (span >= DAY_MS && isLocalMidnight(bucket.from) && isLocalMidnight(bucket.to)) {
+  if (selection.mode === 'calendar' && selection.period !== 'day') {
     return ongoing ? `${formatDayName(from)} · ongoing` : formatDayName(from);
   }
-  if (span >= DAY_MS) {
+  if (selection.mode === 'rolling' && selection.period !== 'day') {
     return ongoing
       ? `${formatDayTime(from)} – Now`
       : `${formatDayTime(from)} – ${formatDayTime(to)}`;
   }
   if (ongoing) {
-    return isHourAligned(bucket.from)
+    return selection.mode === 'calendar'
       ? `${formatTime(from)} – Now`
       : `${formatDayTime(from)} – Now`;
   }
-  if (isHourAligned(bucket.from) && isHourAligned(bucket.to)) {
+  if (selection.mode === 'calendar') {
     return `${formatTime(from)} – ${formatTime(to)}`;
   }
   return formatDay(from) === formatDay(to)

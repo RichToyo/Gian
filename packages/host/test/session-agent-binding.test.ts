@@ -503,15 +503,27 @@ test('create rejects unadvertised modes, missing selectors and wrong bindings be
   for (const scenario of ['saved-invalid', 'explicit-invalid', 'wrong-binding', 'missing-role', 'empty-catalog', 'retired-yolo', 'invalid-default', 'legacy-approval'] as const) {
     const fixture = nativeModeFixture();
     if (scenario === 'missing-role') {
-      fixture.catalog.specialCatalogs = {};
-      fixture.catalog.configOptions = fixture.catalog.configOptions.map(({ role: _role, ...option }) => option);
+      fixture.catalog.specialCatalogs = { model: 'model', thinking: 'effort' };
+      fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => {
+        if (option.id !== 'permission_mode') return option;
+        const { role: _role, ...withoutRole } = option;
+        return withoutRole;
+      });
     }
     if (scenario === 'empty-catalog') fixture.catalog = { ...EMPTY_CATALOG };
     if (scenario === 'retired-yolo') fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
       ? { ...option, choices: option.choices!.filter(choice => choice.value !== 'yolo') } : option);
     if (scenario === 'invalid-default') fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
       ? { ...option, defaultValue: 'unadvertised' } : option);
+    // A valid native value must still reject the legacy approval_mode field.
+    if (scenario === 'legacy-approval') fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+      ? { ...option, choices: [...option.choices!, { value: 'ask', displayName: 'Ask' }] } : option);
     const h = setupOpenNativeMode(scenario === 'saved-invalid' ? 'unadvertised' : scenario === 'invalid-default' ? '' : 'yolo', 'turn', fixture);
+    if (scenario === 'empty-catalog') {
+      h.agent.defaults.model = '';
+      h.agent.defaults.thinking = '';
+    }
+    const savedDefaults = structuredClone(h.agent.defaults);
     try {
       const sent = await createThroughWs(h.sessions, {
         workspace_id: h.wsId, agent_id: h.agent.id,
@@ -521,7 +533,9 @@ test('create rejects unadvertised modes, missing selectors and wrong bindings be
       });
       const failure = sent.find(message => message.type === 'error');
       assert.ok(failure?.type === 'error', scenario);
-      assert.match(failure.message, scenario === 'wrong-binding' ? /wrong config binding/
+      assert.equal(failure.code, ['wrong-binding', 'legacy-approval'].includes(scenario)
+        ? 'CONFIG_BINDING_INVALID' : 'CONFIG_VALUE_INVALID');
+      assert.match(failure.message, scenario === 'wrong-binding' ? /^Config option permission_mode is turn-bound\.$/
         : scenario === 'legacy-approval' ? /approval_mode must be omitted/
           : ['missing-role', 'empty-catalog'].includes(scenario) ? /advertise one mode selector/
             : /not advertised/);
@@ -533,6 +547,7 @@ test('create rejects unadvertised modes, missing selectors and wrong bindings be
       assert.deepEqual(h.ownership, { prepared: 1, releasedUnused: 1 });
       assert.equal((h.db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number }).count, 0);
       assert.equal(sent.some(message => message.type === 'session:created'), false);
+      assert.deepEqual(h.agent.defaults, savedDefaults);
     } finally {
       h.db.close();
       rmSync(h.dir, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   bucketRangeLabel,
   formatExact,
@@ -57,43 +57,78 @@ describe('ongoingBucketIndex', () => {
 describe('bucketRangeLabel', () => {
   it('labels calendar hour buckets with a bare time range', () => {
     const from = new Date(2026, 9, 21, 17, 0, 0).getTime();
-    const label = bucketRangeLabel({ from, to: from + 3_600_000, tokens: 1, coverage: 'complete' }, false);
+    const label = bucketRangeLabel({ from, to: from + 3_600_000, tokens: 1, coverage: 'complete' }, false,
+      { mode: 'calendar', period: 'day' });
     expect(label).toBe('5:00 PM – 6:00 PM');
   });
 
   it('never claims a future endpoint for the ongoing hour bucket', () => {
     const from = new Date(2026, 9, 21, 17, 0, 0).getTime();
-    const label = bucketRangeLabel({ from, to: from + 1_800_000, tokens: 1, coverage: 'complete' }, true);
+    const label = bucketRangeLabel({ from, to: from + 1_800_000, tokens: 1, coverage: 'complete' }, true,
+      { mode: 'calendar', period: 'day' });
     expect(label).toBe('5:00 PM – Now');
   });
 
   it('labels midnight-aligned calendar day buckets by day name', () => {
     const from = new Date(2026, 9, 21, 0, 0, 0).getTime();
-    const label = bucketRangeLabel({ from, to: from + 86_400_000, tokens: 1, coverage: 'complete' }, false);
+    const label = bucketRangeLabel({ from, to: from + 86_400_000, tokens: 1, coverage: 'complete' }, false,
+      { mode: 'calendar', period: 'week' });
     expect(label).toBe('Wed, Oct 21');
   });
 
   it('marks the ongoing calendar day bucket', () => {
     const from = new Date(2026, 9, 21, 0, 0, 0).getTime();
-    const label = bucketRangeLabel({ from, to: from + 63_000_000, tokens: 1, coverage: 'complete' }, true);
+    const label = bucketRangeLabel({ from, to: from + 63_000_000, tokens: 1, coverage: 'complete' }, true,
+      { mode: 'calendar', period: 'week' });
     expect(label).toBe('Wed, Oct 21 · ongoing');
+  });
+
+  it('distinguishes the midnight hour from a truncated calendar day with identical endpoints', () => {
+    const from = new Date(2026, 9, 21, 0, 0, 0).getTime();
+    const bucket = { from, to: from + 1_800_000, tokens: 1, coverage: 'complete' as const };
+    expect(bucketRangeLabel(bucket, true, { mode: 'calendar', period: 'day' })).toBe('12:00 AM – Now');
+    expect(bucketRangeLabel(bucket, true, { mode: 'calendar', period: 'month' })).toBe('Wed, Oct 21 · ongoing');
+    expect(bucketRangeLabel(bucket, true, { mode: 'rolling', period: 'day' })).toBe('Oct 21, 12:00 AM – Now');
+  });
+
+  it('keeps natural-day labels across 23-hour and 25-hour DST days', () => {
+    vi.stubEnv('TZ', 'America/New_York');
+    try {
+      for (const [month, date, hours, label] of [[2, 8, 23, 'Sun, Mar 8'], [10, 1, 25, 'Sun, Nov 1']] as const) {
+        const from = new Date(2026, month, date).getTime();
+        const to = new Date(2026, month, date + 1).getTime();
+        expect((to - from) / 3_600_000).toBe(hours);
+        expect(bucketRangeLabel({ from, to, tokens: 1, coverage: 'complete' }, false,
+          { mode: 'calendar', period: 'month' })).toBe(label);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps exact rolling endpoints even when a 24-hour bucket aligns with midnight', () => {
+    const from = new Date(2026, 9, 20).getTime();
+    expect(bucketRangeLabel({ from, to: from + 86_400_000, tokens: 1, coverage: 'complete' }, false,
+      { mode: 'rolling', period: 'week' })).toBe('Oct 20, 12:00 AM – Oct 21, 12:00 AM');
   });
 
   it('labels rolling 24h buckets with exact day and time endpoints', () => {
     const from = new Date(2026, 9, 20, 17, 37, 0).getTime();
-    const label = bucketRangeLabel({ from, to: from + 86_400_000, tokens: 1, coverage: 'complete' }, false);
+    const label = bucketRangeLabel({ from, to: from + 86_400_000, tokens: 1, coverage: 'complete' }, false,
+      { mode: 'rolling', period: 'week' });
     expect(label).toBe('Oct 20, 5:37 PM – Oct 21, 5:37 PM');
   });
 
   it('labels rolling hour buckets with day context when misaligned', () => {
     const from = new Date(2026, 9, 20, 17, 37, 0).getTime();
-    const label = bucketRangeLabel({ from, to: from + 3_600_000, tokens: 1, coverage: 'complete' }, false);
+    const label = bucketRangeLabel({ from, to: from + 3_600_000, tokens: 1, coverage: 'complete' }, false,
+      { mode: 'rolling', period: 'day' });
     expect(label).toBe('Oct 20, 5:37 PM – 6:37 PM');
   });
 });
 
 describe('sparkAxisLabels', () => {
-  it('labels calendar day with first and last hour', () => {
+  it('labels calendar day with the first and last hour including minutes', () => {
     const midnight = new Date(2026, 9, 21, 0, 0, 0).getTime();
     const buckets = Array.from({ length: 24 }, (_, i) => ({
       from: midnight + i * 3_600_000,
@@ -101,7 +136,7 @@ describe('sparkAxisLabels', () => {
       tokens: null,
       coverage: 'complete' as const,
     }));
-    expect(sparkAxisLabels({ mode: 'calendar', period: 'day' }, buckets)).toEqual(['12 AM', '11 PM']);
+    expect(sparkAxisLabels({ mode: 'calendar', period: 'day' }, buckets)).toEqual(['12:00 AM', '11:00 PM']);
   });
 
   it('labels calendar week with day names and dates', () => {

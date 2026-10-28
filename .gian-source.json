@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "99e92628b594d38bec97a5462016c8b4cc573fcd",
+  "sourceCommit": "4249b89018b36b8554c4753c99491e96f41d910a",
   "workingTree": false,
   "files": [
     {
@@ -599,7 +599,7 @@
     {
       "path": "CHANGELOG.md",
       "mode": 420,
-      "sha256": "fe7929b50e3eb5f1d16fff5e2849f6d74a7312d3b6f9ce37c41f747f3b2d40fd"
+      "sha256": "0892651019d9f5b7623b84813842884eca0d74b56a8cba1a7346c8408f799136"
     },
     {
       "path": "CONTRIBUTING.md",
@@ -639,7 +639,7 @@
     {
       "path": "delivery/proxies/CHANGELOG.md",
       "mode": 420,
-      "sha256": "d7ac7022ab837f4b515f06121ffbfaac74d56abd2fdad6e657b458f2db747f0e"
+      "sha256": "2748183272b27b63bcdb89640050163b3842b30a76ddea049bd58e55cada83e0"
     },
     {
       "path": "delivery/proxies/protocol-package.json",
@@ -649,12 +649,12 @@
     {
       "path": "delivery/proxies/README.md",
       "mode": 420,
-      "sha256": "18bfab01b3aa906c30ef15714014979328b30e825de57c5beb10e77bdb6cf263"
+      "sha256": "cabcc74a1672863169a510a25a66944a86a861e2307f2400a023a89cef7fa87c"
     },
     {
       "path": "delivery/proxies/release-selection.json",
       "mode": 420,
-      "sha256": "05540f85fe47cf5aeff06380ffa7810ce4d07ca55390bf95a19ad06b5a71e730"
+      "sha256": "3bd8b29d9f37b7959bf192349e84f259f3a67692303cacc575208cf195a2c6b1"
     },
     {
       "path": "delivery/proxies/scripts/catalog-docs-policy.mjs",
@@ -664,7 +664,7 @@
     {
       "path": "delivery/proxies/scripts/catalog-docs-policy.test.mjs",
       "mode": 420,
-      "sha256": "1f1477d937efb534cf95a0fb3992bd8401aba751c6f1634021c9900e7bbbc6fa"
+      "sha256": "0b47caf90e6ca5f9643d10b071f47a62009a02661aa90c8a32c0f705a465608b"
     },
     {
       "path": "delivery/proxies/scripts/protocol-dependency.mjs",
@@ -679,7 +679,7 @@
     {
       "path": "delivery/proxies/scripts/runtime-qualification.test.mjs",
       "mode": 420,
-      "sha256": "a7191cf1423ec0ec837672a88fd9669c9c25b68c54598254f89d3d91bef68c9d"
+      "sha256": "1c63b7919397536a7c57ffbc8facacae9a8edcf01e27c0702636febe87cdd117"
     },
     {
       "path": "delivery/proxies/scripts/verify-source.mjs",
@@ -2584,7 +2584,7 @@
     {
       "path": "packages/host/src/runtime/dev-runtime-coordinates.json",
       "mode": 420,
-      "sha256": "9c6bd8d7b27eff6388932011fd9407107aa8c6a361927d680b53690f04c6a9c5"
+      "sha256": "3b5a933033739db41c8439846a8f933bef1691067da5931c12e0ffd0931b3a60"
     },
     {
       "path": "packages/host/src/runtime/dev-runtime-coordinates.ts",
@@ -3354,7 +3354,7 @@
     {
       "path": "packages/host/test/agent-proxy-default-home.test.ts",
       "mode": 420,
-      "sha256": "f48f537f4af48bfc36e7f374385bac99f7af2ef14a5715e38b76d39f39874709"
+      "sha256": "f7013ef086315721a9ac98ac6a8170d284a16150037449a95020c9cabd0ff490"
     },
     {
       "path": "packages/host/test/agent-updater-safety.test.ts",
@@ -3509,7 +3509,7 @@
     {
       "path": "packages/host/test/contract-003-proxy-methods.test.ts",
       "mode": 420,
-      "sha256": "20ba367bb30d97c2599b3be71626d80152de98d164fef0e29ba60c450e342404"
+      "sha256": "7bb803329b54c85a5db67f907b13a2c52ef128e056d7ea2070369704b4729a4d"
     },
     {
       "path": "packages/host/test/contract-004-notification-parity.test.ts",
@@ -3839,7 +3839,7 @@
     {
       "path": "packages/host/test/gian-tool-queue-revision.test.ts",
       "mode": 420,
-      "sha256": "62dc660ba8c7746ab4e28ac7068c58f05187c0fee7a3f9e857a9fc598ead7710"
+      "sha256": "b4676e4f19a1276b7804a4e40f4b503a4bcb7d2695f977b3c167dd3ea3b7caa1"
     },
     {
       "path": "packages/host/test/gian-tool-rpc.test.ts",
@@ -4459,7 +4459,7 @@
     {
       "path": "packages/host/test/session-agent-binding.test.ts",
       "mode": 420,
-      "sha256": "2a70ff1f0b2c38479fca95d4380b97ffe27f0607e44ebf3416e3ac7dca3a084d"
+      "sha256": "a62244a3648fe512382ed60d6611be9b8e077f1abc03164d339aebcc2cc96340"
     },
     {
       "path": "packages/host/test/session-exact-binding.test.ts",
@@ -6104,17 +6104,17 @@
     {
       "path": "packages/proxies/kimi-proxy/manifest.json",
       "mode": 420,
-      "sha256": "9dc5112c7a9364beef20c4dbd6f7cc18fd7e3e3e7551bc4971c9d3e0e8390bdd"
+      "sha256": "69caccef574eacdeb2ff43b0103f1a4b90b9ba318ea0b74ec0a29f98e5132749"
     },
     {
       "path": "packages/proxies/kimi-proxy/package.json",
       "mode": 420,
-      "sha256": "3c256af8a9e6e65222c4d228e6d95e5aec7e9219b2ddf9de846059c61c5eed14"
+      "sha256": "889c393b14d15246cf1b9176433467b9e2b23841ff96ef14a188c4813cbfe2a4"
     },
     {
       "path": "packages/proxies/kimi-proxy/README.md",
       "mode": 420,
-      "sha256": "22bbb48b6bee7cfb900407fc1e10f2e182b2824deb7c208e667a556fbd1f2121"
+      "sha256": "cb1b8fc0a5a0819020b510c48fe84dd0581e2cc10375666104480ed1837a5248"
     },
     {
       "path": "packages/proxies/kimi-proxy/scripts/fake-catalog-ui-proxy.mjs",
@@ -6124,7 +6124,7 @@
     {
       "path": "packages/proxies/kimi-proxy/src/cli/spawn.ts",
       "mode": 420,
-      "sha256": "eb257ba0a7065d852f19d32097c4bbf69672a995a4c0fd8d5bf60ad008e69e2c"
+      "sha256": "8e3b25e17ff32e85750a09162f47790cb5e054aac0b64fab98c99732cf2590fe"
     },
     {
       "path": "packages/proxies/kimi-proxy/src/core/customization.ts",
@@ -6154,7 +6154,7 @@
     {
       "path": "packages/proxies/kimi-proxy/src/core/projector.ts",
       "mode": 420,
-      "sha256": "7c9b4eaa62e443287e36d991fa1513de910ce98ce883a43c76f0cf92a21a5f36"
+      "sha256": "5143e23927e3504d9916e83fd495e77da49f07f61368bebad02002ee3d088658"
     },
     {
       "path": "packages/proxies/kimi-proxy/src/core/replay.ts",
@@ -6319,7 +6319,7 @@
     {
       "path": "packages/proxies/kimi-proxy/test/fixtures/fake-kimi-server.mjs",
       "mode": 493,
-      "sha256": "0b1206d1b0dbdd3e6041d1eba65c60fbeeffbf214a8df03332baa6a19d0f12fc"
+      "sha256": "4b9721bc8c5b1d2c1992538aa4e3381725e6993c56dda1e5c126702056bd3ee6"
     },
     {
       "path": "packages/proxies/kimi-proxy/test/harness.ts",
@@ -6334,7 +6334,7 @@
     {
       "path": "packages/proxies/kimi-proxy/test/kimi-proxy.test.ts",
       "mode": 420,
-      "sha256": "71af15531239ffcb98de34a653bbe9f6e77e3b583853a2abea3c2d9c5c20841a"
+      "sha256": "18acca9c86629aac0b64f2eff59c5f612128e83f69a8515d6ea44a6bc2aab7f8"
     },
     {
       "path": "packages/proxies/kimi-proxy/test/kimi-server.test.ts",
@@ -6349,7 +6349,7 @@
     {
       "path": "packages/proxies/kimi-proxy/test/projector.test.ts",
       "mode": 420,
-      "sha256": "946df5adf7aa313fde28ae8ea7e7a4076e0989205ae434d8877cad05ee713a10"
+      "sha256": "7806e828551ab1aab00fd5bf5e5f87c11ca32b35b30e96c4635b425700881b50"
     },
     {
       "path": "packages/proxies/kimi-proxy/test/session-store.test.ts",
@@ -7914,7 +7914,7 @@
     {
       "path": "packages/shared/src/proxy.ts",
       "mode": 420,
-      "sha256": "096b73d034a6c557a9aa8a976f5ac7d56c43d475dd02c26541685fc77df7bff1"
+      "sha256": "325cdd29a1ce701d3e80c2cecaf521db3d34899ce1a2961b26844472632a6f1f"
     },
     {
       "path": "packages/shared/src/remote-account.ts",
@@ -8784,7 +8784,7 @@
     {
       "path": "packages/web/src/menubar/format.ts",
       "mode": 420,
-      "sha256": "5072c9c412c4a358ca1bcef59953dcd391f27059ddc11b33b2116d7a598f1357"
+      "sha256": "da29fb0f5ed931f182d45b5f15f647949e39a31e8b2d5d6364612c83b3db86fe"
     },
     {
       "path": "packages/web/src/menubar/GianMark.tsx",
@@ -8839,7 +8839,7 @@
     {
       "path": "packages/web/src/menubar/Sparkline.tsx",
       "mode": 420,
-      "sha256": "d0c23d5d62d51bb2d62256045007097bf74c3bbef98fa639a253c5751c6eadc7"
+      "sha256": "88c2be32ef46616300710828d980f7774b1b282a2f02a18d22f5c342e70573c3"
     },
     {
       "path": "packages/web/src/menubar/TodoSection.tsx",
@@ -8849,7 +8849,7 @@
     {
       "path": "packages/web/src/menubar/TokensSection.tsx",
       "mode": 420,
-      "sha256": "4edacfa9b4cd9c79a775d6167dc3c1a3f23aef785d3970377995c2ca485ce502"
+      "sha256": "48d777ab42be140243c4850b253b93bca59e76eb2ed9466e0e09af7570956b55"
     },
     {
       "path": "packages/web/src/notifications.ts",
@@ -10014,7 +10014,7 @@
     {
       "path": "packages/web/test/menubar-app.test.tsx",
       "mode": 420,
-      "sha256": "1123bdc4bb9199c938bfde7e7da4d7d826922a7c6b8e40e65aaf459aee3d9dae"
+      "sha256": "407877826ce6148532d61166d2c1b56aad7037216c377da2e889ed09a11862ce"
     },
     {
       "path": "packages/web/test/menubar-fixtures.ts",
@@ -10024,7 +10024,7 @@
     {
       "path": "packages/web/test/menubar-format.test.ts",
       "mode": 420,
-      "sha256": "c1e8347d1bc48cac9f679bef6c036954cdbc847cf5b368e7bdb780d5c929b21a"
+      "sha256": "fa69cedfa5ddff58e12796bd3d20af3f67f1df5f8e4efa83f4376f6f3bd95847"
     },
     {
       "path": "packages/web/test/menubar-quota-row.test.ts",
@@ -10044,7 +10044,7 @@
     {
       "path": "packages/web/test/menubar-sparkline.test.tsx",
       "mode": 420,
-      "sha256": "cd9c99ad861efccf511e6c9bb061ec0c70be3313fce09dbaf05d00227f81e913"
+      "sha256": "c50ba21970803de111acf0d0a475fb0bb1ed1d36694c22230fce041810dd9092"
     },
     {
       "path": "packages/web/test/menubar-todo.test.tsx",
@@ -10784,12 +10784,12 @@
     {
       "path": "scripts/build-managed-runtime-candidates.mjs",
       "mode": 420,
-      "sha256": "71162e62032e8fb3356a10f7a111a3865a25b7fa620b6e4f84a990c8d6e6f689"
+      "sha256": "afaee38859b61b7e40e4e5b9e2a107558d7ce593271daa80ce6f4f4491d400a0"
     },
     {
       "path": "scripts/build-managed-runtime-candidates.test.mjs",
       "mode": 420,
-      "sha256": "485ce5f022f077467d489d11215931183d75006599363769434f49503e472074"
+      "sha256": "968bfea89e2cd15c135ae22a3e323311a7356539a5a52d98372c4cb5db423e51"
     },
     {
       "path": "scripts/build-proxy-artifacts.mjs",
@@ -10809,12 +10809,12 @@
     {
       "path": "scripts/capture-proxy-release-evidence.mjs",
       "mode": 420,
-      "sha256": "f325e1bb4b3f32d55fa77b0a68b877e66e40e79541916b029869adb73fcd475e"
+      "sha256": "cfc5b4546b9b795b593384aac1adf0ad4c7df3bcbf47b4ca1c688f69cace9c2a"
     },
     {
       "path": "scripts/capture-proxy-release-evidence.test.mjs",
       "mode": 420,
-      "sha256": "9bd486d8b9358cae2bacc9df2752bce12ceff265ce3f147dfa8107c44330f3a8"
+      "sha256": "6be36480a6caee4d9b0f909d1b512f6dc84f393de217dbd597466fb967d485e5"
     },
     {
       "path": "scripts/catalog-release.test.mjs",
@@ -11544,7 +11544,7 @@
     {
       "path": "test/proxy-real-acceptance.json",
       "mode": 420,
-      "sha256": "f28d1cdd787c76da05a6709ce6aadef3109a5098dde06c59260d3ec738100440"
+      "sha256": "bf25c69945390e243f5318c349478c3eef5902f0159909d99cf6ab43aad1a9c3"
     },
     {
       "path": "test/selection-map.json",

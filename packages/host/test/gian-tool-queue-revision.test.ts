@@ -74,6 +74,11 @@ class FakeProxyClient implements ProxyClient {
           control: 'select' as const, required: true, defaultValue: this.executor === 'codex' ? 'gpt-5' : 'sonnet',
           choices: [{ value: this.executor === 'codex' ? 'gpt-5' : 'sonnet', displayName: 'Default' }],
         },
+        {
+          id: 'thinking', displayName: 'Thinking', binding: 'turn' as const, role: 'effort',
+          control: 'select' as const, required: false, defaultValue: 'high',
+          choices: [{ value: 'high', displayName: 'High' }],
+        },
       ],
       slashCommands: [],
     };
@@ -256,7 +261,11 @@ async function createSession(context: ReturnType<typeof setup>, key = 'create-se
     agent_id: context.agent.id,
   }, key);
   assert.equal(result.ok, true, result.error?.message);
-  return (result.data as { session: { id: string } }).session.id;
+  const id = (result.data as { session: { id: string } }).session.id;
+  const session = context.sessions.getSession(id);
+  assert.equal(session.thinking_effort, context.agent.defaults.thinking);
+  assert.equal(session.turn_config?.thinking, 'high');
+  return id;
 }
 
 function uuidv7At(ms: number): string {

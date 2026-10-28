@@ -71,7 +71,7 @@ export function TokensSection({
         </span>
         <span className="mb-spark-wrap">
           {current
-            ? <Sparkline buckets={current.buckets} asOf={current.asOf} />
+            ? <Sparkline buckets={current.buckets} asOf={current.asOf} selection={current.selection} />
             : <span className="mb-spark-skel" aria-hidden="true" />}
           <span className="mb-spark-axis">
             <span>{axis?.[0] ?? ''}</span>

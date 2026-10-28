@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MenubarApp, type MenubarAppProps } from '../src/menubar/MenubarApp.js';
-import { makeQuotaAccount, makeSnapshot, makeTodo, USER_AUTHORED_TITLE } from './menubar-fixtures.js';
+import { DEMO_NOW, makeQuotaAccount, makeSnapshot, makeSummary, makeTodo, USER_AUTHORED_TITLE } from './menubar-fixtures.js';
 
 function makeProps(overrides: Partial<MenubarAppProps> = {}): MenubarAppProps {
   const selection = { mode: 'calendar', period: 'day' } as const;
@@ -76,6 +76,24 @@ describe('MenubarApp', () => {
     expect(props.onSelectSelection).toHaveBeenCalledWith({ mode: 'rolling', period: 'day' });
     fireEvent.click(screen.getByRole('button', { name: 'This Month' }));
     expect(props.onSelectSelection).toHaveBeenCalledWith({ mode: 'calendar', period: 'month' });
+  });
+
+  it('passes the calendar-week granularity through to the current bar tooltip', () => {
+    const selection = { mode: 'calendar', period: 'week' } as const;
+    const monday = new Date(2026, 9, 19).getTime();
+    const buckets = [0, 1, 2].map(day => ({
+      from: monday + day * 86_400_000,
+      to: day === 2 ? DEMO_NOW : monday + (day + 1) * 86_400_000,
+      tokens: 1000,
+      coverage: 'complete' as const,
+    }));
+    const summary = makeSummary(selection, {
+      from: monday, to: DEMO_NOW, trackingStartedAt: monday, buckets, totalTokens: 3000,
+    });
+    const { container } = render(<MenubarApp {...makeProps({ selection, summary })} />);
+    const current = container.querySelector('rect.cur');
+    expect(current).toHaveAttribute('aria-label', 'Wed, Oct 21 · ongoing · 1,000 tokens (1K)');
+    expect(current?.querySelector('title')?.textContent).toBe('Wed, Oct 21 · ongoing · 1,000 tokens (1K)');
   });
 
   it('shows the loading skeleton while the selected range has no matching summary', () => {

@@ -46,6 +46,8 @@ async function fixture(t: test.TestContext, configHome?: string) {
   await writeFile(runtimePath, 'fixture binary; never executed', { mode: 0o700 });
   const pluginId = parseProxyPluginId('io.gian.home-fixture');
   let probes = 0;
+  let releasedLeases = 0;
+  const probeScopes: Array<{ selectedPath: string | null; configHome: string | null | undefined }> = [];
   const profile: OpenRuntimeProfile = {
     id: 'a'.repeat(64), agentId: pluginId, pluginId, runtimeId: 'home-fixture',
     path: runtimePath, version: '1.0.0', configHome: configHome ?? join(home, '.gemini'),
@@ -55,9 +57,10 @@ async function fixture(t: test.TestContext, configHome?: string) {
     allowCreateWithoutCatalog: true, managedProxies: true,
     dataDir: join(root, 'data'), homeDir: home, releaseVersion: '0.6.7', pathEnv: '',
     runtimeResolver: {
-      resolve: async () => {
+      resolve: async (input: Parameters<RuntimeResolver['resolve']>[0]) => {
         probes += 1;
-        return { profile, lease: { release: async () => {} } };
+        probeScopes.push({ selectedPath: input.selectedPath, configHome: input.customRuntime?.configHome });
+        return { profile, lease: { release: async () => { releasedLeases += 1; } } };
       },
     } as never,
     pluginStore: {
@@ -69,7 +72,8 @@ async function fixture(t: test.TestContext, configHome?: string) {
       } : null,
     } as never,
   });
-  return { manager, root, home, runtimePath, pluginId, probes: () => probes };
+  return { manager, root, home, runtimePath, pluginId, probeScopes,
+    probes: () => probes, releasedLeases: () => releasedLeases };
 }
 
 test('external Proxy default HOME comes from the trusted probe without a built-in Provider branch', async t => {
@@ -79,7 +83,12 @@ test('external Proxy default HOME comes from the trusted probe without a built-i
     runtime: { kind: 'custom', path: f.runtimePath },
   });
   assert.deepEqual(agent.home, { kind: 'custom', path: await realpath(join(f.home, '.gemini')) });
-  assert.equal(f.probes(), 1);
+  assert.equal(f.probes(), 2, 'discover the default HOME, then verify the selected Runtime with that HOME');
+  assert.deepEqual(f.probeScopes, [
+    { selectedPath: f.runtimePath, configHome: null },
+    { selectedPath: f.runtimePath, configHome: agent.home?.path },
+  ]);
+  assert.equal(f.releasedLeases(), 2);
 });
 
 test('explicit managed HOME is not replaced by a Proxy default', async t => {
@@ -91,6 +100,8 @@ test('explicit managed HOME is not replaced by a Proxy default', async t => {
   assert.equal(agent.home?.kind, 'managed');
   assert.notEqual(agent.home?.path, join(f.home, '.gemini'));
   assert.equal(f.probes(), 1);
+  assert.deepEqual(f.probeScopes, [{ selectedPath: f.runtimePath, configHome: agent.home?.path }]);
+  assert.equal(f.releasedLeases(), 1);
 });
 
 test('unauthorized default configuration locations are rejected before saving an Agent', async t => {
