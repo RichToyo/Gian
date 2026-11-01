@@ -577,6 +577,9 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1
     devDependencies:
+      '@gian/remote-protocol':
+        specifier: workspace:*
+        version: link:../remote-protocol
       '@testing-library/jest-dom':
         specifier: ^6.9.1
         version: 6.9.1

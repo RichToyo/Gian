@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "35d0ae5bba2a398adebcc10e5de3a58f36e2721a",
+  "sourceCommit": "64039ae6c58b7dce53e6e712a8576202687c335d",
   "workingTree": false,
   "files": [
     {
@@ -7384,7 +7384,7 @@
     {
       "path": "packages/remote-server/test/account-admission.test.ts",
       "mode": 420,
-      "sha256": "8d8567a2928ce9c358933a6168ff44fa137e6301be1de5f81aba04ba36c8a115"
+      "sha256": "d75d9e835824ade7f970398f46de96027c07d28f2e59e9def4b522cec05cd369"
     },
     {
       "path": "packages/remote-server/test/account-peers.test.ts",
@@ -8339,7 +8339,7 @@
     {
       "path": "packages/web/package.json",
       "mode": 420,
-      "sha256": "f110f97320024a3a4695fdc51d8b43ec13802acceed236de8bf162ddd09c30d4"
+      "sha256": "c92e3ea303b1e158a8bf2a5af238cb41e9d426e8815ca3a47835d484d73a6f53"
     },
     {
       "path": "packages/web/public/gian-icon.svg",
@@ -10924,7 +10924,7 @@
     {
       "path": "pnpm-lock.yaml",
       "mode": 420,
-      "sha256": "e6363055261bc4c61ff4ee2945aceab60943eeb548549af7ac202dfa0ca95590"
+      "sha256": "be6d23a8c812ad832783cc154847192ffb6e08c0a59270b29c576fd720ed6993"
     },
     {
       "path": "pnpm-workspace.yaml",
