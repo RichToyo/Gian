@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "798c56dd8349e4e8813f0a694042eb08b618a973",
+  "sourceCommit": "6aaf0ae5e2434b6be560f90dbc307527f83f6c1e",
   "workingTree": false,
   "files": [
     {
@@ -3812,6 +3812,11 @@
       "sha256": "cb3677c2d8d3d377719ca82763f6d94bcdf657f61fb93f12a5209dd915fd5aca"
     },
     {
+      "path": "packages/host/test/fixtures/remote-browser.ts",
+      "mode": 420,
+      "sha256": "37367b769dbadb9b72b0f36300b2d2cbe81a03e63c305c26e79523b309e08371"
+    },
+    {
       "path": "packages/host/test/fixtures/remote-harness.ts",
       "mode": 420,
       "sha256": "e0b57c3ed6e6e59f79704bd02aa9d7f5dfa4fb2242468ff070fe12cd6bb09cdf"
@@ -4314,7 +4319,7 @@
     {
       "path": "packages/host/test/remote-settings.test.ts",
       "mode": 420,
-      "sha256": "e4da426f2249b9a6a6254239645b84956e9f9ab59f381caf69e7bb251b9f8512"
+      "sha256": "736e1da334fd8418a1d597ccd10a73b79dcd35587a39e24136e163abdbe751c8"
     },
     {
       "path": "packages/host/test/remote-translation-sync.test.ts",
@@ -4329,7 +4334,7 @@
     {
       "path": "packages/host/test/remote-web-controller.test.ts",
       "mode": 420,
-      "sha256": "6d81553819c840840538e518d3505211831c16b18c338946c8bc4091d607364b"
+      "sha256": "c5f0282b19cb82146b5f0b883cf57d563567ddadf7e1887d64280fcac08032ef"
     },
     {
       "path": "packages/host/test/remote-web-crypto-interop.test.ts",
@@ -4339,7 +4344,7 @@
     {
       "path": "packages/host/test/remote-web-upload.test.ts",
       "mode": 420,
-      "sha256": "bd094708e4dda1e50ada86b89c6bede01bffb5f95c8f1fe4c9817fa48cd81549"
+      "sha256": "e23a618f0b8fe7062911cc5ed559353cd46c25609bc6f07d80d3216534490838"
     },
     {
       "path": "packages/host/test/resolve-send-catalog-host.test.ts",

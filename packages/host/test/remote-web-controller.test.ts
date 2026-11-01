@@ -8,6 +8,7 @@ import { MemoryBrowserIdentityStore } from '../../remote-web/src/transport/ident
 import { DeviceRelayClient } from '../../remote-web/src/transport/relay-client.js';
 import { makeTestApp } from './fixtures/test-app.js';
 import { authenticatedRemoteFixture } from './fixtures/remote-account.js';
+import { installTestPinStorage, serverIdentityFetch } from './fixtures/remote-browser.js';
 
 async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promise<T> {
   const started = Date.now();
@@ -34,13 +35,15 @@ test(`production controller pairs through real Server+Host (${silentHelloPeer ? 
       return connector;
     };
   }
-  const { handle, fetch } = await makeRemoteTestApp();
+  const server = await makeRemoteTestApp();
+  const { handle, fetch } = server;
   const listened = await listenRemoteApp(handle);
-  await authenticatedRemoteFixture(fetch, hostApp.remoteIdentity, listened.url);
+  const restorePinStorage = installTestPinStorage();
   const identity = new MemoryBrowserIdentityStore();
   let controller: ReturnType<typeof createProductionController> | undefined;
   const relays: DeviceRelayClient[] = [];
   try {
+    await authenticatedRemoteFixture(fetch, hostApp.remoteIdentity, listened.url);
     const created = await (await fetch('/api/v1/admin/host-enrollments', {
       method: 'POST',
       headers: {
@@ -69,6 +72,7 @@ test(`production controller pairs through real Server+Host (${silentHelloPeer ? 
       baseUrl: listened.url,
       publicOrigin: 'https://remote.test',
       wsUrl: listened.wsUrl,
+      fetchFn: serverIdentityFetch(server),
       identity,
       cache: new MemoryEncryptedHostCache(),
       autoRestore: false,
@@ -89,6 +93,7 @@ test(`production controller pairs through real Server+Host (${silentHelloPeer ? 
       hostApp.app.remote.settingsState().pending_pairings
         .find((row) => row.status === 'pending_confirmation') ?? null
     ));
+    assert.equal(globalThis.localStorage.getItem('gian.remote.server_identity_fingerprint'), handle.services.identity.fingerprint);
     const confirm = await hostApp.fetch(`/api/remote/pairings/${pending.id}/confirm`, {
       method: 'POST',
     });
@@ -109,6 +114,7 @@ test(`production controller pairs through real Server+Host (${silentHelloPeer ? 
     assert.equal(relays.at(-1)?.protocolMode, silentHelloPeer ? 'legacy' : 'negotiated');
   } finally {
     controller?.close();
+    restorePinStorage();
     hostApp.app.remote.close();
     listened.close();
     await hostApp.cleanup();

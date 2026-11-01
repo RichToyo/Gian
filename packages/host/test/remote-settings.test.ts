@@ -16,6 +16,7 @@ import { createRemoteSettingsController } from '../../web/src/remote-settings/pr
 import { HttpRemoteServerAuthClient, RemoteAccountRetryError } from '../src/remote/server-client.js';
 import { MemoryRemoteIdentity } from '../src/remote/identity.js';
 import { makeTestApp } from './fixtures/test-app.js';
+import { installTestPinStorage, serverIdentityFetch } from './fixtures/remote-browser.js';
 
 test('cached Remote account confirmation sends only its issuer-bound opaque Gian token, without another GitHub flow', async () => {
   const identity = new MemoryRemoteIdentity();
@@ -123,33 +124,6 @@ async function setup() {
     async close() {
       unsubscribe(); controller.dispose?.(); host.app.remote.close(); listener.close(); await host.cleanup();
     },
-  };
-}
-
-function serverIdentityFetch(server: Awaited<ReturnType<typeof makeRemoteTestApp>>): typeof fetch {
-  return (async (input, init) => {
-    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
-    if (url.origin === server.publicOrigin && url.pathname === '/api/v1/server-identity') {
-      return server.fetch(url.pathname, init);
-    }
-    return fetch(input, init);
-  }) as typeof fetch;
-}
-
-function installTestPinStorage(): () => void {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
-  const values = new Map<string, string>();
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => { values.set(key, value); },
-      removeItem: (key: string) => { values.delete(key); },
-    },
-  });
-  return () => {
-    if (previous) Object.defineProperty(globalThis, 'localStorage', previous);
-    else Reflect.deleteProperty(globalThis, 'localStorage');
   };
 }
 
