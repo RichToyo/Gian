@@ -283,6 +283,13 @@ export function createRemoteSettingsFixture(
       emit({ ...state, pairing: { kind: 'idle' } });
     },
 
+    async renameDevice(deviceId, name) {
+      emit({
+        ...state,
+        devices: state.devices.map(device => device.id === deviceId ? { ...device, name: name.trim() } : device),
+      });
+    },
+
     async revokeDevice(deviceId) {
       const device = state.devices.find(d => d.id === deviceId);
       if (!device || device.revokeStatus !== 'active') return;

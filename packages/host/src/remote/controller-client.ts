@@ -1,8 +1,8 @@
 import {
   AUTH_PROTOCOL, DeviceRelayClient, REMOTE_METHOD_RESULTS, RemoteProtocolError,
-  commandResultSchema, deviceChallengeResultSchema, deviceLoginResultSchema,
-  generateCanonicalId, generateUuidV7, identityFingerprint, importP256PublicKey,
-  parseClosed, pairingClaimResultSchema, serverChallengePayload, verifyBytes, base64UrlToBytes,
+  commandResultSchema, deviceChallengeResultSchema, deviceLoginResultSchema, controllerChallengeResultSchema,
+  discoverServerIdentity, generateCanonicalId, generateUuidV7, identityFingerprint, importP256PublicKey,
+  isRemoteErrorCode, parseClosed, pairingClaimResultSchema, serverChallengePayload, verifyBytes, base64UrlToBytes,
   wsTicketResultSchema, type RemoteMethod, type DeviceRelayClientOptions,
 } from '@gian/remote-protocol';
 import type { RemoteIdentityMaterial } from './identity.js';
@@ -16,18 +16,26 @@ export interface RemoteControllerEnvironment {
   host_id: string;
   browser_id: string;
   device_id: string | null;
+  device_public_key_json?: string | null;
   crypto_connection_id: string | null;
   host_public_key_json: string | null;
   pairing_id: string | null;
   created_at: number;
 }
 
-type ControllerRelay = Pick<DeviceRelayClient, 'isOpen' | 'hostGeneration' | 'connect' | 'sendControl' | 'sendContent' | 'close'>;
+export interface RemoteControllerAdmission {
+  installationId: string;
+  accessToken: string;
+  serverIdentityFingerprint: string;
+  hostIdentity: true;
+}
+
+type ControllerRelay = Pick<DeviceRelayClient, 'isOpen' | 'hostGeneration' | 'connect' | 'sendControl' | 'sendContent' | 'close'>
+  & Partial<Pick<DeviceRelayClient, 'negotiatedCapabilities'>>;
 
 export class RemoteControllerClient {
   private relay: ControllerRelay | null = null;
   private connecting: Promise<void> | null = null;
-  private accountPeerId: string | null = null;
   private epoch = 0;
   /** Whether connected was reported through onConnectionChange and not yet
    *  balanced by a disconnect report — closing a never-connected client is
@@ -51,38 +59,59 @@ export class RemoteControllerClient {
   ) {}
 
   get connected(): boolean { return this.relay?.isOpen === true; }
+  supports(feature: string): boolean { return this.connected && this.relay?.negotiatedCapabilities?.includes(feature) === true; }
 
   static async pair(input: { origin: string; code: string; name: string }, identity: RemoteIdentityMaterial,
-    fetchImpl: typeof fetch = globalThis.fetch): Promise<RemoteControllerEnvironment> {
-    const credential = await identity.getAccountSession?.(input.origin, 'controller');
-    if (!credential || credential.expiresAt <= Date.now()) throw new RemoteProtocolError('AUTH_REQUIRED', 'Remote GitHub login required');
-    const id = generateCanonicalId();
-    if (!identity.ensureControllerIdentity) throw new RemoteProtocolError('AUTH_REQUIRED', 'secure controller identity unavailable');
-    const publicIdentity = await identity.ensureControllerIdentity(id);
+    admission: RemoteControllerAdmission, fetchImpl: typeof fetch = globalThis.fetch): Promise<RemoteControllerEnvironment> {
+    const discovered = await discoverServerIdentity({
+      origin: input.origin,
+      fetchFn: fetchImpl,
+      pinnedFingerprint: admission.serverIdentityFingerprint,
+    });
+    const publicIdentity = await identity.ensurePublic();
     const result = await fetchImpl(new URL('/api/v1/pairings/claim', input.origin), {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
-      headers: { 'content-type': 'application/json', origin: input.origin, 'x-gian-account-token': credential.token },
-      body: JSON.stringify({ protocol: AUTH_PROTOCOL, code: input.code, browser_installation_id: id,
-        device_public_key: publicIdentity.public_key, platform: process.platform, user_agent: 'Gian Desktop' }),
+      headers: {
+        'content-type': 'application/json',
+        origin: input.origin,
+        authorization: `Bearer ${admission.accessToken}`,
+      },
+      body: JSON.stringify({ protocol: AUTH_PROTOCOL, code: input.code, browser_installation_id: admission.installationId,
+        device_public_key: publicIdentity.public_key, platform: process.platform, user_agent: 'Gian Desktop',
+        controller_admission: 1 }),
     });
-    if (!result.ok) throw new RemoteProtocolError('AUTH_REQUIRED', 'pairing rejected');
-    const claim = parseClosed(pairingClaimResultSchema, await result.json());
-    return { id, name: input.name, server_origin: input.origin, server_identity_fingerprint: credential.serverFingerprint,
-      host_id: claim.host_id, browser_id: id, device_id: null, crypto_connection_id: claim.crypto_connection_id,
-      host_public_key_json: null, pairing_id: claim.pairing_id, created_at: Date.now() };
+    const json = await result.json() as Record<string, unknown> & { error?: { code?: string } };
+    if (!result.ok) {
+      const code = json.error?.code;
+      if (code && isRemoteErrorCode(code)) throw new RemoteProtocolError(code, 'pairing rejected');
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'pairing rejected');
+    }
+    const claim = parseClosed(pairingClaimResultSchema, json);
+    return { id: generateCanonicalId(), name: input.name, server_origin: input.origin,
+      server_identity_fingerprint: discovered.fingerprint, host_id: claim.host_id,
+      browser_id: admission.installationId, device_id: null,
+      device_public_key_json: JSON.stringify(publicIdentity.public_key),
+      crypto_connection_id: claim.crypto_connection_id, host_public_key_json: null,
+      pairing_id: claim.pairing_id, created_at: Date.now() };
   }
 
   async connect(): Promise<void> {
-    const credential = await this.identity.getAccountSession?.(this.environment.server_origin, 'controller');
-    if (!credential || credential.expiresAt <= Date.now()
-      || credential.serverFingerprint !== this.environment.server_identity_fingerprint) {
-      this.close();
-      throw new RemoteProtocolError('AUTH_REQUIRED', 'Remote account required');
+    try {
+      const discovered = await discoverServerIdentity({
+        origin: this.environment.server_origin,
+        fetchFn: this.fetchImpl,
+        pinnedFingerprint: this.environment.server_identity_fingerprint,
+      });
+      if (discovered.fingerprint !== this.environment.server_identity_fingerprint) {
+        throw new RemoteProtocolError('AUTH_REQUIRED', 'server identity changed');
+      }
+    } catch (error) {
+      if (error instanceof RemoteProtocolError && error.message === 'server identity changed') this.close();
+      throw error;
     }
-    if (this.connected && this.accountPeerId === credential.installationId) return;
+    if (this.connected) return;
     if (this.connecting) return this.connecting;
     this.close();
-    this.accountPeerId = credential.installationId;
     const run = this.connectOnce(this.epoch);
     this.connecting = run;
     try { await run; } finally { if (this.connecting === run) this.connecting = null; }
@@ -163,6 +192,8 @@ export class RemoteControllerClient {
         challenge: server.challenge, expires_at: server.expires_at, fingerprint: environment.server_identity_fingerprint })),
       base64UrlToBytes(server.server_identity_signature));
     if (!signatureOk) throw new RemoteProtocolError('AUTH_REQUIRED', 'Server signature invalid');
+    await this.migrateControllerAdmission();
+    this.assertEpoch(epoch);
     const challenge = parseClosed(deviceChallengeResultSchema, await this.post('/api/v1/sessions/device-challenge', {
       browser_installation_id: environment.browser_id, host_id: environment.host_id,
     }));
@@ -177,15 +208,21 @@ export class RemoteControllerClient {
       throw new RemoteProtocolError('AUTH_REQUIRED', 'Host key changed');
     }
     this.assertEpoch(epoch);
+    const publicIdentity = environment.device_public_key_json
+      ? {
+        public_key: JSON.parse(environment.device_public_key_json) as { kty: 'EC'; crv: 'P-256'; x: string; y: string },
+        fingerprint: await identityFingerprint(JSON.parse(environment.device_public_key_json)),
+      }
+      : await this.identity.ensureControllerIdentity?.(environment.browser_id);
+    if (!publicIdentity) throw new RemoteProtocolError('AUTH_REQUIRED', 'secure controller identity unavailable');
+    this.assertEpoch(epoch);
     environment.device_id = login.device_id;
+    environment.device_public_key_json = JSON.stringify(publicIdentity.public_key);
     environment.crypto_connection_id = login.crypto_connection_id;
     environment.host_public_key_json = JSON.stringify(login.host_public_key);
     environment.pairing_id = null;
     this.save(environment);
     const ticket = parseClosed(wsTicketResultSchema, await this.post('/api/v1/ws-tickets', { host_id: environment.host_id }, login.access_token));
-    this.assertEpoch(epoch);
-    if (!this.identity.ensureControllerIdentity) throw new RemoteProtocolError('AUTH_REQUIRED', 'secure controller identity unavailable');
-    const publicIdentity = await this.identity.ensureControllerIdentity(environment.browser_id);
     this.assertEpoch(epoch);
     const relay = this.createRelay({
       wsUrl: environment.server_origin.replace(/^https:/, 'wss:') + '/ws', ticket: ticket.ticket,
@@ -234,24 +271,75 @@ export class RemoteControllerClient {
     }
   }
 
+  private async migrateControllerAdmission(): Promise<void> {
+    const environment = this.environment;
+    if (!environment.device_id || !environment.device_public_key_json) return;
+    const verifier = new HttpRemoteServerAuthClient(environment.server_origin, this.identity, this.fetchImpl);
+    const login = () => verifier.controllerLogin(environment.browser_id, bytes => this.sign(bytes));
+    try {
+      await login();
+      return;
+    } catch (error) {
+      if (error instanceof RemoteProtocolError && error.code === 'CONTROLLER_REVOKED') throw error;
+      if (!(error instanceof RemoteProtocolError) || error.code !== 'CONTROLLER_NOT_ADMITTED') return;
+    }
+    let challenge;
+    try {
+      challenge = parseClosed(controllerChallengeResultSchema, await this.post('/api/v1/controller-migrations/challenge', {
+        browser_installation_id: environment.browser_id,
+        host_id: environment.host_id,
+        device_public_key: JSON.parse(environment.device_public_key_json),
+      }));
+    } catch (error) {
+      if (error instanceof RemoteProtocolError && error.code === 'CONTROLLER_ALREADY_ADMITTED') return;
+      if (error instanceof RemoteProtocolError && ['INVALID_FRAME', 'AUTH_REQUIRED'].includes(error.code)) return;
+      throw error;
+    }
+    try {
+      await this.post('/api/v1/controller-migrations/login', {
+        browser_installation_id: environment.browser_id,
+        host_id: environment.host_id,
+        challenge_id: challenge.challenge_id,
+        signature: await this.sign(new TextEncoder().encode(challenge.challenge_id)),
+      });
+    } catch (error) {
+      if (error instanceof RemoteProtocolError && error.code === 'CONTROLLER_ALREADY_ADMITTED') return;
+      try { await login(); }
+      catch { throw error; }
+    }
+  }
+
   private assertEpoch(epoch: number): void {
     if (epoch !== this.epoch) throw new RemoteProtocolError('HOST_OFFLINE', 'remote connection superseded');
   }
 
   private async post(path: string, body: Record<string, unknown>, accessToken?: string): Promise<unknown> {
-    const credential = await this.identity.getAccountSession?.(this.environment.server_origin, 'controller');
-    if (!credential || credential.expiresAt <= Date.now()) throw new RemoteProtocolError('AUTH_REQUIRED', 'Remote account required');
     const response = await this.fetchImpl(new URL(path, this.environment.server_origin), {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
       headers: { 'content-type': 'application/json', origin: this.environment.server_origin,
-        'x-gian-account-token': credential.token, ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}) },
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}) },
       body: JSON.stringify({ protocol: AUTH_PROTOCOL, ...body }),
     });
-    if (!response.ok) throw new RemoteProtocolError('AUTH_REQUIRED', 'Remote login or pairing required');
-    return response.json();
+    const json = await response.json() as Record<string, unknown> & { error?: { code?: string } };
+    if (!response.ok) {
+      const code = json.error?.code;
+      if (code && isRemoteErrorCode(code)) throw new RemoteProtocolError(code, 'Remote login or pairing required');
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'Remote login or pairing required');
+    }
+    return json;
   }
 
   private async sign(bytes: Uint8Array): Promise<string> {
+    if (this.environment.device_public_key_json) {
+      let paired: { kty?: string; crv?: string; x?: string; y?: string };
+      try { paired = JSON.parse(this.environment.device_public_key_json) as typeof paired; }
+      catch { throw new RemoteProtocolError('AUTH_REQUIRED', 'stored controller identity is invalid'); }
+      const host = await this.identity.ensurePublic();
+      if (paired.kty === host.public_key.kty && paired.crv === host.public_key.crv
+        && paired.x === host.public_key.x && paired.y === host.public_key.y) {
+        return this.identity.sign(bytes);
+      }
+    }
     if (!this.identity.signControllerIdentity) throw new RemoteProtocolError('AUTH_REQUIRED', 'secure controller signer unavailable');
     return this.identity.signControllerIdentity(this.environment.browser_id, bytes);
   }

@@ -13,19 +13,19 @@ const repository = 'RichToyo/Gian-Proxies';
 export const proxyReleaseNotes = {
   claude: {
     id: 'claude', directory: 'claude',
-    text: 'Add first-party account quota inspection for the Gian menu bar and preserve cumulative usage identity for local Token statistics. Use Proxy Protocol SDK 1.0.4 and retain Claude Code 2.1.310. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
+    text: 'Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.316 with pinned binary bytes; the official 2.1.314 through 2.1.316 changelog review found no proxy spawn-flag or permission-mode surface change, while upstream fixed orphaned shell commands on exit and claude -p auto-mode stop explanations. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   codex: {
     id: 'codex', directory: 'codex',
-    text: 'Add read-only ChatGPT subscription quota inspection through the bound Codex account, without sending a model prompt. Use Proxy Protocol SDK 1.0.4 and retain Codex CLI 0.164.0. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
+    text: 'Retain read-only ChatGPT subscription quota inspection through the bound Codex account, without sending a model prompt. Upgrade the managed Codex Runtime to official 0.166.0 with pinned archive bytes; the app-server schema delta is additive (item lifecycle timestamps, imageGeneration generationId, policyCapacityUnavailable error, optional hooks threadId and untrusted-context name); the removed review detached delivery mode is unused by this Proxy. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   dsh: {
     id: 'ai.deepseek.harness', directory: 'ai.deepseek.harness',
-    text: 'Add official DeepSeek balance inspection and step-level usage identity for local Token statistics. Use Proxy Protocol SDK 1.0.4 and bundled Bridge 0.1.8; retain the dependency-repaired DeepSeek Harness 0.2.1-rc.2 Runtime. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
+    text: 'Isolate the managed DSH profile and restore Agent presets. Use Proxy Protocol SDK 1.0.4 and the bundled Bridge 0.1.9-Dev with DeepSeek Harness 0.2.1-rc.2. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   kimi: {
     id: 'kimi', directory: 'kimi',
-    text: 'Fix TodoList and plan-review A-B-A updates reusing an event identity and blocking subsequent output and turn completion. Preserve adjacent-plan suppression and native-event replay idempotency. Upgrade the managed Kimi Code Runtime to official 2.3.3 with pinned archive bytes. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
+    text: 'Keep owned native background work attached to its admitted Gian turn until completion, and reconcile native work without automatically resending or answering. Retain Kimi Code Runtime 2.3.3. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   grok: {
     id: 'grok', directory: 'grok',
@@ -33,7 +33,7 @@ export const proxyReleaseNotes = {
   },
   antigravity: {
     id: 'io.gian.antigravity', directory: 'io.gian.antigravity',
-    text: 'Add read-only quota inspection for the separate official Antigravity CLI account and normalize supported native quota groups. Preserve observed token usage and match managed staging inventories to their actual fingerprints. Use Proxy Protocol SDK 1.0.4 and retain ACP Runtime 1.4.3. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
+    text: 'Retain read-only quota inspection for the separate official Antigravity CLI account and normalize supported native quota groups. Upgrade the managed ACP Runtime to official registry 1.4.5 with pinned pair bytes; native ACP initialize shows agent identity unchanged and agentCapabilities deep-equal to the published 1.4.4 bytes. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   zcode: {
     id: 'com.zhipu.zcode', directory: 'com.zhipu.zcode',
@@ -153,7 +153,7 @@ function capture(sequence, certificatePath, baseIndexPath, releaseDir, providers
           basis: 'verified-declaration',
         },
         companionDeclarations: provider === 'dsh'
-          ? [{ id: '@gian/dsh-bridge', version: '0.1.8', basis: 'bundled-package-source' }]
+          ? [{ id: '@gian/dsh-bridge', version: '0.1.9-Dev', basis: 'bundled-package-source' }]
           : [],
         protocolRange: manifest.protocol.range,
         manifestSchema: manifest.schemaVersion,

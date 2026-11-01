@@ -5,6 +5,7 @@ import {
   type RemoteInteraction, type RemoteMethod, type RemoteTranscriptItem,
   type ExecutionHistoryEntry,
   remoteAgentCatalogSchema,
+  remoteExecutionTargetSchema,
   remoteFileRefSchema,
   commandStatusResultSchema,
   REMOTE_METHOD_RESULTS,
@@ -78,7 +79,12 @@ export class RemoteControllerHub {
     this.onTurnCompleted = onTurnCompleted;
   }
 
-  constructor(private readonly db: Db, private readonly broadcaster: WsBroadcaster, private readonly identity: RemoteIdentityMaterial) {
+  constructor(
+    private readonly db: Db,
+    private readonly broadcaster: WsBroadcaster,
+    private readonly identity: RemoteIdentityMaterial,
+    private readonly admit?: (origin: string) => Promise<import('./controller-client.js').RemoteControllerAdmission>,
+  ) {
     this.bindings = new RemoteExecutionBindings(db);
     this.replicas = new RemoteExecutionReplicas(db);
     this.repository = new SessionRepository(db);
@@ -176,7 +182,9 @@ export class RemoteControllerHub {
   }
 
   async pair(input: { origin: string; code: string; name: string }) {
-    const environment = await RemoteControllerClient.pair(input, this.identity);
+    if (!this.admit) throw new RemoteProtocolError('CONTROLLER_NOT_ADMITTED', 'local Server admission required');
+    const admission = await this.admit(input.origin);
+    const environment = await RemoteControllerClient.pair(input, this.identity, admission);
     const old = this.db.prepare('SELECT * FROM remote_controller_environments WHERE server_origin = ? AND host_id = ?')
       .get(environment.server_origin, environment.host_id) as RemoteControllerEnvironment | undefined;
     if (old) {
@@ -189,14 +197,15 @@ export class RemoteControllerHub {
     }
     this.db.prepare(`INSERT INTO remote_controller_environments
       (id, name, server_origin, server_identity_fingerprint, host_id, browser_id, device_id,
-        crypto_connection_id, host_public_key_json, pairing_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+        device_public_key_json, crypto_connection_id, host_public_key_json, pairing_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
         name = excluded.name, browser_id = excluded.browser_id, device_id = excluded.device_id,
+        device_public_key_json = excluded.device_public_key_json,
         crypto_connection_id = excluded.crypto_connection_id, host_public_key_json = excluded.host_public_key_json,
         pairing_id = excluded.pairing_id`)
       .run(environment.id, environment.name, environment.server_origin, environment.server_identity_fingerprint,
-        environment.host_id, environment.browser_id, environment.device_id, environment.crypto_connection_id,
-        environment.host_public_key_json, environment.pairing_id, environment.created_at);
+        environment.host_id, environment.browser_id, environment.device_id, environment.device_public_key_json ?? null,
+        environment.crypto_connection_id, environment.host_public_key_json, environment.pairing_id, environment.created_at);
     return this.listEnvironments().find(item => item.id === environment.id)!;
   }
 
@@ -205,6 +214,55 @@ export class RemoteControllerHub {
     this.clients.delete(environmentId);
     this.availability.delete(environmentId);
     this.db.prepare('DELETE FROM remote_controller_environments WHERE id = ?').run(environmentId);
+  }
+
+  private deviceTarget(environment: RemoteControllerEnvironment, remoteSessionId: string) {
+    if (!environment.device_id || !environment.device_public_key_json || !environment.crypto_connection_id) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'paired device evidence required');
+    }
+    return parseClosed(remoteExecutionTargetSchema, {
+      target_version: 2,
+      server_origin: environment.server_origin,
+      server_identity_fingerprint: environment.server_identity_fingerprint,
+      host_id: environment.host_id,
+      remote_session_id: remoteSessionId,
+      device_id: environment.device_id,
+      device_public_key: JSON.parse(environment.device_public_key_json),
+      crypto_connection_id: environment.crypto_connection_id,
+    });
+  }
+
+  private async requireDeviceExecution(client: RemoteControllerClient): Promise<void> {
+    await client.connect();
+    if (!client.supports('wire.device_execution_target')) {
+      throw new RemoteProtocolError('PROTOCOL_VERSION_UNSUPPORTED', 'execution Host did not negotiate device targets');
+    }
+  }
+
+  private async requireExecutionOwner(localId: string): Promise<void> {
+    const binding = this.bindings.get(localId);
+    if (!binding) throw new RemoteProtocolError('AUTH_REQUIRED', 'execution binding unavailable');
+    const client = this.client(this.repository.get(localId).remote_execution!.environment_id);
+    const environment = client.environment;
+    await client.connect();
+    if (this.closed) throw new RemoteProtocolError('HOST_OFFLINE', 'controller is closed');
+    const target = binding.target;
+    const sameRemote = environment.server_origin === target.server_origin
+      && environment.server_identity_fingerprint === target.server_identity_fingerprint
+      && environment.host_id === target.host_id && environment.device_id && environment.device_public_key_json
+      && environment.crypto_connection_id;
+    const legacyDeviceEvidence = !('target_version' in target) && sameRemote && (this.db.prepare(
+      'SELECT COUNT(*) AS count FROM remote_execution_send_requests WHERE local_session_id = ? AND browser_id != ?',
+    ).get(localId, environment.browser_id) as { count: number }).count === 0;
+    const deviceTarget = 'target_version' in target && sameRemote
+      && environment.device_id === target.device_id && environment.crypto_connection_id === target.crypto_connection_id
+      && canonicalJson(JSON.parse(environment.device_public_key_json!)) === canonicalJson(target.device_public_key);
+    if (client.supports('wire.device_execution_target') && (legacyDeviceEvidence || deviceTarget)) return;
+    if ('target_version' in target) throw new RemoteProtocolError('AUTH_REQUIRED', 'paired execution device changed');
+    const account = await this.identity.getAccountSession?.(target.server_origin, 'controller');
+    if (this.closed || account?.accountId !== target.account_id || account.expiresAt <= Date.now()) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'original execution account or proven paired device required');
+    }
   }
 
   async catalog(environmentId: string) {
@@ -228,6 +286,7 @@ export class RemoteControllerHub {
   async create(input: RemoteSessionCreate, requestId: string): Promise<Session> {
     if (input.task_id && !this.db.prepare("SELECT 1 FROM tasks WHERE id = ? AND status = 'open'").get(input.task_id)) throw new Error('local Task is not open');
     const client = this.client(input.environment_id);
+    await this.requireDeviceExecution(client);
     const catalog = await this.catalog(input.environment_id);
     const repo = catalog.workspaces.find(item => item.id === input.workspace_id);
     const agentId = input.agent_id.startsWith(`remote:${input.environment_id}:`)
@@ -277,12 +336,10 @@ export class RemoteControllerHub {
   }
 
   private async importSession(environmentId: string, remote: ExecutionSession, repositoryName: string, taskId?: string): Promise<Session> {
-    const environment = this.client(environmentId).environment;
-    const account = await this.identity.getAccountSession?.(environment.server_origin, 'controller');
-    if (!account) throw new RemoteProtocolError('AUTH_REQUIRED', 'account required');
-    const target = { server_origin: environment.server_origin, server_identity_fingerprint: environment.server_identity_fingerprint,
-      account_id: account.accountId, host_id: environment.host_id, remote_session_id: remote.id };
-    let bound = this.bindings.find(target);
+    const client = this.client(environmentId);
+    await this.requireDeviceExecution(client);
+    const target = this.deviceTarget(client.environment, remote.id);
+    let bound = this.bindings.find(target) ?? this.bindings.findRemoteSession(target);
     if (!bound) {
       if (taskId && !this.db.prepare("SELECT 1 FROM tasks WHERE id = ? AND status = 'open'").get(taskId)) throw new Error('local Task is not open');
       const localId = generateCanonicalId();
@@ -324,8 +381,7 @@ export class RemoteControllerHub {
     if (!binding) return;
     const session = this.repository.get(localId);
     const client = this.client(session.remote_execution!.environment_id);
-    const credential = await this.identity.getAccountSession?.(binding.target.server_origin, 'controller');
-    if (!credential || credential.accountId !== binding.target.account_id) throw new RemoteProtocolError('AUTH_REQUIRED', 'account changed');
+    await this.requireExecutionOwner(localId);
     for (let page = 0; page < 16; page += 1) {
       const previous = this.replicas.snapshot(localId);
       const data = await client.request('execution.sync', { session_id: binding.target.remote_session_id,
@@ -375,8 +431,7 @@ export class RemoteControllerHub {
     if (!binding) throw new Error('remote binding missing');
     const session = this.repository.get(localId);
     const beforeQueue = method === 'queue.clear' ? this.queue(localId).map(entry => entry.id) : [];
-    const credential = await this.identity.getAccountSession?.(binding.target.server_origin, 'controller');
-    if (!credential || credential.accountId !== binding.target.account_id) throw new RemoteProtocolError('AUTH_REQUIRED', 'account changed');
+    await this.requireExecutionOwner(localId);
     if (method === 'session.send') this.bindings.markStarted(localId, binding.revision);
     const result = await this.client(session.remote_execution!.environment_id).request(method,
       { ...params, ...(method === 'interaction.respond' ? {} : { session_id: binding.target.remote_session_id }) });
@@ -508,8 +563,7 @@ export class RemoteControllerHub {
     const binding = this.bindings.get(localId)!;
     const session = this.repository.get(localId);
     const client = this.client(session.remote_execution!.environment_id);
-    const account = await this.identity.getAccountSession?.(binding.target.server_origin, 'controller');
-    if (account?.accountId !== binding.target.account_id) throw new RemoteProtocolError('AUTH_REQUIRED', 'account changed');
+    await this.requireExecutionOwner(localId);
     const existing = this.db.prepare('SELECT * FROM remote_execution_send_requests WHERE request_id = ?').get(requestId) as {
       local_session_id: string; binding_revision: number; browser_id: string; command_id: string;
       input_json: string; params_json: string; result_json: string | null; method: string;
@@ -615,8 +669,7 @@ export class RemoteControllerHub {
     if (!binding) throw new Error('remote binding missing');
     const session = this.repository.get(localId);
     const client = this.client(session.remote_execution!.environment_id);
-    const account = await this.identity.getAccountSession?.(binding.target.server_origin, 'controller');
-    if (account?.accountId !== binding.target.account_id) throw new RemoteProtocolError('AUTH_REQUIRED', 'account changed');
+    await this.requireExecutionOwner(localId);
     const serialized = canonicalJson({ localId, input: { text: input.text }, queueId: input.queue_id, revision: input.expected_queue_revision });
     const requestId = remoteStableUuid('translated-queue-edit', serialized);
     const existing = this.db.prepare('SELECT * FROM remote_execution_send_requests WHERE request_id = ?')
@@ -776,9 +829,10 @@ export class RemoteControllerHub {
       .get(environmentId) as RemoteControllerEnvironment | undefined;
     if (!environment) throw new Error('remote environment not found');
     const client = new RemoteControllerClient(environment, this.identity, next => {
-      this.db.prepare(`UPDATE remote_controller_environments SET device_id = ?, crypto_connection_id = ?,
-        host_public_key_json = ?, pairing_id = ? WHERE id = ?`)
-        .run(next.device_id, next.crypto_connection_id, next.host_public_key_json, next.pairing_id, next.id);
+      this.db.prepare(`UPDATE remote_controller_environments SET device_id = ?, device_public_key_json = ?,
+        crypto_connection_id = ?, host_public_key_json = ?, pairing_id = ? WHERE id = ?`)
+        .run(next.device_id, next.device_public_key_json ?? null, next.crypto_connection_id,
+          next.host_public_key_json, next.pairing_id, next.id);
     }, undefined, undefined, () => this.broadcastEnvironments());
     this.clients.set(environmentId, client);
     return client;

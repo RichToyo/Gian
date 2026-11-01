@@ -14,7 +14,7 @@ import type {
   SlashCommandSource,
   ThinkingEffort,
 } from '@gian/shared';
-import { catalogModeSemantics, isApprovalMode } from '@gian/shared';
+import { catalogOptionUsesProviderNativeMode, isApprovalMode } from '@gian/shared';
 import { loadAllFiles, loadProxyCapabilities, loadProxyModels, loadSlashCommands } from '../../api.js';
 
 export type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
@@ -266,10 +266,13 @@ export function executorSettingsFromCapabilities(executor: Executor | null, raw:
   const legacyModes = raw && typeof raw === 'object'
     ? modesFromCapabilities({ modes: (raw as { modes?: unknown }).modes })
     : [];
-  // Mode vocabulary follows `catalogModeSemantics`, not binding: a Proxy's
-  // native mode may be turn-bound. `catalog.modeSemantics`-gated modeKind
-  // markers win; the legacy kind allowlist only covers older Proxies.
-  const providerNative = catalogModeSemantics(executor, catalog) === 'provider-native';
+  // Mode vocabulary follows per-option semantics, not binding: a Proxy's
+  // native mode may be turn-bound. Explicit modeKind wins; Claude's
+  // ungated native permission choices are recognized without changing Host
+  // legacy compatibility.
+  const providerNative = catalog.configOptions.some(option => (
+    catalogOptionUsesProviderNativeMode(executor, option)
+  ));
   const catalogModesAreSemantic = advertisedModes.length > 0
     && advertisedModes.every(mode => isApprovalMode(mode.id));
   const modes = providerNative
@@ -328,7 +331,7 @@ export function createConfigsFromCatalog(
     else if (option.role === 'effort') {
       thinkingEffort = value == null ? null : String(value);
     } else if (option.role === 'approval_mode' && isApprovalMode(value)
-      && catalogModeSemantics(executor, { configOptions: [option] }) === 'gian-preset') {
+      && !catalogOptionUsesProviderNativeMode(executor, option)) {
       approvalMode = value;
     } else if (option.role === 'fast') {
       serviceTier = value === true ? 'fast' : null;

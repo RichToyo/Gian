@@ -230,6 +230,18 @@ contextBridge.exposeInMainWorld(
         return () => ipcRenderer.removeListener('desktop:zoom-changed', handler);
       },
     }),
+    remoteTransport: Object.freeze({
+      request: (input: unknown) => ipcRenderer.invoke('desktop:remote-transport:request', input),
+      cancel: (id: string) => ipcRenderer.invoke('desktop:remote-transport:cancel', id) as Promise<boolean>,
+      openSocket: (origin: string) => ipcRenderer.invoke('desktop:remote-transport:open-socket', origin) as Promise<string>,
+      sendSocket: (id: string, data: string) => ipcRenderer.invoke('desktop:remote-transport:send-socket', id, data) as Promise<boolean>,
+      closeSocket: (id: string) => ipcRenderer.invoke('desktop:remote-transport:close-socket', id) as Promise<boolean>,
+      onSocketEvent: (listener: (event: unknown) => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, value: unknown) => listener(value);
+        ipcRenderer.on('desktop:remote-transport:socket', handler);
+        return () => ipcRenderer.removeListener('desktop:remote-transport:socket', handler);
+      },
+    }),
     githubAuth: Object.freeze({
       getState: () => ipcRenderer.invoke('desktop:github-auth:get-state'),
       start: () => ipcRenderer.invoke('desktop:github-auth:start'),

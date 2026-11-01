@@ -212,3 +212,164 @@ process.stdout.write(chunk);
   assert.match(result.stdout, /tool 1\.2\.3/);
   assert.equal(result.stdout.endsWith('x'.repeat(64 * 1024)), true);
 });
+
+test('bounded command distinguishes natural and persistent residual groups', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-bounded-grace-'));
+  t.after(async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(root, { recursive: true, force: true });
+  });
+  const ok = await script(root, 'ok.sh', '#!/bin/sh\necho tool 1.2.3\n');
+
+  let transientProbes = 0;
+  const transientSignals: NodeJS.Signals[] = [];
+  const result = await runBoundedCommand(ok, [], {
+    timeoutMs: 2_000,
+    hooks: {
+      probeProcessGroup() {
+        transientProbes += 1;
+        return transientProbes > 1;
+      },
+      signalProcessGroup(_groupId, signal) {
+        transientSignals.push(signal);
+      },
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /tool 1\.2\.3/);
+  assert.equal(transientProbes, 2);
+  assert.deepEqual(transientSignals, []);
+
+  let persistentCleaned = false;
+  const persistentSignals: NodeJS.Signals[] = [];
+  await assert.rejects(
+    () => runBoundedCommand(ok, [], {
+      timeoutMs: 2_000,
+      terminateGraceMs: 100,
+      hooks: {
+        probeProcessGroup() {
+          return persistentCleaned;
+        },
+        signalProcessGroup(_groupId, signal) {
+          persistentSignals.push(signal);
+          if (signal === 'SIGTERM') persistentCleaned = true;
+        },
+      },
+    }),
+    (error: unknown) => error instanceof BoundedCommandError && /had to be cleaned/.test(error.message),
+  );
+  assert.deepEqual(persistentSignals, ['SIGTERM']);
+});
+
+test('bounded command keeps descendant-held stdio on the deadline', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-bounded-held-stdio-'));
+  t.after(async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(root, { recursive: true, force: true });
+  });
+  const held = await script(root, 'held-stdio.sh', `#!/bin/sh
+set +m
+/bin/sleep 30 &
+printf 'tool 1.2.3\\n'
+exit 0
+`);
+  await assert.rejects(
+    () => runBoundedCommand(held, [], { timeoutMs: 100, terminateGraceMs: 20 }),
+    (error: unknown) => error instanceof BoundedCommandError && error.timedOut,
+  );
+});
+
+test('bounded command fails closed when the process-group probe is not permitted', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-bounded-eperm-'));
+  t.after(async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(root, { recursive: true, force: true });
+  });
+  const ok = await script(root, 'ok.sh', '#!/bin/sh\necho tool 1.2.3\n');
+  const signals: NodeJS.Signals[] = [];
+  await assert.rejects(
+    () => runBoundedCommand(ok, [], {
+      timeoutMs: 2_000,
+      hooks: {
+        probeProcessGroup() {
+          const error = new Error('process group probe denied') as NodeJS.ErrnoException;
+          error.code = 'EPERM';
+          throw error;
+        },
+        signalProcessGroup(_groupId, signal) {
+          signals.push(signal);
+        },
+      },
+    }),
+    /process group probe denied/,
+  );
+  assert.deepEqual(signals, []);
+});
+
+test('bounded command rejects a deadline during natural-exit grace and latches ESRCH', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-bounded-grace-deadline-'));
+  t.after(async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(root, { recursive: true, force: true });
+  });
+  const ok = await script(root, 'ok.sh', '#!/bin/sh\necho tool 1.2.3\n');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  let notifyFirstProbe!: () => void;
+  const firstProbe = new Promise<void>((resolve) => {
+    notifyFirstProbe = resolve;
+  });
+  let probes = 0;
+  let absenceObserved = false;
+  let probesAfterAbsence = 0;
+  let signalsAfterAbsence = 0;
+  const signals: NodeJS.Signals[] = [];
+  const outcome = runBoundedCommand(ok, [], {
+    timeoutMs: 40,
+    terminateGraceMs: 20,
+    hooks: {
+      probeProcessGroup() {
+        if (absenceObserved) probesAfterAbsence += 1;
+        probes += 1;
+        if (probes === 1) {
+          notifyFirstProbe();
+          return false;
+        }
+        if (signals.includes('SIGTERM')) {
+          absenceObserved = true;
+          const error = new Error('process group absent') as NodeJS.ErrnoException;
+          error.code = 'ESRCH';
+          throw error;
+        }
+        return false;
+      },
+      signalProcessGroup(_groupId, signal) {
+        if (absenceObserved) signalsAfterAbsence += 1;
+        signals.push(signal);
+      },
+    },
+  }).then(
+    () => null,
+    (error: unknown) => error,
+  );
+
+  await firstProbe;
+  t.mock.timers.tick(20);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(probes, 2);
+  assert.deepEqual(signals, []);
+
+  t.mock.timers.tick(20);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const error = await outcome;
+  assert.ok(error instanceof BoundedCommandError);
+  assert.equal(error.timedOut, true);
+  assert.equal(absenceObserved, true);
+  t.mock.timers.tick(21);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(probes, 3);
+  assert.deepEqual(signals, ['SIGTERM']);
+  assert.equal(probesAfterAbsence, 0);
+  assert.equal(signalsAfterAbsence, 0);
+  t.mock.timers.reset();
+});

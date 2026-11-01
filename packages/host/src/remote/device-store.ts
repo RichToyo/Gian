@@ -9,6 +9,7 @@ export interface RemoteDeviceRecord {
   id: string;
   publicKey: string;
   name: string;
+  nameCustomized: boolean;
   platform: string;
   role: 'admin';
   grants: GianToolMethod[];
@@ -24,6 +25,7 @@ interface DeviceRow {
   id: string;
   public_key: string;
   name: string;
+  name_customized: number;
   platform: string;
   role: string;
   grants_json: string;
@@ -132,6 +134,13 @@ export class RemoteDeviceStore {
     ).run(new Date().toISOString(), id);
   }
 
+  rename(id: string, name: string): RemoteDeviceRecord {
+    const current = this.get(id);
+    if (!current) throw new Error('device_not_found');
+    this.db.prepare('UPDATE remote_devices SET name = ?, name_customized = 1 WHERE id = ?').run(name, id);
+    return this.get(id)!;
+  }
+
   revoke(id: string): RemoteDeviceRecord {
     const current = this.get(id);
     if (!current) throw new Error(`remote device not found: ${id}`);
@@ -151,6 +160,7 @@ function project(row: DeviceRow): RemoteDeviceRecord {
     id: row.id,
     publicKey: row.public_key,
     name: row.name,
+    nameCustomized: row.name_customized === 1,
     platform: row.platform,
     role: 'admin',
     grants: JSON.parse(row.grants_json) as GianToolMethod[],

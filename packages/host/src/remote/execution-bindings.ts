@@ -17,8 +17,17 @@ export interface RemoteExecutionBinding extends RemoteExecutionBindingInput {
   created_at: number;
 }
 
-interface BindingRow extends RemoteExecutionTarget {
+interface BindingRow {
   local_session_id: string;
+  server_origin: string;
+  server_identity_fingerprint: string;
+  account_id: string | null;
+  target_version: number | null;
+  device_id: string | null;
+  device_public_key_json: string | null;
+  crypto_connection_id: string | null;
+  host_id: string;
+  remote_session_id: string;
   revision: number;
   execution_started_at: number | null;
   created_at: number;
@@ -42,12 +51,16 @@ export class RemoteExecutionBindings {
       this.assertNotExecuted(input.local_session_id);
       this.assertUnclaimed(input.target, input.local_session_id);
       const target = input.target;
+      const device = 'target_version' in target ? target : null;
       this.db.prepare(`INSERT INTO remote_execution_bindings
         (local_session_id, server_origin, server_identity_fingerprint, account_id,
+          target_version, device_id, device_public_key_json, crypto_connection_id,
           host_id, remote_session_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(input.local_session_id, target.server_origin, target.server_identity_fingerprint,
-          target.account_id, target.host_id, target.remote_session_id, this.now());
+          'target_version' in target ? null : target.account_id, device?.target_version ?? null, device?.device_id ?? null,
+          device ? JSON.stringify(device.device_public_key) : null, device?.crypto_connection_id ?? null,
+          target.host_id, target.remote_session_id, this.now());
       return this.require(input.local_session_id);
     })();
   }
@@ -61,12 +74,27 @@ export class RemoteExecutionBindings {
 
   find(target: RemoteExecutionTarget): RemoteExecutionBinding | null {
     const parsed = parseClosed(remoteExecutionTargetSchema, target);
-    const row = this.db.prepare(`SELECT * FROM remote_execution_bindings WHERE
-      server_origin = ? AND server_identity_fingerprint = ? AND account_id = ?
-      AND host_id = ? AND remote_session_id = ?`)
-      .get(parsed.server_origin, parsed.server_identity_fingerprint, parsed.account_id,
-        parsed.host_id, parsed.remote_session_id) as BindingRow | undefined;
+    const row = 'target_version' in parsed
+      ? this.db.prepare(`SELECT * FROM remote_execution_bindings WHERE target_version = 2
+          AND server_origin = ? AND server_identity_fingerprint = ? AND host_id = ? AND remote_session_id = ?
+          AND device_id = ? AND crypto_connection_id = ?`)
+        .get(parsed.server_origin, parsed.server_identity_fingerprint, parsed.host_id,
+          parsed.remote_session_id, parsed.device_id, parsed.crypto_connection_id) as BindingRow | undefined
+      : this.db.prepare(`SELECT * FROM remote_execution_bindings WHERE target_version IS NULL
+          AND server_origin = ? AND server_identity_fingerprint = ? AND account_id = ?
+          AND host_id = ? AND remote_session_id = ?`)
+        .get(parsed.server_origin, parsed.server_identity_fingerprint, parsed.account_id,
+          parsed.host_id, parsed.remote_session_id) as BindingRow | undefined;
     return row ? project(row) : null;
+  }
+
+  findRemoteSession(target: RemoteExecutionTarget): RemoteExecutionBinding | null {
+    const parsed = parseClosed(remoteExecutionTargetSchema, target);
+    const rows = this.db.prepare(`SELECT * FROM remote_execution_bindings
+      WHERE server_origin = ? AND server_identity_fingerprint = ? AND host_id = ? AND remote_session_id = ?`)
+      .all(parsed.server_origin, parsed.server_identity_fingerprint, parsed.host_id, parsed.remote_session_id) as BindingRow[];
+    if (rows.length > 1) throw conflict();
+    return rows[0] ? project(rows[0]) : null;
   }
 
   retarget(localSessionId: string, expectedRevision: number, target: RemoteExecutionTarget): RemoteExecutionBinding {
@@ -81,11 +109,15 @@ export class RemoteExecutionBindings {
       }
       this.assertNotExecuted(localSessionId);
       this.assertUnclaimed(next, localSessionId);
+      const device = 'target_version' in next ? next : null;
       this.db.prepare(`UPDATE remote_execution_bindings SET
-        server_origin = ?, server_identity_fingerprint = ?, account_id = ?,
+        server_origin = ?, server_identity_fingerprint = ?, account_id = ?, target_version = ?,
+        device_id = ?, device_public_key_json = ?, crypto_connection_id = ?,
         host_id = ?, remote_session_id = ?, revision = revision + 1
         WHERE local_session_id = ?`)
-        .run(next.server_origin, next.server_identity_fingerprint, next.account_id,
+        .run(next.server_origin, next.server_identity_fingerprint, 'target_version' in next ? null : next.account_id,
+          device?.target_version ?? null, device?.device_id ?? null,
+          device ? JSON.stringify(device.device_public_key) : null, device?.crypto_connection_id ?? null,
           next.host_id, next.remote_session_id, localSessionId);
       return this.require(localSessionId);
     })();
@@ -122,7 +154,7 @@ export class RemoteExecutionBindings {
   }
 
   private assertUnclaimed(target: RemoteExecutionTarget, localSessionId: string): void {
-    const existing = this.find(target);
+    const existing = this.findRemoteSession(target);
     if (existing && existing.local_session_id !== localSessionId) {
       throw new RemoteProtocolError('PRECONDITION_FAILED', 'execution already has a local session');
     }
@@ -139,9 +171,27 @@ export class RemoteExecutionBindings {
 }
 
 function project(row: BindingRow): RemoteExecutionBinding {
-  const { local_session_id, revision, execution_started_at, created_at, ...target } = row;
+  const target = row.target_version === 2 ? {
+    target_version: 2,
+    server_origin: row.server_origin,
+    server_identity_fingerprint: row.server_identity_fingerprint,
+    host_id: row.host_id,
+    remote_session_id: row.remote_session_id,
+    device_id: row.device_id,
+    device_public_key: row.device_public_key_json ? JSON.parse(row.device_public_key_json) : null,
+    crypto_connection_id: row.crypto_connection_id,
+  } : {
+    server_origin: row.server_origin,
+    server_identity_fingerprint: row.server_identity_fingerprint,
+    account_id: row.account_id,
+    host_id: row.host_id,
+    remote_session_id: row.remote_session_id,
+  };
   return {
-    local_session_id, revision, execution_started_at, created_at,
+    local_session_id: row.local_session_id,
+    revision: row.revision,
+    execution_started_at: row.execution_started_at,
+    created_at: row.created_at,
     target: parseClosed(remoteExecutionTargetSchema, target),
   };
 }

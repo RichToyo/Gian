@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { generateCanonicalId, RemoteProtocolError } from '@gian/remote-protocol';
+import { generateCanonicalId, identityFingerprint, RemoteProtocolError, type RemoteMethod } from '@gian/remote-protocol';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import type { RemoteControllerClient, RemoteControllerEnvironment } from '../src/remote/controller-client.js';
 import { RemoteControllerHub } from '../src/remote/controller-hub.js';
-import { seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
+import { command, seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 
 test('Remote ownership probes let local Side Chat sends through without weakening binding validation', async () => {
   const f = setupRemoteHarness();
@@ -44,6 +44,7 @@ test('native send retries reuse a durable command and never execute twice after 
     const environment: RemoteControllerEnvironment = {
       id: generateCanonicalId(), name: 'Remote test', server_origin: 'https://remote.test', server_identity_fingerprint: 'a'.repeat(64),
       host_id: generateCanonicalId(), browser_id: generateCanonicalId(), device_id: device.id,
+      device_public_key_json: device.publicKey,
       crypto_connection_id: generateCanonicalId(), host_public_key_json: null, pairing_id: null, created_at: Date.now(),
     };
     f.db.prepare(`INSERT INTO remote_controller_environments
@@ -55,16 +56,22 @@ test('native send retries reuse a durable command and never execute twice after 
       (id, executor, native_session_id, task_id, remote_environment_id, remote_repository_id, remote_repository_name)
       VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(localId, 'claude', generateCanonicalId(), f.taskId, environment.id, f.workspaceId, 'Remote test');
-    hub.bindings.bind({ local_session_id: localId, target: { server_origin: environment.server_origin,
-      server_identity_fingerprint: environment.server_identity_fingerprint, account_id: '42',
-      host_id: environment.host_id, remote_session_id: remote.id } });
-    await f.identity.setAccountSession(environment.server_origin, { role: 'controller', serverOrigin: environment.server_origin,
-      serverFingerprint: environment.server_identity_fingerprint, installationId: generateCanonicalId(), accountId: '42',
-      accountLogin: 'owner', token: 'fixture-only', expiresAt: Date.now() + 60_000 }, 'controller');
+    hub.bindings.bind({ local_session_id: localId, target: {
+      target_version: 2, server_origin: environment.server_origin,
+      server_identity_fingerprint: environment.server_identity_fingerprint,
+      host_id: environment.host_id, remote_session_id: remote.id,
+      device_id: device.id, device_public_key: JSON.parse(device.publicKey),
+      crypto_connection_id: environment.crypto_connection_id!,
+    } });
+    t.mock.method(f.identity, 'getAccountSession', async () => {
+      throw new Error('GitHub must not be consulted for a device execution');
+    });
     let sends = 0;
     let loseSync = false;
     const commands: string[] = [];
     t.mock.method(hub, 'client', () => ({ environment, connected: true,
+      async connect() {},
+      supports(feature: string) { return feature === 'wire.device_execution_target'; },
       async request(method: string, params: { after?: number; stream_id?: string }, commandId: string) {
         if (method === 'execution.sync') {
           if (loseSync) throw new RemoteProtocolError('HOST_OFFLINE', 'lost response');
@@ -88,6 +95,64 @@ test('native send retries reuse a durable command and never execute twice after 
     await assert.rejects(hub.handleMessage({ ...input, text: 'Different operation' }), /request changed/);
     assert.equal(f.sessions.getSession(localId).task_id, f.taskId);
     assert.equal(f.sessions.getSession(remote.id).task_id, null);
+  } finally { hub.close(); teardownRemoteHarness(f); }
+});
+
+test('accountless controller creates, reads, catalogs and takes over through the real Host adapter', async t => {
+  const f = setupRemoteHarness();
+  const hub = new RemoteControllerHub(f.db, { broadcast() {} } as unknown as WsBroadcaster, f.identity);
+  try {
+    const serverKey = { kty: 'EC' as const, crv: 'P-256' as const, x: 'A'.repeat(43), y: 'B'.repeat(43) };
+    const hostId = generateCanonicalId();
+    const serverOrigin = 'https://remote.example';
+    const serverFingerprint = await identityFingerprint(serverKey);
+    await f.runtime.enrollment.recordClaim({ hostId, serverUrl: serverOrigin, hostName: 'Execution Host',
+      refreshSecret: 'fixture-refresh', serverIdentity: { public_key: serverKey, fingerprint: serverFingerprint } });
+    const device = f.runtime.devices.create({
+      publicKey: JSON.stringify({ kty: 'EC', crv: 'P-256', x: 'C'.repeat(43), y: 'D'.repeat(43) }),
+      name: 'Accountless Desktop', platform: 'desktop', cryptoConnectionId: generateCanonicalId(),
+    });
+    const environment: RemoteControllerEnvironment = {
+      id: generateCanonicalId(), name: 'Device environment', server_origin: serverOrigin,
+      server_identity_fingerprint: serverFingerprint, host_id: hostId, browser_id: generateCanonicalId(),
+      device_id: device.id, device_public_key_json: device.publicKey,
+      crypto_connection_id: device.cryptoConnectionId, host_public_key_json: null, pairing_id: null, created_at: Date.now(),
+    };
+    f.db.prepare(`INSERT INTO remote_controller_environments
+      (id, name, server_origin, server_identity_fingerprint, host_id, browser_id, device_id,
+        device_public_key_json, crypto_connection_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(environment.id, environment.name, environment.server_origin, environment.server_identity_fingerprint,
+        environment.host_id, environment.browser_id, environment.device_id, environment.device_public_key_json,
+        environment.crypto_connection_id, environment.created_at);
+    t.mock.method(f.identity, 'getAccountSession', async () => {
+      throw new Error('GitHub must not be consulted for device execution');
+    });
+    t.mock.method(hub, 'client', () => ({ environment, connected: true,
+      async connect() {},
+      supports(feature: string) { return feature === 'wire.device_execution_target'; },
+      async request(method: RemoteMethod, params: unknown, commandId?: string) {
+        const result = await f.runtime.commands.execute(device, command(method, params, commandId), {
+          wireFeatures: ['wire.device_execution_target'],
+        });
+        if (!result.ok) throw new RemoteProtocolError(result.error!.code as 'UNKNOWN_OUTCOME', result.error!.message);
+        return result.data;
+      },
+    }) as unknown as RemoteControllerClient);
+
+    const catalog = await hub.catalog(environment.id);
+    const workspace = catalog.workspaces.find(item => item.id === f.workspaceId)!;
+    const agent = catalog.agents.find(item => item.readiness === 'ready')!;
+    const created = await hub.create({ environment_id: environment.id, workspace_id: workspace.id,
+      agent_id: agent.id, name: 'Created without GitHub' }, generateCanonicalId());
+    const binding = hub.bindings.get(created.id)!;
+    assert.equal('target_version' in binding.target && binding.target.target_version, 2);
+    assert.equal('account_id' in binding.target, false);
+    assert.equal((await hub.listExecutions(environment.id)).sessions[0]?.id, binding.target.remote_session_id);
+    assert.ok(await hub.agentCatalog(environment.id, agent.id));
+    const sessionCount = (f.db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number }).count;
+    const taken = await hub.takeOver(environment.id, binding.target.remote_session_id);
+    assert.equal(taken.id, created.id);
+    assert.equal((f.db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number }).count, sessionCount);
   } finally { hub.close(); teardownRemoteHarness(f); }
 });
 
@@ -186,6 +251,8 @@ test('sync failure path broadcasts the environments snapshot (deduped on repeat)
       serverFingerprint: environment.server_identity_fingerprint, installationId: generateCanonicalId(), accountId: '42',
       accountLogin: 'owner', token: 'fixture-only', expiresAt: Date.now() + 60_000 }, 'controller');
     t.mock.method(hub, 'client', () => ({ environment, connected: false,
+      async connect() {},
+      supports() { return false; },
       async request() { throw new RemoteProtocolError('HOST_OFFLINE', 'remote connection lost'); },
     }) as unknown as RemoteControllerClient);
 
@@ -196,5 +263,14 @@ test('sync failure path broadcasts the environments snapshot (deduped on repeat)
     await assert.rejects(hub.sync(localId), /remote connection lost/);
     assert.equal(sent.filter(message => message.type === 'remote:environments').length, 1,
       'a repeated failure with unchanged connectivity does not re-broadcast');
+  } finally { hub.close(); teardownRemoteHarness(f); }
+});
+
+test('a new native pairing cannot bypass local Server admission', async () => {
+  const f = setupRemoteHarness();
+  const hub = new RemoteControllerHub(f.db, { broadcast() {} } as unknown as WsBroadcaster, f.identity);
+  try {
+    await assert.rejects(hub.pair({ origin: 'https://remote.test', code: 'ABCD-EFGH', name: 'Other Mac' }),
+      (error: unknown) => error instanceof RemoteProtocolError && error.code === 'CONTROLLER_NOT_ADMITTED');
   } finally { hub.close(); teardownRemoteHarness(f); }
 });

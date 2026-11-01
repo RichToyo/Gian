@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bridgePackageDir = join(rootDir, 'packages/proxies/dsh-bridge');
+const inspectorPackageDir = join(bridgePackageDir, 'test/fixtures/preset-inspector');
 const defaultTimeoutMs = 60_000;
 const shutdownTimeoutMs = 15_000;
 const credentialName = /(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?)(?:_|$)/i;
@@ -73,8 +74,12 @@ function isolatedEnvironment(home) {
     DSH_HOME: home,
     DSH_PERMISSION_MODE: 'read-only',
     DSH_TELEMETRY_DISABLED: '1',
+    DEEPSEEK_BASE_URL: 'http://127.0.0.1:9/v1',
+    DEEPSEEK_API_KEY: 'isolated-no-requests',
     FORCE_COLOR: '0',
     NO_COLOR: '1',
+    GIAN_DSH_CANARY_REPORT: join(home, 'preset-report.jsonl'),
+    GIAN_DSH_CANARY_SETTINGS_TRIGGER: join(home, 'set-default-preset'),
   };
 }
 
@@ -86,7 +91,10 @@ async function createIsolatedProfile(canaryRoot, packageDir) {
   await writeFile(join(profileDir, 'package.json'), `${JSON.stringify({
     name: 'gian-dsh-bridge-canary-profile',
     private: true,
-    dependencies: { '@gian/dsh-bridge': `file:${packageDir}` },
+    dependencies: {
+      '@gian/dsh-bridge': `file:${packageDir}`,
+      '@gian/dsh-canary-preset-inspector': `file:${inspectorPackageDir}`,
+    },
     dsh: {
       profile: {
         bundles: ['@deepseek-ai/dsh-base', '@gian/dsh-bridge'],
@@ -94,7 +102,18 @@ async function createIsolatedProfile(canaryRoot, packageDir) {
     },
   }, null, 2)}\n`, 'utf8');
   await symlink(packageDir, join(scopedModules, 'dsh-bridge'), 'dir');
-  return { home, profileDir };
+  await symlink(inspectorPackageDir, join(scopedModules, 'dsh-canary-preset-inspector'), 'dir');
+  await writeFile(
+    join(profileDir, 'cordis.patch.yml'),
+    await readFile(join(inspectorPackageDir, 'cordis.patch.yml'), 'utf8'),
+    'utf8',
+  );
+  return {
+    home,
+    profileDir,
+    reportPath: join(home, 'preset-report.jsonl'),
+    settingsTriggerPath: join(home, 'set-default-preset'),
+  };
 }
 
 export async function listProcessGroup(processGroupId, execImpl = execFileAsync) {
@@ -283,6 +302,29 @@ class DshBridgeClient {
   }
 }
 
+async function readPresetReports(reportPath) {
+  try {
+    const raw = await readFile(reportPath, 'utf8');
+    return raw.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+async function waitForDefaultPreset(client, reportPath, expected) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const reports = await readPresetReports(reportPath);
+    const failure = reports.findLast(report => report.type === 'settings-error');
+    if (failure) throw new Error(`Native settings update failed: ${failure.message}`);
+    const catalog = await client.request('catalog.list');
+    if (catalog?.defaultAgentPreset === expected) return catalog;
+    await sleep(100);
+  }
+  throw new Error('Timed out waiting for the native settings update.');
+}
+
 async function installedDshVersion(binaryPath) {
   const result = await execFileAsync(binaryPath, ['--version'], {
     timeout: 10_000,
@@ -302,10 +344,11 @@ export async function runDshBridgeCanary(options = {}) {
   const workspace = join(canaryRoot, 'workspace');
   let client;
   let processGroupId;
+  let profile;
 
   try {
     await mkdir(workspace, { recursive: true });
-    const profile = await createIsolatedProfile(
+    profile = await createIsolatedProfile(
       canaryRoot,
       options.bridgePackageDir ?? bridgePackageDir,
     );
@@ -324,31 +367,80 @@ export async function runDshBridgeCanary(options = {}) {
     assert.equal(initialized?.plugin?.id, 'ai.deepseek.harness');
     assert.equal(initialized?.runtime?.package, '@deepseek-ai/dsh');
     assert.equal(initialized?.runtime?.version, dshVersion);
-    assert.equal(initialized?.capabilities?.interaction, undefined);
+    assert.equal(initialized?.capabilities?.interaction, 1);
     assert.equal(initialized?.capabilities?.['session.resume'], undefined);
 
-    const catalog = await client.request('catalog.list');
+    let catalog;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        catalog = await client.request('catalog.list');
+        break;
+      } catch (error) {
+        if (!String(error?.message).includes('DSH exposes no models') || attempt === 19) throw error;
+        await sleep(250);
+      }
+    }
     assert.equal(typeof catalog?.catalogRevision, 'string');
     assert.ok(Array.isArray(catalog?.providers));
     assert.ok(Array.isArray(catalog?.models));
+    assert.deepEqual(catalog?.agentPresets?.map(preset => preset.id), ['standard', 'ptc', 'minimal', 'cordis']);
+    assert.equal(catalog?.defaultAgentPreset, 'standard');
+    assert.deepEqual(catalog?.agentPresets?.filter(preset => preset.broken), []);
 
-    const sessionId = `gian-canary-${randomUUID()}`;
-    const created = await client.request('session.create', {
-      sessionId,
-      workspace: { cwd: workspace, roots: [workspace] },
-      config: {},
-    });
-    assert.equal(created?.session?.id, sessionId);
-    assert.equal(typeof created?.session?.nativeId, 'string');
-    assert.equal(created?.session?.state, 'idle');
+    const presetSessions = [];
+    for (const preset of ['standard', 'ptc', 'minimal', 'cordis']) {
+      const sessionId = `gian-canary-${preset}-${randomUUID()}`;
+      const created = await client.request('session.create', {
+        sessionId,
+        workspace: { cwd: workspace, roots: [workspace] },
+        config: { agent_preset: preset },
+      });
+      assert.equal(created?.session?.id, sessionId);
+      assert.equal(typeof created?.session?.nativeId, 'string');
+      assert.equal(created?.session?.state, 'idle');
+      const createdReport = (await readPresetReports(profile.reportPath)).at(-1);
+      assert.equal(createdReport?.preset, preset);
+      assert.equal(createdReport?.nativeSessionId, created.session.nativeId);
+      assert.ok(createdReport?.tools?.length > 0);
+      if (preset === 'standard') {
+        assert.ok(createdReport.tools.includes('web_search'));
+        assert.ok(createdReport.tools.includes('todo_write'));
+      }
+      if (preset === 'ptc') {
+        assert.ok(createdReport.tools.includes('run_code'));
+        assert.ok(createdReport.tools.includes('web_search'));
+      }
+      if (preset === 'minimal') {
+        assert.equal(createdReport.tools.includes('web_search'), false);
+        assert.equal(createdReport.tools.includes('todo_write'), false);
+        assert.equal(createdReport.tools.includes('subagent'), false);
+      }
+
+      const closed = await client.request('session.close', { sessionId });
+      assert.equal(closed?.ok, true);
+      const resumedId = `${sessionId}-resumed`;
+      const resumed = await client.request('session.resume', {
+        sessionId: resumedId,
+        nativeSessionId: created.session.nativeId,
+      });
+      assert.equal(resumed?.session?.id, resumedId);
+      const resumedReport = (await readPresetReports(profile.reportPath)).at(-1);
+      assert.equal(resumedReport?.preset, preset);
+      assert.equal(resumedReport?.nativeSessionId, created.session.nativeId);
+      assert.deepEqual(resumedReport?.tools, createdReport.tools);
+      const closeResumed = await client.request('session.close', { sessionId: resumedId });
+      assert.equal(closeResumed?.ok, true);
+      presetSessions.push({ preset, tools: createdReport.tools, resumed: true });
+    }
+
+    await writeFile(profile.settingsTriggerPath, 'minimal\n', 'utf8');
+    const updatedCatalog = await waitForDefaultPreset(client, profile.reportPath, 'minimal');
+    assert.equal(updatedCatalog?.defaultAgentPreset, 'minimal');
 
     processGroupId = client.child?.pid;
     assert.ok(Number.isInteger(processGroupId) && processGroupId > 0);
     const liveProcesses = await listProcessGroup(processGroupId);
     assert.ok(liveProcesses.some(process => process.pid === processGroupId));
-
-    const closed = await client.request('session.close', { sessionId });
-    assert.equal(closed?.ok, true);
     const shutdown = await client.request('shutdown');
     assert.equal(shutdown?.ok, true);
 
@@ -374,7 +466,9 @@ export async function runDshBridgeCanary(options = {}) {
       },
       quotaConsuming: false,
       modelTurnsSent: 0,
-      lifecycle: ['initialize', 'catalog.list', 'session.create', 'session.close', 'shutdown'],
+      presets: presetSessions,
+      settingsSynchronized: true,
+      lifecycle: ['initialize', 'catalog.list', 'session.create', 'session.resume', 'settings.update', 'shutdown'],
       stdoutPurity: {
         jsonRpcLines: client.stdoutLines.length,
         notifications: client.notifications.length,
@@ -388,6 +482,13 @@ export async function runDshBridgeCanary(options = {}) {
       },
       stderrBytes: Buffer.byteLength(client.stderr),
     };
+  } catch (error) {
+    if (error instanceof Error && client?.stderr) error.message += client.stderrSuffix();
+    const reports = profile ? await readPresetReports(profile.reportPath) : [];
+    const inspectorError = reports.findLast(report => report.type === 'agent-error');
+    if (error instanceof Error && inspectorError) error.message += `\n${inspectorError.stack}`;
+    if (error instanceof Error && reports.length > 0) error.message += `\n${JSON.stringify(reports)}`;
+    throw error;
   } finally {
     await client?.forceStop();
     if (processGroupId) await waitForEmptyProcessGroup(processGroupId, 2_000).catch(() => []);
@@ -402,7 +503,7 @@ export async function main() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   main().catch(error => {
-    process.stderr.write(`DSH bridge canary failed: ${error?.message ?? error}\n`);
+    process.stderr.write(`DSH bridge canary failed: ${error?.stack ?? error}\n`);
     process.exitCode = 1;
   });
 }

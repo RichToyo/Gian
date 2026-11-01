@@ -3,8 +3,9 @@ import { helloOkSchema, helloSchema, negotiateHello, type Hello, type HelloOk } 
 import { RemoteProtocolError } from './errors.js';
 import { parseClosed } from './validation.js';
 
-export function createRemoteHello(deviceId: string, clientVersion: string): Hello {
-  return helloSchema.parse({ type: 'hello', protocol: REMOTE_PROTOCOL, client_version: clientVersion, major_version: REMOTE_MAJOR_VERSION, min_minor_version: REMOTE_MIN_MINOR_VERSION, max_minor_version: REMOTE_MAX_MINOR_VERSION, capabilities: [...WIRE_FEATURES], device_id: deviceId });
+export function createRemoteHello(deviceId: string, clientVersion: string, options?: { sessionDirectoryV1?: boolean }): Hello {
+  const capabilities = WIRE_FEATURES.filter(feature => feature !== 'wire.session_directory_v1' || options?.sessionDirectoryV1 === true);
+  return helloSchema.parse({ type: 'hello', protocol: REMOTE_PROTOCOL, client_version: clientVersion, major_version: REMOTE_MAJOR_VERSION, min_minor_version: REMOTE_MIN_MINOR_VERSION, max_minor_version: REMOTE_MAX_MINOR_VERSION, capabilities, device_id: deviceId });
 }
 export function acceptRemoteHello(raw: unknown, identity: { deviceId: string; connectionId: string; hostGeneration: string; hostVersion: string }, now = Date.now()): HelloOk {
   const hello = parseClosed(helloSchema, raw);

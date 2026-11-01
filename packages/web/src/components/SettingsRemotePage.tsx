@@ -6,12 +6,12 @@
  * once enrolled the card shows URL / remote name (editable) / status and a
  * single destructive disconnect that wipes everything (enrollment, pairings,
  * secrets — the merged meaning of the old Disconnect and Emergency Disable).
- * Paired devices reduce to name / status / last-seen / Revoke; adding a
- * device is a dialog with the QR grant.
+ * Paired devices show a local name, short id, status / last-seen, Rename and
+ * Revoke; adding a device is a dialog with the QR grant.
  *
  * Control other Gian installs (this Mac as a controller): remote environments (other Gian
- * Hosts) with a connect dialog (Server URL + pairing code + optional name)
- * and per-row removal.
+ * Hosts) with a connect dialog (fixed enrolled Server origin + Host pairing code + optional name)
+ * and per-row removal. Adding an environment requires local Server enrollment.
  *
  * Pure presentation over `RemoteSettingsController` + the /api/remote
  * environment endpoints: every mutation goes through them, the enrollment
@@ -24,7 +24,6 @@ import QRCode from 'qrcode';
 import { confirm } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import { remoteRequest, type RemoteEnvironment } from '../remote-environments.js';
-import { authorizeRemoteAccount } from '../auth/github-authorization.js';
 import { useOperationDispatchOptional } from '../operations/use-operations.js';
 import { dispatchRemoteEnvironment } from '../operations/remote-environments.js';
 import type {
@@ -480,6 +479,12 @@ const REVOKE_STATUS_KEY: Record<RemoteDeviceInfo['revokeStatus'], string> = {
   'pending-reconciliation': 'settings.remote.devices.status.pendingReconciliation',
   revoked: 'settings.remote.devices.status.revoked',
 };
+const UNSAFE_DEVICE_NAME_CHARS = /[\p{Cc}\p{Cf}]/u;
+
+function remoteDeviceShortId(id: string): string {
+  const compact = id.replace(/[^A-Za-z0-9]/g, '');
+  return (compact.slice(-8) || 'UNKNOWN').toUpperCase();
+}
 
 function DeviceRow({
   device,
@@ -489,8 +494,12 @@ function DeviceRow({
   controller: RemoteSettingsController;
 }) {
   const t = useT();
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(device.name);
   const revoking = device.revokeStatus === 'revoke-pending' || device.revokeStatus === 'pending-reconciliation';
   const connected = device.revokeStatus === 'active' && device.activeConnections > 0;
+  const validName = Boolean(name.trim()) && !UNSAFE_DEVICE_NAME_CHARS.test(name);
+  useEffect(() => { setName(device.name); setEditing(false); }, [device.name]);
 
   function revoke() {
     void confirm({
@@ -504,26 +513,52 @@ function DeviceRow({
     });
   }
 
-  return (
+  return <>
     <div className="rs-device" data-testid={`remote-device-${device.id}`}>
       <div className="rs-device-main">
-        <span className="rs-device-name">{device.name}</span>
+        <div className="rs-device-title">
+          <span className="rs-device-name">{device.name}</span>
+          <span className="rs-device-id">#{remoteDeviceShortId(device.id)}</span>
+        </div>
         <span className="rs-device-sub" data-testid={`remote-device-status-${device.id}`}>
           {connected && device.lastSeenAt
             ? t('settings.remote.devices.connectedMeta').replace('{time}', relativeTime(device.lastSeenAt, t))
             : t(REVOKE_STATUS_KEY[device.revokeStatus])}
         </span>
       </div>
-      <button
-        type="button"
-        className="btn sm danger-ghost"
-        disabled={revoking}
-        onClick={revoke}
-      >
-        {revoking ? t('settings.remote.devices.revoking') : t('settings.remote.devices.revoke')}
-      </button>
+      <div className="rs-device-actions">
+        <button type="button" className="btn sm secondary" disabled={device.revokeStatus !== 'active'}
+          onClick={() => setEditing(true)}>{t('settings.remote.hostName.rename')}</button>
+        <button
+          type="button"
+          className="btn sm danger-ghost"
+          disabled={revoking}
+          onClick={revoke}
+        >
+          {revoking ? t('settings.remote.devices.revoking') : t('settings.remote.devices.revoke')}
+        </button>
+      </div>
     </div>
-  );
+    {editing && <Dialog label={t('settings.remote.hostName.rename')} onClose={() => setEditing(false)}>
+      <div className="confirm-title">{t('settings.remote.hostName.rename')}</div>
+      <div className="rs-form">
+        <label className="rs-field">
+          <span>{t('settings.remote.pair.claim.device')}</span>
+          <input className="input" value={name} maxLength={256} autoFocus
+            onChange={event => setName(event.target.value)} />
+        </label>
+      </div>
+      <div className="rs-actions">
+        <button type="button" className="btn primary" disabled={!validName || name.trim() === device.name}
+          onClick={() => void controller.renameDevice(device.id, name.trim())}>
+          {t('settings.remote.hostName.save')}
+        </button>
+        <button type="button" className="btn secondary" onClick={() => setEditing(false)}>
+          {t('settings.remote.pair.cancel')}
+        </button>
+      </div>
+    </Dialog>}
+  </>;
 }
 
 function PairingDialog({
@@ -712,8 +747,9 @@ function EnvironmentsBlock({ state }: {
   const [loadFailed, setLoadFailed] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const enrolledUrl = state.enrollment.kind === 'connected' || state.enrollment.kind === 'disconnected'
+    || state.enrollment.kind === 'disconnecting'
     ? state.enrollment.info.serverUrl
-    : '';
+    : null;
 
   const refresh = () => {
     setLoadFailed(false);
@@ -741,10 +777,17 @@ function EnvironmentsBlock({ state }: {
     <div>
       <div className="rs-card-head">
         <h4 className="s2-subhead">{t('settings.remote.otherGian')}</h4>
-        <button type="button" className="btn sm primary" onClick={() => setConnectOpen(true)}>
+        <button
+          type="button"
+          className="btn sm primary"
+          disabled={!enrolledUrl}
+          title={enrolledUrl ? undefined : t('settings.remote.env.requiresEnrollment')}
+          onClick={() => setConnectOpen(true)}
+        >
           {t('settings.remote.connect')}
         </button>
       </div>
+      {!enrolledUrl && <p className="s2-help">{t('settings.remote.env.requiresEnrollment')}</p>}
       {loadFailed && <p className="field-error" role="alert">{t('settings.remote.env.loadFailed')}</p>}
       {environments?.length === 0 && <p className="s2-help">{t('settings.remote.env.empty')}</p>}
       {environments && environments.length > 0 && (
@@ -768,9 +811,9 @@ function EnvironmentsBlock({ state }: {
           ))}
         </div>
       )}
-      {connectOpen && (
+      {connectOpen && enrolledUrl && (
         <EnvironmentDialog
-          defaultServerUrl={enrolledUrl}
+          serverUrl={enrolledUrl}
           onClose={() => setConnectOpen(false)}
           onPaired={() => { setConnectOpen(false); refresh(); }}
         />
@@ -779,33 +822,29 @@ function EnvironmentsBlock({ state }: {
   );
 }
 
-function EnvironmentDialog({ defaultServerUrl, onClose, onPaired }: {
-  defaultServerUrl: string;
+function EnvironmentDialog({ serverUrl, onClose, onPaired }: {
+  serverUrl: string;
   onClose: () => void;
   onPaired: () => void;
 }) {
   const t = useT();
-  const [serverUrl, setServerUrl] = useState(defaultServerUrl);
   const dispatch = useOperationDispatchOptional();
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<'invalid' | 'failed' | null>(null);
+  const [error, setError] = useState<'failed' | null>(null);
   const running = useRef<AbortController | null>(null);
-  const origin = serverUrl.trim();
   useEffect(() => () => running.current?.abort(), []);
 
   async function submit() {
-    if (!origin || !code.trim() || busy || running.current) return;
+    if (!code.trim() || busy || running.current) return;
     const abort = new AbortController();
     running.current = abort;
     setBusy(true);
     setError(null);
     try {
-      await authorizeRemoteAccount(origin, 'controller', { signal: abort.signal });
-      if (abort.signal.aborted) return;
       await dispatchRemoteEnvironment(dispatch, { connection: {
-        server_url: new URL(origin).origin, code: code.trim(), name: name.trim() || origin,
+        server_url: serverUrl, code: code.trim(), name: name.trim() || serverUrl,
       } });
       if (!abort.signal.aborted) onPaired();
     } catch (cause) {
@@ -819,20 +858,14 @@ function EnvironmentDialog({ defaultServerUrl, onClose, onPaired }: {
   return (
     <Dialog label={t('settings.remote.env.connect')} onClose={onClose}>
       <div className="confirm-title">{t('settings.remote.env.connect')}</div>
+      <div className="rs-kv">
+        <div className="rs-kv-row">
+          <span className="rs-kv-label">{t('settings.remote.serverUrl')}</span>
+          <span className="rs-kv-value" title={serverUrl}>{serverUrl}</span>
+          <span className="rs-kv-act" />
+        </div>
+      </div>
       <div className="rs-form">
-        <label className="rs-field">
-          <span className="rs-field-label">{t('settings.remote.serverUrl')}</span>
-          <input
-            className="input"
-            type="url"
-            aria-label={t('settings.remote.serverUrl')}
-            placeholder={t('settings.remote.serverUrl.placeholder')}
-            value={serverUrl}
-            disabled={busy}
-            autoFocus={!defaultServerUrl}
-            onChange={e => setServerUrl(e.target.value)}
-          />
-        </label>
         <label className="rs-field">
           <span className="rs-field-label">{t('settings.remote.env.code')}</span>
           <input
@@ -842,7 +875,7 @@ function EnvironmentDialog({ defaultServerUrl, onClose, onPaired }: {
             aria-label={t('settings.remote.env.code')}
             value={code}
             disabled={busy}
-            autoFocus={Boolean(defaultServerUrl)}
+            autoFocus
             onChange={e => setCode(e.target.value)}
           />
         </label>
@@ -870,7 +903,7 @@ function EnvironmentDialog({ defaultServerUrl, onClose, onPaired }: {
         <button
           type="button"
           className="btn sm primary"
-          disabled={busy || !origin || !code.trim()}
+          disabled={busy || !code.trim()}
           onClick={submit}
         >
           {busy ? t('settings.remote.connecting') : t('settings.remote.connect')}

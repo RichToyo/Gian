@@ -98,6 +98,20 @@ export interface GianDesktopZoomApi {
   onChanged: (listener: (percent: number) => void) => () => void;
 }
 
+export interface GianDesktopRemoteTransportApi {
+  request(input: {
+    id: string; origin: string; method: 'GET' | 'POST' | 'DELETE'; path: string;
+    headers: Record<string, string>; body?: string;
+  }): Promise<{ status: number; headers: Array<[string, string]>; body: string }>;
+  cancel(id: string): Promise<boolean>;
+  openSocket(origin: string): Promise<string>;
+  sendSocket(id: string, data: string): Promise<boolean>;
+  closeSocket(id: string): Promise<boolean>;
+  onSocketEvent(listener: (event: {
+    id: string; type: 'open' | 'message' | 'error' | 'close'; data?: string; reason?: string;
+  }) => void): () => void;
+}
+
 export interface GianDesktopBridge {
   appVariant?: 'production' | 'development';
   appVersion?: string;
@@ -114,6 +128,7 @@ export interface GianDesktopBridge {
   screenshot?: GianScreenshotApi;
   resources?: GianResourcePickerApi;
   zoom?: GianDesktopZoomApi;
+  remoteTransport?: GianDesktopRemoteTransportApi;
   githubAuth?: GitHubDesktopAuthApi;
 }
 

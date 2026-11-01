@@ -974,7 +974,12 @@ export class AgentManager {
     promise: Promise<AgentInstallStatus>;
   }>();
   private readonly statusGenerations = new Map<Executor, number>();
-  private readonly agentStatusCache = new Map<string, { value: UserAgentStatus; expiresAt: number }>();
+  private readonly agentStatusCache = new Map<string, {
+    // Status projections may hide a legacy cliPath; match against the persisted identity instead.
+    identity: UserAgent;
+    value: UserAgentStatus;
+    expiresAt: number;
+  }>();
   private readonly agentStatusProbes = new Map<string, {
     generation: number;
     promise: Promise<UserAgentStatus>;
@@ -982,6 +987,8 @@ export class AgentManager {
   private readonly agentStatusGenerations = new Map<string, number>();
   private readonly lastOpenRuntimeProfiles = new Map<string, OpenRuntimeProfile>();
   private provisionedRuntimes = new Map<string, ProvisionedDevRuntime>();
+  private readonly provisionedRuntimeValidity = new Map<string, boolean>();
+  private readonly provisionedRuntimeProbes = new Map<string, Promise<boolean>>();
   private configMutationTail: Promise<void> = Promise.resolve();
   private config: AgentConfigFile = emptyConfig();
 
@@ -1579,10 +1586,18 @@ export class AgentManager {
    * production retains its certified-generation priority. */
   setProvisionedRuntimes(runtimes: readonly ProvisionedDevRuntime[]): void {
     this.provisionedRuntimes = new Map(runtimes.map(runtime => [runtime.pluginId, runtime]));
+    this.provisionedRuntimeValidity.clear();
+    this.provisionedRuntimeProbes.clear();
+    for (const runtime of runtimes) this.provisionedRuntimeValidity.set(runtime.pluginId, true);
     this.agentStatusCache.clear();
   }
 
-  async provisionedRuntimeStatus(pluginId: string): Promise<ProxyCatalogItem['runtime'] | null> {
+  /** Display reads reuse provisioning evidence. Explicit refreshes and
+   * launch-bound paths revalidate the complete Runtime tree. */
+  async provisionedRuntimeStatus(
+    pluginId: string,
+    options: { refresh?: boolean } = {},
+  ): Promise<ProxyCatalogItem['runtime'] | null> {
     const installed = this.provisionedRuntimes.get(pluginId);
     if (!installed) return null;
     const launch = await this.trustedLaunch(pluginId);
@@ -1590,26 +1605,56 @@ export class AgentManager {
     const validVersion = launch?.runtime.kind === 'external'
       && launch.runtime.id === installed.runtimeId
       && launch.runtime.verifiedVersions?.includes(installed.version);
-    let validEntry = false;
-    try {
-      const info = await lstat(installed.entryPath);
-      validEntry = info.isFile() && !info.isSymbolicLink() && Boolean(info.mode & 0o111);
-      if (validEntry && installed.entryRelativePath) {
-        const root = join(this.options.dataDir, 'runtimes');
-        const directory = join(root, installed.runtimeId, installed.version, installed.artifactSha256);
-        validEntry = installed.entryPath === join(directory, installed.entryRelativePath)
-          && await verifiedRuntimeReuse(root, directory, installed.artifactSha256, installed.entryRelativePath);
-      } else {
-        validEntry = false;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+    const validEntry = await this.provisionedRuntimeEntryValidity(
+      pluginId,
+      installed,
+      options.refresh === true,
+    );
     return validVersion && validEntry
       ? { state: 'ready', displayName, path: installed.entryPath, version: installed.version }
       : { state: 'invalid', displayName, path: installed.entryPath, version: installed.version,
         readinessIssue: { code: 'DEV_RUNTIME_MISMATCH',
           message: 'The provisioned Runtime is missing or does not match this source Proxy.', repairable: true } };
+  }
+
+  private async provisionedRuntimeEntryValidity(
+    pluginId: string,
+    installed: ProvisionedDevRuntime,
+    refresh: boolean,
+  ): Promise<boolean> {
+    const pending = this.provisionedRuntimeProbes.get(pluginId);
+    if (pending) return pending;
+    const cached = this.provisionedRuntimeValidity.get(pluginId);
+    if (!refresh && cached !== undefined) return cached;
+    const probe = (async () => {
+      let validEntry = false;
+      try {
+        const info = await lstat(installed.entryPath);
+        validEntry = info.isFile() && !info.isSymbolicLink() && Boolean(info.mode & 0o111);
+        if (validEntry && installed.entryRelativePath) {
+          const root = join(this.options.dataDir, 'runtimes');
+          const directory = join(root, installed.runtimeId, installed.version, installed.artifactSha256);
+          validEntry = installed.entryPath === join(directory, installed.entryRelativePath)
+            && await verifiedRuntimeReuse(root, directory, installed.artifactSha256, installed.entryRelativePath);
+        } else {
+          validEntry = false;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      return validEntry;
+    })().then(validEntry => {
+      if (this.provisionedRuntimes.get(pluginId) === installed) {
+        this.provisionedRuntimeValidity.set(pluginId, validEntry);
+      }
+      return validEntry;
+    }).finally(() => {
+      if (this.provisionedRuntimeProbes.get(pluginId) === probe) {
+        this.provisionedRuntimeProbes.delete(pluginId);
+      }
+    });
+    this.provisionedRuntimeProbes.set(pluginId, probe);
+    return probe;
   }
 
   private provisionedRuntimePaths(): ReadonlyMap<string, string> {
@@ -1779,7 +1824,7 @@ export class AgentManager {
   private async readyProvisionedRuntimePath(pluginId: string): Promise<string | null> {
     const installed = this.provisionedRuntimes.get(pluginId);
     if (!installed) return null;
-    const status = await this.provisionedRuntimeStatus(pluginId);
+    const status = await this.provisionedRuntimeStatus(pluginId, { refresh: true });
     return status?.state === 'ready' ? installed.entryPath : null;
   }
 
@@ -2383,11 +2428,12 @@ export class AgentManager {
    * writes must never start a Runtime just to construct their response. */
   agentStatusSnapshot(id: string): UserAgentStatus {
     const agent = this.getAgent(id);
-    const cached = this.agentStatusCache.get(id)?.value;
-    if (cached && sameAgentRuntimeIdentity(cached, agent)) return {
-      ...cached,
+    const cached = this.agentStatusCache.get(id);
+    if (cached && sameAgentRuntimeIdentity(cached.identity, agent)) return {
+      ...cached.value,
       ...agent,
-      plugin: { ...cached.plugin, defaults: copyProxyDefaults(agent.defaults) },
+      cliPath: cached.value.cliPath,
+      plugin: { ...cached.value.plugin, defaults: copyProxyDefaults(agent.defaults) },
     };
     return {
       ...agent,
@@ -2424,25 +2470,25 @@ export class AgentManager {
     if (agent.runtime?.kind === 'custom') {
       const value = await this.customRuntimeAgentStatus(agent);
       if ((this.agentStatusGenerations.get(id) ?? 0) === generation) {
-        this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+        this.agentStatusCache.set(id, { identity: agent, value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       }
       return value;
     }
     if (!this.options.managedProxies && this.provisionedRuntimes.has(agent.pluginId)
       && (await this.provisionedRuntimeStatus(agent.pluginId))?.state === 'ready') {
       const value = await this.managedGenerationAgentStatus(agent, true);
-      this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      this.agentStatusCache.set(id, { identity: agent, value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       return value;
     }
     if (this.options.managedProxies) {
       const value = await this.managedGenerationAgentStatus(agent);
-      this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      this.agentStatusCache.set(id, { identity: agent, value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       return value;
     }
     const trusted = await this.trustedLaunch(agent.pluginId);
     if (!agent.proxy || trusted?.schemaVersion === 4) {
       const value = await this.catalogOnlyAgentStatus(agent);
-      this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      this.agentStatusCache.set(id, { identity: agent, value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       return value;
     }
     const kind = agent.proxy;
@@ -2508,7 +2554,7 @@ export class AgentManager {
         officialInstallUrl: AGENTS[kind].installerUrl,
       };
       if ((this.agentStatusGenerations.get(id) ?? 0) === generation) {
-        this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+        this.agentStatusCache.set(id, { identity: agent, value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       }
       return value;
     }).finally(() => {
@@ -2956,9 +3002,10 @@ export class AgentManager {
       && (this.agentStatusGenerations.get(preserveAgentStatus.id) ?? 0) === preserveAgentStatus.generation
       ? this.agentStatusCache.get(preserveAgentStatus.id) : undefined;
     const agent = preserveAgentStatus ? next.agents.find(item => item.id === preserveAgentStatus.id) : undefined;
-    const preserved = observed && agent && sameAgentRuntimeIdentity(observed.value, agent)
-      ? { expiresAt: observed.expiresAt, value: {
+    const preserved = observed && agent && sameAgentRuntimeIdentity(observed.identity, agent)
+      ? { identity: agent, expiresAt: observed.expiresAt, value: {
         ...observed.value, ...agent,
+        cliPath: observed.value.cliPath,
         plugin: { ...observed.value.plugin, defaults: copyProxyDefaults(agent.defaults) },
       } } : undefined;
     this.config = next;

@@ -126,9 +126,8 @@ describe('Remote Settings real Host adapter', () => {
     } finally { controller.dispose?.(); }
   });
 
-  it('waits for App-owned account confirmation before sending enrollment, then resumes the intent exactly once', async () => {
-    const authorization = deferred<void>();
-    const authorizeAccount = vi.fn(() => authorization.promise);
+  it('sends enrollment without waiting for a GitHub account confirmation', async () => {
+    const authorizeAccount = vi.fn(async () => { throw new Error('must not authorize'); });
     const writes: string[] = [];
     const controller = createRemoteSettingsController({ authorizeAccount, fetchFn: vi.fn(async (path, init) => {
       if (init?.method === 'POST') writes.push(String(path));
@@ -136,26 +135,25 @@ describe('Remote Settings real Host adapter', () => {
     }) });
     try {
       await controller.refresh?.();
-      const pending = controller.enroll({ serverUrl: 'https://server.test', enrollmentToken: 'secret-enrollment-token' });
-      expect(authorizeAccount).toHaveBeenCalledWith('https://server.test', expect.any(AbortSignal));
-      expect(writes).toEqual([]);
-      expect(JSON.stringify(controller.getState())).not.toContain('secret-enrollment-token');
-      authorization.resolve();
-      await pending;
+      await controller.enroll({ serverUrl: 'https://server.test', enrollmentToken: 'secret-enrollment-token' });
+      expect(authorizeAccount).not.toHaveBeenCalled();
       expect(writes).toEqual(['/api/remote/enroll']);
+      expect(JSON.stringify(controller.getState())).not.toContain('secret-enrollment-token');
     } finally { controller.dispose?.(); }
   });
 
-  it('cancelling App-owned confirmation does not enroll, clear existing pairings, or report an operation failure', async () => {
-    let posts = 0;
-    const controller = createRemoteSettingsController({ authorizeAccount: async () => { throw new Error('cancelled'); },
-      fetchFn: vi.fn(async (_path, init) => { if (init?.method === 'POST') ++posts; return response(connected()); }) });
+  it('reconnect does not ask for a GitHub account', async () => {
+    const authorizeAccount = vi.fn(async () => { throw new Error('must not authorize'); });
+    const writes: string[] = [];
+    const controller = createRemoteSettingsController({ authorizeAccount, fetchFn: vi.fn(async (path, init) => {
+      if (init?.method === 'POST') writes.push(String(path));
+      return response(connected());
+    }) });
     try {
       await controller.refresh?.();
-      await controller.enroll({ serverUrl: 'https://server.test', enrollmentToken: 'fixture-token' });
-      expect(posts).toBe(0);
-      expect(controller.getState().error).toBeNull();
-      expect(controller.getState().enrollment.kind).toBe('connected');
+      await controller.reconnect();
+      expect(authorizeAccount).not.toHaveBeenCalled();
+      expect(writes).toEqual(['/api/remote/reconnect']);
     } finally { controller.dispose?.(); }
   });
 

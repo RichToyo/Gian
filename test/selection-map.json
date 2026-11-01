@@ -17,6 +17,14 @@
   },
   "rules": [
     {
+      "id": "remote-directory-v1",
+      "patterns": ["packages/host/src/remote/directory.ts", "packages/host/test/remote-directory*.test.ts", "packages/remote-protocol/src/directory.ts", "packages/remote-protocol/test/directory.test.ts", "docs/architecture/remote-directory-v1.md"],
+      "modules": ["host", "remote-protocol"],
+      "scopes": ["unit", "integration"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Explicitly opted-in Tasks/Repos/search and taskless creation preserve legacy closed snapshots, device principals and canonical replay; bounded cursor and create recovery regressions remain separately selected."
+    },
+    {
       "id": "inspection-launch-identity",
       "patterns": ["packages/host/src/proxy/inspection-launch.ts"],
       "modules": ["host"],
@@ -915,7 +923,8 @@
         "packages/host/migrations/077_remote_settings_lifecycle.sql",
         "packages/host/migrations/079_remote_execution_bindings.sql",
         "packages/host/migrations/080_remote_execution_history.sql",
-        "packages/host/migrations/081_remote_controller_environments.sql"
+        "packages/host/migrations/081_remote_controller_environments.sql",
+        "packages/host/migrations/095_remote_device_labels.sql"
       ],
       "optionalPatterns": [
         "docs/proposals/remote-web-v1-architecture-and-protocol.md",
@@ -996,6 +1005,7 @@
       "patterns": [
         "packages/web/src/remote-settings/**",
         "packages/web/src/components/SettingsRemotePage.tsx",
+        "packages/web/src/styles/settings-remote.css",
         "packages/web/test/remote-settings*.test.*",
         "packages/shared/src/remote-settings.ts",
         "packages/host/src/remote/settings-routes.ts",

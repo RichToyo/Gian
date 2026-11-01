@@ -2,8 +2,9 @@
  * Settings › Remote — component tests over the fixture
  * `RemoteSettingsController` plus a stubbed /api/remote fetch for the
  * environments block. Covers the two scopes (Control this Gian / Control other Gian installs),
- * the connect dialog contract (three fields, no field notes, token never
- * retained), the merged destructive disconnect, the Add-device grant dialog,
+ * the enrollment dialog contract (three fields, no field notes, token never
+ * retained), the enrolled-Server Host-code environment dialog, the merged
+ * destructive disconnect, the Add-device grant dialog,
  * the confirmed revoke flow, and environment pair/remove.
  *
  * These are fixture/browser-layer tests only: they prove the UI state
@@ -470,18 +471,67 @@ describe('Settings › Remote — devices', () => {
     await waitFor(() => expect(fixture.getState().pairing.kind).toBe('awaiting-claim'));
   });
 
-  it('a connected device row shows only name, last-seen status and Revoke', () => {
+  it('a connected device row shows its name, stable short id, status, Rename and Revoke', () => {
     const fixture = createRemoteSettingsFixture({ enrolled: true, devices: [device()] });
     renderRemote(fixture);
     const row = screen.getByTestId('remote-device-device-1');
     expect(row.textContent).toContain('iPhone 17');
+    expect(within(row).getByText('#DEVICE1').textContent).toBe('#DEVICE1');
     expect(screen.getByTestId('remote-device-status-device-1').textContent)
       .toContain('Connected · last seen');
+    expect(within(row).getByRole('button', { name: 'Rename' })).toBeEnabled();
     expect(within(row).getByRole('button', { name: 'Revoke' })).toBeTruthy();
     // The old metadata (platform, created, connections, audit) stays out.
     expect(row.textContent).not.toContain('iOS 26 · Safari');
     expect(row.textContent).not.toContain('Created');
     expect(within(row).queryByRole('button', { name: 'Recent remote activity' })).toBeNull();
+  });
+
+  it('distinguishes identical labels with stable short ids and keeps offline devices operable', () => {
+    const first = '11111111-1111-4111-8111-111111111111';
+    const second = '22222222-2222-4222-8222-222222222222';
+    const fixture = createRemoteSettingsFixture({
+      enrolled: true,
+      devices: [
+        device({ id: first, name: 'iPhone · Safari', activeConnections: 0 }),
+        device({ id: second, name: 'iPhone · Safari', activeConnections: 0 }),
+      ],
+    });
+    renderRemote(fixture);
+    const firstRow = screen.getByTestId(`remote-device-${first}`);
+    const secondRow = screen.getByTestId(`remote-device-${second}`);
+    expect(within(firstRow).getByText('#11111111')).toBeTruthy();
+    expect(within(secondRow).getByText('#22222222')).toBeTruthy();
+    expect(within(firstRow).getByText('Not connected')).toBeTruthy();
+    expect(within(secondRow).getByText('Not connected')).toBeTruthy();
+    expect(within(firstRow).getByRole('button', { name: 'Rename' })).toBeEnabled();
+    expect(within(secondRow).getByRole('button', { name: 'Revoke' })).toBeEnabled();
+  });
+
+  it('renames only the local display label, validates input, and preserves identity and authorization', async () => {
+    const fixture = createRemoteSettingsFixture({ enrolled: true, devices: [device()] });
+    const rename = vi.spyOn(fixture, 'renameDevice');
+    const revoke = vi.spyOn(fixture, 'revokeDevice');
+    const view = renderRemote(fixture);
+    const row = screen.getByTestId('remote-device-device-1');
+    fireEvent.click(within(row).getByRole('button', { name: 'Rename' }));
+    const dialog = screen.getByRole('dialog', { name: 'Rename' });
+    const input = within(dialog).getByLabelText('Device name');
+    fireEvent.change(input, { target: { value: 'bad\u202Ename' } });
+    expect(within(dialog).getByRole('button', { name: 'Save name' })).toBeDisabled();
+    fireEvent.change(input, { target: { value: '  My iPhone  ' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save name' }));
+
+    await screen.findByText('My iPhone');
+    expect(rename).toHaveBeenCalledWith('device-1', 'My iPhone');
+    expect(revoke).not.toHaveBeenCalled();
+    expect(fixture.getState().devices[0]).toMatchObject({
+      id: 'device-1', name: 'My iPhone', revokeStatus: 'active', activeConnections: 1,
+    });
+    expect(screen.getByText('#DEVICE1').textContent).toBe('#DEVICE1');
+    view.unmount();
+    renderRemote(fixture);
+    expect(screen.getByTestId('remote-device-device-1').textContent).toContain('My iPhone');
   });
 
   it('revoke requires the danger confirm, then reports pending — never premature completion', async () => {
@@ -521,6 +571,9 @@ describe('Settings › Remote — devices', () => {
     expect(screen.getByText('Pending phone')).toBeTruthy();
     expect(screen.getByTestId('remote-device-status-pending').textContent)
       .toBe('Revoked locally — Server reconciliation pending');
+    const pendingRow = screen.getByTestId('remote-device-pending');
+    expect(within(pendingRow).getByRole('button', { name: 'Rename' })).toBeDisabled();
+    expect(within(pendingRow).getByRole('button', { name: 'Revoking…' })).toBeDisabled();
   });
 });
 
@@ -545,21 +598,40 @@ describe('Settings › Remote — Control other Gian installs', () => {
     }
   });
 
-  it('the connect dialog pairs with Server URL + code (+ optional name), prefilled from the enrollment', async () => {
+  it('disables adding another Gian until this Mac is enrolled, while keeping the existing list available', async () => {
+    const stub = stubEnvironments([environment()]);
+    renderRemote(createRemoteSettingsFixture());
+    try {
+      expect(await screen.findByText('Mac mini')).toBeTruthy();
+      const connect = screen.getByRole('button', { name: 'Connect' });
+      expect(connect).toBeDisabled();
+      expect(screen.getByText(/Connect this Gian to a Remote Server first/)).toBeTruthy();
+      fireEvent.click(connect);
+      expect(screen.queryByRole('dialog', { name: 'Connect another Gian' })).toBeNull();
+      expect(stub.calls.some(call => call.method === 'POST' && call.path === '/api/remote/environments')).toBe(false);
+    } finally {
+      stub.restore();
+    }
+  });
+
+  it('uses only a Host pairing code and optional name with the fixed enrolled Server origin', async () => {
     const stub = stubEnvironments([]);
     renderRemote(createRemoteSettingsFixture({ enrolled: true }));
     try {
       fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
       const dialog = screen.getByRole('dialog', { name: 'Connect another Gian' });
-      expect((within(dialog).getByLabelText('Remote Server URL') as HTMLInputElement).value)
-        .toBe('https://remote.example.com');
-      fireEvent.change(within(dialog).getByLabelText('Pairing code'), { target: { value: 'ABCD-EFGH' } });
+      expect(within(dialog).getByText('https://remote.example.com')).toBeTruthy();
+      expect(within(dialog).queryByLabelText('Remote Server URL')).toBeNull();
+      expect(within(dialog).getAllByRole('textbox')).toHaveLength(2);
+      expect(within(dialog).queryByTestId('pairing-qr')).toBeNull();
+      expect(within(dialog).queryByLabelText('Pairing link')).toBeNull();
+      fireEvent.change(within(dialog).getByLabelText('Host pairing code'), { target: { value: 'ABCD-EFGH' } });
       fireEvent.change(within(dialog).getByLabelText('Name'), { target: { value: 'Mac mini' } });
       fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
 
       await waitFor(() => expect(stub.calls.some(call => call.method === 'POST' && call.path === '/api/remote/environments')).toBe(true));
       const post = stub.calls.find(call => call.method === 'POST' && call.path === '/api/remote/environments')!;
-      expect(stub.calls.some(call => call.path === '/api/remote/controller/account/start')).toBe(true);
+      expect(stub.calls.some(call => call.path === '/api/remote/controller/account/start')).toBe(false);
       expect(post.body).toEqual({
         server_url: 'https://remote.example.com',
         code: 'ABCD-EFGH',
@@ -571,17 +643,14 @@ describe('Settings › Remote — Control other Gian installs', () => {
     }
   });
 
-  it('controller authorization uses the App account dialog and never the Host-role login or an unconfirmed pair request', async () => {
+  it('the connect dialog pairs without opening a GitHub account dialog', async () => {
     const original = globalThis.fetch;
     const requests: string[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       requests.push(path);
+      if (path === '/api/remote/environments' && init?.method === 'POST') return Response.json({ environment: environment() });
       if (path === '/api/remote/environments') return Response.json({ environments: [] });
-      if (path === '/api/remote/controller/account/start') return Response.json({ account: {
-        status: 'pending', server_url: 'https://remote.example.com', user_code: 'CONTROLLER-CODE',
-        verification_uri: 'https://github.com/login/device', expires_at: Date.now() + 300_000, interval_seconds: 5,
-      } });
       return new Response('unauthorized', { status: 401 });
     }) as typeof fetch;
     const fixture = createRemoteSettingsFixture({ enrolled: true });
@@ -591,15 +660,11 @@ describe('Settings › Remote — Control other Gian installs', () => {
     try {
       fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
       const dialog = screen.getByRole('dialog', { name: 'Connect another Gian' });
-      fireEvent.change(within(dialog).getByLabelText('Pairing code'), { target: { value: 'ABCD-EFGH' } });
+      fireEvent.change(within(dialog).getByLabelText('Host pairing code'), { target: { value: 'ABCD-EFGH' } });
       fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
-
-      const authorization = await screen.findByRole('dialog', { name: 'Confirm GitHub account' });
-      expect(within(authorization).getByText('CONTROLLER-CODE')).toBeTruthy();
-      expect(within(dialog).queryByTestId('environment-account-login')).toBeNull();
+      await screen.findByText('Mac mini');
       expect(startLogin).not.toHaveBeenCalled();
-      expect(requests).toEqual(['/api/remote/environments', '/api/remote/controller/account/start']);
-      await act(async () => { fireEvent.click(within(authorization).getByRole('button', { name: 'Cancel' })); });
+      expect(requests.some(path => path.includes('account/start'))).toBe(false);
       expect(screen.queryByRole('dialog', { name: 'Confirm GitHub account' })).toBeNull();
     } finally {
       globalThis.fetch = original;

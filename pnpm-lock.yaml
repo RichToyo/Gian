@@ -182,6 +182,9 @@ importers:
       semver:
         specifier: 7.7.2
         version: 7.7.2
+      zod:
+        specifier: ^4.3.6
+        version: 4.6.6
     devDependencies:
       '@gian/cc-proxy':
         specifier: workspace:*
@@ -516,6 +519,9 @@ importers:
       '@gian/chat-ui':
         specifier: workspace:*
         version: link:../chat-ui
+      '@gian/remote-web':
+        specifier: workspace:*
+        version: link:../remote-web
       '@gian/shared':
         specifier: workspace:*
         version: link:../shared

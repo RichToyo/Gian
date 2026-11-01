@@ -15,6 +15,7 @@ import type {
 } from '@gian/shared';
 import {
   catalogModeSemantics,
+  catalogOptionUsesProviderNativeMode,
   sessionRuntimeCliPath,
   sessionRuntimeProxyVersion,
 } from '@gian/shared';
@@ -326,7 +327,8 @@ export class SessionLifecycleService {
             (option.binding === 'turn' ? modeTurnConfig : sessionConfig)[option.id] = value!;
             // The old column is a compatibility projection of a declared
             // string choice, not an independent permission policy.
-            if (!nativeMode && modes.length === 1 && typeof value === 'string') approvalMode = value as ApprovalMode;
+            if (!nativeMode && !catalogOptionUsesProviderNativeMode(executor, option)
+              && modes.length === 1 && typeof value === 'string') approvalMode = value as ApprovalMode;
           }
           catalogValidated = true;
         },

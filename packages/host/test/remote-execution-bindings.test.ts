@@ -25,7 +25,7 @@ function fixture() {
   };
 }
 
-function target(overrides: Partial<RemoteExecutionTarget> = {}): RemoteExecutionTarget {
+function target(overrides: Partial<Extract<RemoteExecutionTarget, { account_id: string }>> = {}): RemoteExecutionTarget {
   return {
     server_origin: 'https://remote.example', server_identity_fingerprint: 'a'.repeat(64),
     account_id: '42', host_id: generateCanonicalId(), remote_session_id: generateCanonicalId(),
@@ -124,5 +124,32 @@ test('binding survives restart, Server identity is pinned, and local deletion on
       assert.equal(store.get(bound.local_session_id), null);
       assert.equal((db.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count, 1);
     } finally { db.close(); }
+  } finally { f.close(); }
+});
+
+test('device targets persist the exact pairing generation and cannot alias another device', () => {
+  const f = fixture();
+  try {
+    const localId = f.session();
+    const deviceTarget: RemoteExecutionTarget = {
+      target_version: 2,
+      server_origin: 'https://remote.example', server_identity_fingerprint: 'a'.repeat(64),
+      host_id: generateCanonicalId(), remote_session_id: generateCanonicalId(),
+      device_id: generateCanonicalId(),
+      device_public_key: { kty: 'EC', crv: 'P-256', x: 'A'.repeat(43), y: 'B'.repeat(43) },
+      crypto_connection_id: generateCanonicalId(),
+    };
+    const bound = f.store.bind({ local_session_id: localId, target: deviceTarget });
+    assert.deepEqual(f.store.get(localId)?.target, deviceTarget);
+    assert.deepEqual(f.store.find(deviceTarget), bound);
+    assert.deepEqual(f.store.findRemoteSession(deviceTarget), bound);
+    assert.equal(f.store.find({ ...deviceTarget, device_id: generateCanonicalId() }), null);
+    assert.equal(f.store.find({ ...deviceTarget, crypto_connection_id: generateCanonicalId() }), null);
+    assert.deepEqual(f.db.prepare('SELECT account_id FROM remote_execution_bindings WHERE local_session_id = ?')
+      .get(localId), { account_id: null });
+    f.store.markStarted(localId, bound.revision);
+    assert.throws(() => f.store.retarget(localId, bound.revision, {
+      ...deviceTarget, device_id: generateCanonicalId(),
+    }), /already fixed/);
   } finally { f.close(); }
 });

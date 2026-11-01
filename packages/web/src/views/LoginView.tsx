@@ -18,15 +18,15 @@ import { GitHubDeviceAuthorization as GitHubDeviceAuthorizationPanel } from '../
  * App through the auth sink wired by use-app-auth, and the run's phase drives
  * the submitting/disabled states and inline errors here.
  */
-export function LoginView() {
+export function LoginView({ onOpenRemote }: { onOpenRemote?: () => void } = {}) {
   const githubAuth = desktopBridge()?.githubAuth;
   if (githubAuth) {
-    return <GitHubLoginView />;
+    return <GitHubLoginView onOpenRemote={onOpenRemote} />;
   }
   return <PasswordLoginView />;
 }
 
-function GitHubLoginView() {
+function GitHubLoginView({ onOpenRemote }: { onOpenRemote?: () => void }) {
   const t = useT();
   const dispatch = useOperationDispatch();
   const githubAuth = desktopBridge()?.githubAuth;
@@ -127,6 +127,11 @@ function GitHubLoginView() {
           <p className="login-error">{unavailableText ?? errorText}</p>
         )}
         <p className="login-privacy">{t('login.github.privacy')}</p>
+        {onOpenRemote && (
+          <button type="button" className="btn secondary" onClick={onOpenRemote}>
+            {t('login.github.remote')}
+          </button>
+        )}
       </div>
     </div>
   );

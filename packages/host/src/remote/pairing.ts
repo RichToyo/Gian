@@ -13,6 +13,7 @@ import {
 import type { PairingInboxObserver } from '../inbox/pairing-producer.js';
 import type { Db } from '../storage/db.js';
 import { RemoteDeviceStore, devicePublicKeyCanonical, type RemoteDeviceRecord } from './device-store.js';
+import { remoteDeviceDisplayName } from './device-label.js';
 
 export type RemotePairingStatus =
   | 'pending_claim'
@@ -190,6 +191,13 @@ export class RemotePairingService {
     return row ? this.project(row) : null;
   }
 
+  forDevice(deviceId: string): RemotePairingRecord | null {
+    const row = this.db.prepare(
+      'SELECT * FROM remote_pairings WHERE device_id = ? ORDER BY resolved_at DESC, rowid DESC LIMIT 1',
+    ).get(deviceId) as PairingRow | undefined;
+    return row ? this.project(row) : null;
+  }
+
   create(): { pairing: Omit<RemotePairingRecord, 'code' | 'grantNonce'> & { code: string; grantNonce: string } } {
     this.expireStale();
     const code = generatePairingCode();
@@ -271,7 +279,11 @@ export class RemotePairingService {
     }
     const deviceId = assignedDeviceId ?? this.devices.create({
       publicKey: row.device_public_key,
-      name: row.device_name ?? 'Remote device',
+      name: remoteDeviceDisplayName({
+        name: row.device_name,
+        platform: row.platform,
+        userAgent: row.user_agent,
+      }),
       platform: row.platform ?? 'unknown',
     }).id;
     this.db.prepare(

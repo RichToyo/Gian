@@ -92,7 +92,7 @@ test('RemoteMethod registry is exhaustive and rejects crafted params', async () 
   const context = setupRemoteHarness();
   try {
     const device = seedDevice(context);
-    assert.equal(REMOTE_METHODS.length, 31);
+    assert.equal(REMOTE_METHODS.length, 32);
     const translationMethods = [
       'translation.state', 'translation.set_auto', 'translation.request',
       'translation.cancel', 'translation.result_text', 'translation.request_status',

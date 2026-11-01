@@ -187,6 +187,41 @@ describe('executorSettingsFromCapabilities', () => {
     });
     expect(settings.modes.map(mode => mode.id)).toEqual(['ask', 'never']);
   });
+
+  it('keeps the real ungated Claude native permission choices without adding plan', () => {
+    const settings = executorSettingsFromCapabilities('claude', {
+      specialCatalogs: { approvalMode: 'permission_mode' },
+      configOptions: [{
+        ...approval,
+        id: 'permission_mode',
+        binding: 'turn',
+        defaultValue: 'default',
+        choices: [
+          { value: 'default', displayName: 'Default' },
+          { value: 'acceptEdits', displayName: 'Accept edits' },
+          { value: 'bypassPermissions', displayName: 'Bypass permissions' },
+          { value: 'auto', displayName: 'Auto' },
+          { value: 'dontAsk', displayName: 'Do not ask' },
+        ],
+      }],
+    });
+    expect(settings.modes.map(mode => mode.id)).toEqual([
+      'default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk',
+    ]);
+    expect(settings.modes.some(mode => mode.id === 'plan')).toBe(false);
+  });
+
+  it('does not let Claude fallback override an explicit preset marker', () => {
+    const settings = executorSettingsFromCapabilities('claude', {
+      configOptions: [{
+        ...approval,
+        id: 'permission_mode',
+        modeKind: 'gian-preset',
+        choices: [{ value: 'default', displayName: 'Default' }],
+      }],
+    });
+    expect(settings.modes).toEqual([]);
+  });
 });
 
 describe('nativeOptionRole / nativeChoiceLabel', () => {

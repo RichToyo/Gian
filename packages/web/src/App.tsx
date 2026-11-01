@@ -78,6 +78,7 @@ import { ChatPanelOpenContext } from './presentation/chat-panel.js';
 import { decideWorktreeViewRequest, readWtAutoApplied, worktreeDisplayName, writeWtAutoApplied } from './presentation/wt-view.js';
 import { useSessionCommands } from './controllers/use-session-commands.js';
 import { reloadFailedSessionMetadata } from './controllers/session-failure-reload.js';
+import { remoteEntryDecision } from './auth/remote-entry.js';
 import { useAppAuth } from './controllers/use-app-auth.js';
 import { useOnboarding } from './controllers/use-onboarding.js';
 import { useAppSocket } from './controllers/use-app-socket.js';
@@ -210,6 +211,8 @@ const WorkspaceDetailBody = lazy(() =>
   import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspaceDetailBody })));
 const LoginView = lazy(() =>
   import('./views/LoginView.js').then(module => ({ default: module.LoginView })));
+const RemoteEntryShell = lazy(() =>
+  import('./views/RemoteEntryShell.js').then(module => ({ default: module.RemoteEntryShell })));
 const OnboardingView = lazy(() =>
   import('./views/OnboardingView.js').then(module => ({ default: module.OnboardingView })));
 const AgentsView = lazy(() =>
@@ -300,6 +303,7 @@ export function App() {
     return dispatch(name, input);
   }, []);
   const { status: authStatus, identity, signOut } = useAppAuth(authDispatch);
+  const [remoteChosen, setRemoteChosen] = useState(false);
   const onboarding = useOnboarding(authStatus);
   const runtimeAuthStatus = authStatus === 'authenticated' && onboarding.status === 'complete'
     ? 'authenticated'
@@ -2702,7 +2706,13 @@ export function App() {
     />
   ) : null;
 
-  if (authStatus === 'checking') {
+  const entry = remoteEntryDecision({
+    authStatus,
+    githubDesktop: Boolean(desktopBridge()?.githubAuth),
+    remoteChosen,
+  });
+
+  if (entry === 'checking') {
     return (
       <LocaleProvider locale={locale}>
         <div className="app-loading" role="status" data-testid="auth-checking" />
@@ -2710,16 +2720,30 @@ export function App() {
     );
   }
 
-  if (authStatus === 'login') {
-    // Login dispatches auth.login / auth.githubLogin operations (Phase 3b),
-    // so it renders inside the operation providers even though the rest of
-    // the app shell is not mounted yet.
+  if (entry === 'remote') {
     return (
       <LocaleProvider locale={locale}>
       <OperationStoreProvider store={operationStore}>
       <OperationDispatcherProvider dispatcher={ops}>
         <Suspense fallback={<div className="app-loading" role="status" />}>
-          <LoginView />
+          <RemoteEntryShell localController={remoteController} onBack={() => setRemoteChosen(false)} />
+        </Suspense>
+      </OperationDispatcherProvider>
+      </OperationStoreProvider>
+      </LocaleProvider>
+    );
+  }
+
+  if (entry === 'login') {
+    // Login dispatches auth.login / auth.githubLogin operations (Phase 3b),
+    // so it renders inside the operation providers even though the rest of
+    // the app shell is not mounted yet. Password login has no Remote bypass.
+    return (
+      <LocaleProvider locale={locale}>
+      <OperationStoreProvider store={operationStore}>
+      <OperationDispatcherProvider dispatcher={ops}>
+        <Suspense fallback={<div className="app-loading" role="status" />}>
+          <LoginView onOpenRemote={desktopBridge()?.githubAuth ? () => setRemoteChosen(true) : undefined} />
         </Suspense>
       </OperationDispatcherProvider>
       </OperationStoreProvider>

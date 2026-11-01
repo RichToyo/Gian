@@ -1,5 +1,70 @@
 # Gian Proxies Changelog
 
+## Runtime maintenance candidates - 2026-11-01
+
+- Select Claude 0.3.19 against signed Catalog 50. Preserve the complete
+  excluded Codex, Kimi, DeepSeek Harness, Grok, Antigravity and ZCode tuples
+  and all their Runtime pins.
+- Upgrade the managed Claude Code Runtime from 2.1.314 to official 2.1.316
+  with exact pinned binary bytes; the official 2.1.314 through 2.1.316
+  changelog review found no proxy spawn-flag or permission-mode surface
+  change, while upstream fixed orphaned shell commands on exit and
+  `claude -p` auto-mode stop explanations.
+- These are release candidates until the hosted artifact qualification and
+  immutable publication steps succeed. Real Provider and Desktop acceptance
+  remain separate from artifact qualification.
+
+## Claude Proxy 0.3.18 - 2026-10-31
+
+- Prevent repeated Claude conversation usage updates from causing a session
+  protocol failure, while retaining context updates and diagnostic signals.
+- Select only Claude against signed Catalog 49. Other Proxy and Runtime
+  coordinates are retained; real Provider and Desktop acceptance are separate.
+
+## Runtime maintenance candidates - 2026-10-31
+
+- Select Claude 0.3.17 and Codex 0.3.12 against signed Catalog 48. Preserve
+  the complete excluded Kimi, DeepSeek Harness, Grok, Antigravity and ZCode
+  tuples and all their Runtime pins.
+- Upgrade the managed Claude Code Runtime from 2.1.312 to official 2.1.314
+  with exact pinned binary bytes; the official changelog from 2.1.312 through
+  2.1.314 was reviewed.
+- Upgrade the managed Codex Runtime from 0.165.0 to official 0.166.0 with
+  exact pinned archive bytes; the app-server schema delta is additive and the
+  removed review `detached` delivery mode is unused by this Proxy.
+- These are release candidates until the hosted artifact qualification and
+  immutable publication steps succeed. Real Provider and Desktop acceptance
+  remain separate from artifact qualification.
+
+## Runtime maintenance candidates - 2026-10-30
+
+- Select Antigravity 0.0.6 against signed Catalog 46. Preserve the complete
+  excluded Claude, Codex, Kimi, Grok, DeepSeek Harness and ZCode tuples and
+  all their Runtime pins.
+- Upgrade the managed Antigravity ACP Runtime from 1.4.3 to official ACP
+  registry 1.4.4 with the pinned official pair archive.
+- These are release candidates until the hosted artifact qualification and
+  immutable publication steps succeed. Real Provider and Desktop acceptance
+  remain separate from artifact qualification.
+
+## Runtime maintenance candidates - 2026-10-29
+
+- Select Claude 0.3.16 and Codex 0.3.11 against signed Catalog 45. Preserve
+  the complete excluded Kimi, Grok, DeepSeek Harness, Antigravity and ZCode
+  tuples and all their Runtime pins.
+- Upgrade the managed Claude Code Runtime from 2.1.310 to official 2.1.312,
+  with its exact binary size and SHA-256 pinned for macOS Apple Silicon. The
+  official 2.1.311-2.1.312 changelog documents no headless spawn or wire
+  contract change.
+- Upgrade the managed Codex Runtime from 0.164.0 to official 0.165.0, with
+  its exact archive size and SHA-256 pinned for macOS Apple Silicon. The
+  app-server schema delta is one additive `modelNotFound` error variant on
+  existing surfaces.
+- Retain first-party official-account quota inspection on both Proxies.
+  These are release candidates until the hosted artifact qualification and
+  immutable publication steps succeed. Real Provider and Desktop acceptance
+  remain separate from artifact qualification.
+
 ## Kimi Proxy 0.4.14 - 2026-10-28
 
 - Fix repeated TodoList and plan-review updates that return to an earlier

@@ -33,8 +33,8 @@ export class RemoteFileRefService {
   private readonly listings = new Map<string, { root: string; until: number; files: string[] }>();
   constructor(
     private readonly db: Db,
-    private readonly workspacePath: (sessionId: string) => string | null,
-    private readonly sessionVisible?: (sessionId: string) => boolean,
+    private readonly workspacePath: (sessionId: string, deviceId?: string) => string | null,
+    private readonly sessionVisible?: (sessionId: string, deviceId?: string) => boolean,
     private readonly referencedFile?: (sessionId: string, path: string) => boolean | Promise<boolean>,
     private readonly referencedAttachment?: (sessionId: string, filename: string) => boolean,
   ) {}
@@ -127,7 +127,7 @@ export class RemoteFileRefService {
       if (!path) throw new RemoteProtocolError('INVALID_FRAME', 'attachment path is invalid');
       return path;
     }
-    const root = this.workspacePath(record.sessionId);
+    const root = this.workspacePath(record.sessionId, record.deviceId);
     if (!root) throw new RemoteProtocolError('INVALID_FRAME', 'session has no workspace');
     return join(root, record.relativePath);
   }
@@ -172,7 +172,7 @@ export class RemoteFileRefService {
   }
 
   async resolveFile(input: { deviceId: string; sessionId: string; reference: string }) {
-    this.assertVisibleId(input.sessionId);
+    this.assertVisibleId(input.sessionId, input.deviceId);
     if (input.reference.startsWith('attachment:')) {
       const filename = input.reference.slice('attachment:'.length);
       if (!filename || basename(filename) !== filename || filename.includes('\\') || filename.includes('\0')
@@ -183,6 +183,7 @@ export class RemoteFileRefService {
       const info = path ? await lstat(path).catch(() => null) : null;
       if (!info?.isFile() || info.isSymbolicLink()) throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'attachment unavailable');
       if (info.size > MAX_ATTACHMENT_BYTES) throw new RemoteProtocolError('FILE_TOO_LARGE', 'attachment exceeds transfer limit');
+      this.assertVisibleId(input.sessionId, input.deviceId);
       const record = this.issueSessionAttachment({ ...input, filename, contentRevision: fileRevision(info) });
       return { id: record.id, reference: input.reference, session_id: input.sessionId, name: filename,
         mime: previewMimeForAttachment(filename), size: info.size, revision: record.contentRevision,
@@ -193,6 +194,7 @@ export class RemoteFileRefService {
       const path = await this.resolveRecord(existing);
       const info = await lstat(path);
       if (!info.isFile() || info.size > MAX_ATTACHMENT_BYTES) throw new RemoteProtocolError('FILE_TOO_LARGE', 'file is not previewable');
+      this.assertVisibleId(input.sessionId, input.deviceId);
       const renewed = this.issue({ deviceId: input.deviceId, sessionId: input.sessionId,
         relativePath: existing.relativePath, contentRevision: fileRevision(info) });
       return { id: renewed.id, session_id: input.sessionId, name: basename(path), mime: previewMimeForAttachment(path),
@@ -203,7 +205,7 @@ export class RemoteFileRefService {
     try { reference = decodeURIComponent(input.reference); } catch { throw new RemoteProtocolError('INVALID_FRAME', 'invalid file reference'); }
     reference = reference.replace(/:\d+(?::\d+)?$/, '');
     if (!reference || reference.includes('\0')) throw new RemoteProtocolError('INVALID_FRAME', 'invalid file reference');
-    const root = this.workspacePath(input.sessionId);
+    const root = this.workspacePath(input.sessionId, input.deviceId);
     if (!root) throw new RemoteProtocolError('FILE_REFERENCE_EXPIRED', 'execution worktree unavailable');
     const requested = resolve(root, reference);
     let target: string;
@@ -218,6 +220,7 @@ export class RemoteFileRefService {
     if (!info.isFile() || info.isSymbolicLink()) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'only regular files may be previewed');
     if (info.size > MAX_ATTACHMENT_BYTES) throw new RemoteProtocolError('FILE_TOO_LARGE', 'file exceeds transfer limit');
     const location = inside ? rel : EXTERNAL_FILE_PREFIX + Buffer.from(JSON.stringify({ target, requested })).toString('base64url');
+    this.assertVisibleId(input.sessionId, input.deviceId);
     const record = this.issue({ deviceId: input.deviceId, sessionId: input.sessionId,
       relativePath: location, contentRevision: fileRevision(info) });
     return { id: record.id, session_id: input.sessionId, name: basename(target),
@@ -225,9 +228,9 @@ export class RemoteFileRefService {
       previewable: info.size <= MAX_FILE_PREVIEW_BYTES, downloadable: true, expires_at: record.expiresAt };
   }
 
-  async tree(input: { sessionId: string; directory: string; after?: string }) {
-    this.assertVisibleId(input.sessionId);
-    const root = this.workspacePath(input.sessionId);
+  async tree(input: { sessionId: string; directory: string; after?: string; deviceId?: string }) {
+    this.assertVisibleId(input.sessionId, input.deviceId);
+    const root = this.workspacePath(input.sessionId, input.deviceId);
     if (!root || input.directory.includes('\0')) {
       throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'directory must be inside the execution worktree');
     }
@@ -237,6 +240,7 @@ export class RemoteFileRefService {
       .filter(entry => !entry.name.startsWith('.') && entry.name !== 'node_modules')
       .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
       .filter(entry => !input.after || entry.name > input.after);
+    this.assertVisibleId(input.sessionId, input.deviceId);
     return { entries: entries.slice(0, 200).map(entry => ({
       name: entry.name,
       reference: join(input.directory, entry.name),
@@ -244,9 +248,9 @@ export class RemoteFileRefService {
     })), has_more: entries.length > 200 };
   }
 
-  async listFiles(sessionId: string, after?: string) {
-    this.assertVisibleId(sessionId);
-    const root = this.workspacePath(sessionId);
+  async listFiles(sessionId: string, after?: string, deviceId?: string) {
+    this.assertVisibleId(sessionId, deviceId);
+    const root = this.workspacePath(sessionId, deviceId);
     if (!root) throw new RemoteProtocolError('FILE_REFERENCE_EXPIRED', 'execution worktree unavailable');
     let cached = this.listings.get(sessionId);
     if (!cached || cached.root !== root || cached.until <= Date.now()) {
@@ -277,6 +281,7 @@ export class RemoteFileRefService {
       if (references.length >= 200 || size + bytes > 128 * 1024) break;
       references.push(file); size += bytes;
     }
+    this.assertVisibleId(sessionId, deviceId);
     return { references, has_more: references.length < remaining.length };
   }
 
@@ -306,7 +311,7 @@ export class RemoteFileRefService {
       if (!path) throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'attachment unavailable');
       return path;
     }
-    const root = this.workspacePath(record.sessionId);
+    const root = this.workspacePath(record.sessionId, record.deviceId);
     if (!root) throw new RemoteProtocolError('FILE_REFERENCE_EXPIRED', 'execution worktree unavailable');
     const candidate = join(root, record.relativePath);
     const info = await lstat(candidate).catch(() => null);
@@ -316,8 +321,8 @@ export class RemoteFileRefService {
     return path;
   }
 
-  private assertVisibleId(sessionId: string): void {
-    if (this.sessionVisible && !this.sessionVisible(sessionId)) {
+  private assertVisibleId(sessionId: string, deviceId?: string): void {
+    if (this.sessionVisible && !this.sessionVisible(sessionId, deviceId)) {
       throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'session is not available');
     }
   }
@@ -329,7 +334,7 @@ export class RemoteFileRefService {
   }
 
   private assertSessionVisible(record: RemoteFileRefRecord): void {
-    if (this.sessionVisible && !this.sessionVisible(record.sessionId)) {
+    if (this.sessionVisible && !this.sessionVisible(record.sessionId, record.deviceId)) {
       throw new RemoteProtocolError('FILE_REFERENCE_EXPIRED', 'file reference is no longer available');
     }
   }

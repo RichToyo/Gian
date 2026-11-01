@@ -776,6 +776,12 @@ export class RemoteProjector {
       });
   }
 
+  interactionsForSession(sessionId: string): RemoteInteraction[] {
+    const interactions = this.pendingInteractions(new Set([sessionId]));
+    if (interactions.length > MAX_ARRAY_ITEMS) throw new Error('too many pending conversation interactions');
+    return interactions;
+  }
+
   private projectQueueItems(entry: QueueEntry, deviceId?: string): RemoteQueueEntry['items'] {
     if (!entry.items?.length) return undefined;
     const projected = entry.items.flatMap((item) => this.projectInputItem(entry, item, deviceId));

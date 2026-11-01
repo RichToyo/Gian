@@ -24,6 +24,7 @@ test('RemoteMethod registry is closed and exhaustive', () => {
     'catalog.agent',
     'execution.configure',
     'state.refresh',
+    'directory.list',
     'session.subscribe',
     'session.page',
     'command.status',

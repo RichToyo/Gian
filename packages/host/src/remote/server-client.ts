@@ -10,6 +10,9 @@ import {
   type AccountLoginResult,
   hostConnectorChallengeResultSchema,
   hostEnrollmentClaimResultSchema,
+  controllerChallengeResultSchema,
+  controllerEnrollmentClaimResultSchema,
+  controllerLoginResultSchema,
   isRemoteErrorCode,
   parseClosed,
   RemoteProtocolError,
@@ -116,6 +119,33 @@ export class HttpRemoteServerAuthClient implements RemoteServerAuthClient {
       host_public_key: input.hostPublicKey,
     });
     return parseClosed(hostEnrollmentClaimResultSchema, response);
+  }
+
+  async claimHostController(platform: string): Promise<{ browser_installation_id: string; server_identity: { fingerprint: string } }> {
+    if (!this.accessToken) throw new RemoteProtocolError('AUTH_REQUIRED', 'Host connector is not logged in');
+    const response = await this.request('/api/v1/controller-enrollments/host-claim', {
+      protocol: AUTH_PROTOCOL,
+      platform,
+    }, this.accessToken);
+    return parseClosed(controllerEnrollmentClaimResultSchema, response);
+  }
+
+  async controllerLogin(installationId: string, sign: (bytes: Uint8Array) => Promise<string>): Promise<{
+    controller_access_token: string;
+    expires_at: number;
+    browser_installation_id: string;
+  }> {
+    const challenge = parseClosed(controllerChallengeResultSchema, await this.request('/api/v1/sessions/controller-challenge', {
+      protocol: AUTH_PROTOCOL,
+      browser_installation_id: installationId,
+    }));
+    const response = await this.request('/api/v1/sessions/controller-login', {
+      protocol: AUTH_PROTOCOL,
+      browser_installation_id: installationId,
+      challenge_id: challenge.challenge_id,
+      signature: await sign(new TextEncoder().encode(challenge.challenge_id)),
+    });
+    return parseClosed(controllerLoginResultSchema, response);
   }
 
   async challenge(hostId: string): Promise<{
@@ -237,11 +267,10 @@ export class HttpRemoteServerAuthClient implements RemoteServerAuthClient {
   ): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (!path.startsWith('/api/v1/account/')) {
+      // A live GitHub session may still be attached for account-scoped
+      // execution. Enrollment, pairing, and reconnect do not require it.
       const account = await this.identity.getAccountSession?.(new URL(this.baseUrl).origin, 'host');
       if (account && account.expiresAt > Date.now()) headers['x-gian-account-token'] = account.token;
-      else if (path !== '/api/v1/host/connector-challenge') {
-        throw new RemoteAccountRequiredError();
-      }
     }
     if (accessToken) headers.authorization = `Bearer ${accessToken}`;
     const abort = new AbortController();

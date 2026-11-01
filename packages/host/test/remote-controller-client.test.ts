@@ -9,6 +9,7 @@ import { MemoryRemoteIdentity } from '../src/remote/identity.js';
 class Relay {
   isOpen = false;
   closed = false;
+  negotiatedCapabilities: readonly string[] | null = null;
   hostGeneration = generateCanonicalId();
   sent: Array<{ command_id: string; method: string; expected: { host_generation: string } }> = [];
   constructor(readonly options: DeviceRelayClientOptions) {}
@@ -23,6 +24,28 @@ class Relay {
     return this.options.handlers.onControl({ type: 'command.result', command_id: commandId, attempt_id: generateCanonicalId(), ok: true, data });
   }
 }
+
+test('controller reports only capabilities negotiated by its connected relay', async () => {
+  const f = await fixture();
+  try {
+    const feature = 'wire.device_execution_target';
+    assert.equal(f.client.supports(feature), false, 'a disconnected client has no capabilities');
+
+    await f.client.connect();
+    const relay = f.relays[0]!;
+    assert.equal(f.client.supports(feature), false, 'an unnegotiated capability is denied');
+
+    relay.negotiatedCapabilities = [feature];
+    assert.equal(f.client.supports(feature), true);
+    assert.equal(f.client.supports('wire.unknown_feature'), false);
+
+    relay.negotiatedCapabilities = [];
+    assert.equal(f.client.supports(feature), false, 'a missing capability is denied');
+    relay.negotiatedCapabilities = [feature];
+    f.client.close();
+    assert.equal(f.client.supports(feature), false, 'closing the relay removes its capabilities');
+  } finally { f.close(); }
+});
 
 async function until(check: () => boolean) {
   const deadline = Date.now() + 3000;
@@ -49,16 +72,18 @@ async function fixture(onConnectionChange?: (connected: boolean) => void) {
   const fetchImpl: typeof fetch = async (url, init) => server.fetch(new URL(String(url)).pathname, init);
   const client = new RemoteControllerClient({ id: generateCanonicalId(), name: 'test', server_origin: origin,
     server_identity_fingerprint: fingerprint, host_id: host.hostId, browser_id: device.browserId,
-    device_id: device.deviceId, crypto_connection_id: device.cryptoConnectionId,
+    device_id: device.deviceId, device_public_key_json: JSON.stringify(public_key), crypto_connection_id: device.cryptoConnectionId,
     host_public_key_json: null, pairing_id: null, created_at: Date.now() }, identity, () => {}, fetchImpl,
   options => { const relay = new Relay(options); relays.push(relay); return relay; }, onConnectionChange);
-  return { client, relays, close() { client.close(); server.handle.shutdown(); } };
+  return { client, relays, controller: () => server.handle.services.repos.getController(device.browserId),
+    close() { client.close(); server.handle.shutdown(); } };
 }
 
 test('Host offline invalidates live relay crypto, rejects uncertain writes, and the next request negotiates anew', async () => {
   const f = await fixture();
   try {
     await f.client.connect();
+    assert.equal(f.controller()?.revoked_at, null, 'confirmed pairing key migrates Server admission');
     const old = f.relays[0]!;
     assert.equal(f.client.connected, true);
     old.notice('host.offline', generateCanonicalId());
@@ -120,4 +145,49 @@ test('onConnectionChange reports each connectivity transition exactly once', asy
     await f.client.connect();
     assert.deepEqual(events, [true, false, true]);
   } finally { f.close(); }
+});
+
+test('native pairing reuses the admitted Host key and never creates a second controller identity', async () => {
+  const server = await makeRemoteTestApp();
+  const host = await enrollHost(server.fetch);
+  const identity = new MemoryRemoteIdentity();
+  const hostPublicKey = await exportPublicJwk(host.keys.publicKey);
+  identity.ensurePublic = async () => ({ public_key: hostPublicKey, fingerprint: await identityFingerprint(hostPublicKey) });
+  identity.sign = async bytes => signBytes(host.keys.privateKey, bytes);
+  identity.ensureControllerIdentity = async () => { throw new Error('a second controller identity must not be created'); };
+  const fetchImpl: typeof fetch = async (url, init) => server.fetch(new URL(String(url)).pathname, init);
+  let client: RemoteControllerClient | null = null;
+  try {
+    const challenge = await (await server.fetch('/api/v1/sessions/controller-challenge', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ protocol: 'gian.remote.auth/1', browser_installation_id: host.hostId }),
+    })).json() as { challenge_id: string };
+    const admission = await (await server.fetch('/api/v1/sessions/controller-login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ protocol: 'gian.remote.auth/1', browser_installation_id: host.hostId,
+        challenge_id: challenge.challenge_id,
+        signature: await signBytes(host.keys.privateKey, new TextEncoder().encode(challenge.challenge_id)) }),
+    })).json() as { controller_access_token: string };
+    const grant = await (await server.fetch('/api/v1/host/pairings', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${host.accessToken}` },
+      body: JSON.stringify({ protocol: 'gian.remote.auth/1' }),
+    })).json() as { code: string };
+    const environment = await RemoteControllerClient.pair({ origin: 'https://remote.test', code: grant.code, name: 'Same Mac' },
+      identity, { installationId: host.hostId, accessToken: admission.controller_access_token,
+        serverIdentityFingerprint: server.handle.services.identity.fingerprint, hostIdentity: true }, fetchImpl);
+    assert.equal(environment.browser_id, host.hostId);
+    assert.deepEqual(JSON.parse(environment.device_public_key_json!), hostPublicKey);
+    const pairing = server.handle.services.repos.getPairingByBrowserHost(host.hostId, host.hostId);
+    assert.equal(pairing?.public_key_jwk, JSON.stringify(hostPublicKey));
+    await server.fetch(`/api/v1/pairings/${environment.pairing_id}/confirm`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${host.accessToken}` },
+      body: JSON.stringify({ protocol: 'gian.remote.auth/1', pairing_id: environment.pairing_id, decision: 'confirm' }),
+    });
+    const relays: Relay[] = [];
+    client = new RemoteControllerClient(environment, identity, () => {}, fetchImpl,
+      options => { const relay = new Relay(options); relays.push(relay); return relay; });
+    await client.connect();
+    assert.equal(client.connected, true);
+    assert.deepEqual(relays[0]!.options.identity.publicJwk, hostPublicKey);
+  } finally { client?.close(); server.handle.shutdown(); }
 });

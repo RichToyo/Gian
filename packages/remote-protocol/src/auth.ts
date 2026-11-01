@@ -5,6 +5,7 @@ import { canonicalJson } from './serialize.js';
 import { githubAccountIdSchema } from './account.js';
 import {
   authProtocolSchema,
+  base64UrlSchema,
   boundedStringSchema,
   canonicalIdSchema,
   nameSchema,
@@ -53,11 +54,109 @@ export const serverIdentitySchema = z.strictObject({
   fingerprint: sha256HexSchema,
 });
 
+/** Short-lived proof from POST /api/v1/server-identity. The nonce is not a
+ * response field; it is bound only inside the signed canonical payload. */
+export const SERVER_IDENTITY_PROOF_TYPE = 'gian.remote.server_identity/1' as const;
+export const SERVER_IDENTITY_PROOF_TTL_MS = 120_000;
+export const serverIdentityNonceSchema = base64UrlSchema.min(22).max(128);
+export const serverIdentityProofRequestSchema = z.strictObject({
+  ...authRequestBase,
+  nonce: serverIdentityNonceSchema,
+});
+export const serverIdentityProofResultSchema = z.strictObject({
+  protocol: authProtocolSchema,
+  server_identity: serverIdentitySchema,
+  expires_at: unixMsSchema,
+  signature: base64UrlSchema.max(256),
+});
+
+export function serverIdentityProofPayload(input: {
+  nonce: string;
+  fingerprint: string;
+  expires_at: number;
+}): string {
+  return canonicalJson({
+    type: SERVER_IDENTITY_PROOF_TYPE,
+    nonce: input.nonce,
+    fingerprint: input.fingerprint,
+    expires_at: input.expires_at,
+  });
+}
+
+export const enrollmentPasswordLoginRequestSchema = z.strictObject({
+  ...authRequestBase,
+  password: z.string().min(1).max(256),
+});
+
 export const hostEnrollmentClaimResultSchema = z.strictObject({
   protocol: authProtocolSchema,
   host_id: canonicalIdSchema,
   connector_refresh_secret: boundedStringSchema,
   server_identity: serverIdentitySchema,
+});
+
+export const controllerEnrollmentClaimRequestSchema = z.strictObject({
+  ...authRequestBase,
+  enrollment_token: boundedStringSchema,
+  browser_installation_id: canonicalIdSchema,
+  device_public_key: p256PublicJwkSchema,
+  platform: nameSchema,
+});
+
+export const controllerEnrollmentClaimResultSchema = z.strictObject({
+  protocol: authProtocolSchema,
+  browser_installation_id: canonicalIdSchema,
+  server_identity: serverIdentitySchema,
+});
+
+export const hostControllerEnrollmentClaimRequestSchema = z.strictObject({
+  ...authRequestBase,
+  platform: nameSchema,
+});
+
+export const controllerChallengeRequestSchema = z.strictObject({
+  ...authRequestBase,
+  browser_installation_id: canonicalIdSchema,
+});
+
+export const controllerChallengeResultSchema = z.strictObject({
+  protocol: authProtocolSchema,
+  challenge_id: canonicalIdSchema,
+  challenge: boundedStringSchema,
+  expires_at: unixMsSchema,
+});
+
+export const controllerLoginRequestSchema = z.strictObject({
+  ...authRequestBase,
+  browser_installation_id: canonicalIdSchema,
+  challenge_id: canonicalIdSchema,
+  signature: boundedStringSchema,
+});
+
+export const controllerLoginResultSchema = z.strictObject({
+  protocol: authProtocolSchema,
+  controller_access_token: boundedStringSchema,
+  expires_at: unixMsSchema,
+  browser_installation_id: canonicalIdSchema,
+});
+
+export const controllerMigrationChallengeRequestSchema = z.strictObject({
+  ...authRequestBase,
+  browser_installation_id: canonicalIdSchema,
+  host_id: canonicalIdSchema,
+  device_public_key: p256PublicJwkSchema,
+});
+
+export const controllerMigrationLoginRequestSchema = z.strictObject({
+  ...authRequestBase,
+  browser_installation_id: canonicalIdSchema,
+  host_id: canonicalIdSchema,
+  challenge_id: canonicalIdSchema,
+  signature: boundedStringSchema,
+});
+
+export const controllerRevokeRequestSchema = z.strictObject({
+  ...authRequestBase,
 });
 
 export const hostConnectorChallengeRequestSchema = z.strictObject({
@@ -125,6 +224,7 @@ export const pairingClaimRequestSchema = z.strictObject({
   device_public_key: p256PublicJwkSchema,
   platform: nameSchema,
   user_agent: boundedStringSchema,
+  controller_admission: z.literal(1).optional(),
   code: z.string().min(4).max(16).optional(),
   grant_nonce: boundedStringSchema.optional(),
 }).refine(
@@ -284,6 +384,16 @@ export type AdminCreateEnrollmentRequest = z.infer<typeof adminCreateEnrollmentR
 export type AdminCreateEnrollmentResult = z.infer<typeof adminCreateEnrollmentResultSchema>;
 export type HostEnrollmentClaimRequest = z.infer<typeof hostEnrollmentClaimRequestSchema>;
 export type HostEnrollmentClaimResult = z.infer<typeof hostEnrollmentClaimResultSchema>;
+export type ControllerEnrollmentClaimRequest = z.infer<typeof controllerEnrollmentClaimRequestSchema>;
+export type ControllerEnrollmentClaimResult = z.infer<typeof controllerEnrollmentClaimResultSchema>;
+export type HostControllerEnrollmentClaimRequest = z.infer<typeof hostControllerEnrollmentClaimRequestSchema>;
+export type ControllerChallengeRequest = z.infer<typeof controllerChallengeRequestSchema>;
+export type ControllerChallengeResult = z.infer<typeof controllerChallengeResultSchema>;
+export type ControllerLoginRequest = z.infer<typeof controllerLoginRequestSchema>;
+export type ControllerLoginResult = z.infer<typeof controllerLoginResultSchema>;
+export type ControllerMigrationChallengeRequest = z.infer<typeof controllerMigrationChallengeRequestSchema>;
+export type ControllerMigrationLoginRequest = z.infer<typeof controllerMigrationLoginRequestSchema>;
+export type ControllerRevokeRequest = z.infer<typeof controllerRevokeRequestSchema>;
 export type HostConnectorChallengeRequest = z.infer<typeof hostConnectorChallengeRequestSchema>;
 export type HostConnectorChallengeResult = z.infer<typeof hostConnectorChallengeResultSchema>;
 export type HostConnectorLoginRequest = z.infer<typeof hostConnectorLoginRequestSchema>;
@@ -313,5 +423,7 @@ export type HealthResult = z.infer<typeof healthResultSchema>;
 export type HostHeartbeatRequest = z.infer<typeof hostHeartbeatRequestSchema>;
 export type HostHeartbeatResult = z.infer<typeof hostHeartbeatResultSchema>;
 export type ServerIdentity = z.infer<typeof serverIdentitySchema>;
+export type ServerIdentityProofRequest = z.infer<typeof serverIdentityProofRequestSchema>;
+export type ServerIdentityProofResult = z.infer<typeof serverIdentityProofResultSchema>;
 
 export const AUTH_PROTOCOL_NAME = AUTH_PROTOCOL;

@@ -143,7 +143,10 @@ export class CatalogService {
       managedRuntimeStatus?: (pluginId: string) => Promise<import('@gian/shared').ManagedRuntimeStatus>;
       officialPresence?: (pluginId: string) => Promise<OfficialBundledLaunch | null>;
       developmentProxies?: () => Promise<readonly TrustedLaunch[]>;
-      developmentRuntime?: (pluginId: string) => Promise<ProxyCatalogItem['runtime'] | null>;
+      developmentRuntime?: (
+        pluginId: string,
+        options?: { refresh?: boolean },
+      ) => Promise<ProxyCatalogItem['runtime'] | null>;
       onPluginGenerationChanged?: (pluginId: string) => void;
     },
   ) {}
@@ -152,8 +155,8 @@ export class CatalogService {
     return this.observeCatalog('user');
   }
 
-  /** Menubar listing must not inspect Runtime trees. In Dev, the full Catalog
-   * projection hashes every installed CLI tree before returning any row. */
+  /** Menubar listing must not inspect Runtime trees. Ordinary Dev Catalog
+   * projection likewise reuses provisioning evidence; explicit sync rehashes. */
   async listLocal(): Promise<{ items: LocalProxyInstallation[] }> {
     if (this.options.developmentProxies) {
       const launches = await this.options.developmentProxies();
@@ -245,7 +248,7 @@ export class CatalogService {
   }
 
   async sync(): Promise<ProxyCatalogList> {
-    if (this.options.developmentProxies) return this.listDevelopment();
+    if (this.options.developmentProxies) return this.listDevelopment({ refresh: true });
     if (!this.options.sourceClient) {
       throw new PluginStoreError('CATALOG_SYNC_UNAVAILABLE', 'Catalog source client is not configured.');
     }
@@ -623,7 +626,7 @@ export class CatalogService {
     }
   }
 
-  private async listDevelopment(): Promise<ProxyCatalogList> {
+  private async listDevelopment(options: { refresh?: boolean } = {}): Promise<ProxyCatalogList> {
     const launches = await this.options.developmentProxies!();
     const snapshot = this.options.store.snapshot();
     const hostVersions = [...(this.options.hostVersions ?? hostProtocolVersions())];
@@ -631,7 +634,13 @@ export class CatalogService {
     for (const launch of launches) {
       const published = snapshot.index?.plugins.find(entry => entry.pluginId === launch.pluginId);
       const compatibility = classifyCatalogCompatibility(launch.protocolRange, hostVersions);
-      const runtime = await this.projectRuntime(launch.pluginId, launch.runtime, launch, 'installed');
+      const runtime = await this.projectRuntime(
+        launch.pluginId,
+        launch.runtime,
+        launch,
+        'installed',
+        options,
+      );
       items.push({
         localizations: this.projectedLocalizations(launch.pluginId, snapshot),
         pluginId: launch.pluginId,
@@ -837,9 +846,10 @@ export class CatalogService {
     },
     launch: PluginCurrentLaunch | OfficialBundledLaunch | null | undefined,
     installation: ProxyCatalogItem['installation']['state'],
+    options: { refresh?: boolean } = {},
   ): Promise<ProxyCatalogItem['runtime']> {
     if (this.options.developmentProxies) {
-      const provisioned = await this.options.developmentRuntime?.(pluginId);
+      const provisioned = await this.options.developmentRuntime?.(pluginId, options);
       if (provisioned) return provisioned;
     }
     const managed = this.options.developmentProxies

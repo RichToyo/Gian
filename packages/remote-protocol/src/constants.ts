@@ -11,6 +11,9 @@ export const WIRE_FEATURES = [
   'wire.content_resume',
   'wire.transcript_page',
   'wire.execution_v1',
+  /** Device-target execution authorization. Peers without this negotiated
+   *  feature keep the legacy account-target behavior and fail closed. */
+  'wire.device_execution_target',
   /** Snapshot `host.locale` (the Host UI locale) may be sent only when this
    *  feature was negotiated; older clients parse snapshots closed. */
   'wire.host_locale',
@@ -19,6 +22,9 @@ export const WIRE_FEATURES = [
    *  translation.updated events. Sent only when negotiated; older clients
    *  parse every frame closed. */
   'wire.conversation_translation',
+  /** Explicitly opted-in conversation directory/access policy and taskless
+   * creation. Not advertised by legacy/default client hello helpers. */
+  'wire.session_directory_v1',
 ] as const;
 
 export const REMOTE_METHODS = [
@@ -29,6 +35,7 @@ export const REMOTE_METHODS = [
   'catalog.agent',
   'execution.configure',
   'state.refresh',
+  'directory.list',
   'session.subscribe',
   'session.page',
   'command.status',
@@ -80,6 +87,7 @@ export const BUSINESS_CAPABILITY_IDS = [
 ] as const;
 
 export const REMOTE_ERROR_CODES = [
+  'IDEMPOTENCY_CONFLICT',
   'AUTH_REQUIRED',
   'DEVICE_NOT_PAIRED',
   'DEVICE_REVOKED',
@@ -101,6 +109,12 @@ export const REMOTE_ERROR_CODES = [
   'FILE_TOO_LARGE',
   'RESOURCE_NOT_FOUND',
   'UNKNOWN_OUTCOME',
+  'ENROLLMENT_CONSUMED',
+  'ENROLLMENT_EXPIRED',
+  'CONTROLLER_NOT_ADMITTED',
+  'CONTROLLER_ALREADY_ADMITTED',
+  'CONTROLLER_REVOKED',
+  'MIGRATION_CHALLENGE_EXPIRED',
 ] as const;
 
 export const TRANSPORT_DIRECTIONS = [

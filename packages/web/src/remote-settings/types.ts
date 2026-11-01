@@ -198,6 +198,7 @@ export interface RemoteSettingsController {
   cancelPairing(): Promise<void>;
 
   // Devices
+  renameDevice(deviceId: string, name: string): Promise<void>;
   revokeDevice(deviceId: string): Promise<void>;
   setPublicUrl?(url: string): Promise<void>;
   setHostName?(name: string): Promise<void>;

@@ -1680,7 +1680,7 @@ test('Dev source launch takes precedence over installed Proxy packages and prese
   }), /current in-tree Manifest generation/);
 });
 
-test('provisioned Dev readiness works with zero Agents and rejects modified CLI files', async t => {
+test('provisioned Dev readiness reuses startup evidence and revalidates on demand', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agent-dev-provisioned-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = await fakeOfficialProxy(root, 'codex', 'Codex CLI', '0.3.4-Dev');
@@ -1700,6 +1700,8 @@ test('provisioned Dev readiness works with zero Agents and rejects modified CLI 
   assert.equal((await manager.provisionedRuntimeStatus('codex'))?.state, 'ready');
   assert.equal(await manager.scannedCliPath('codex'), installed[0]!.entryPath);
   await writeFile(installed[0]!.entryPath, 'modified CLI\n');
+  assert.equal((await manager.provisionedRuntimeStatus('codex'))?.state, 'ready');
+  assert.equal((await manager.provisionedRuntimeStatus('codex', { refresh: true }))?.state, 'invalid');
   assert.equal((await manager.provisionedRuntimeStatus('codex'))?.state, 'invalid');
 });
 

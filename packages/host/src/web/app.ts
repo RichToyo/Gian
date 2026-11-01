@@ -393,7 +393,7 @@ export function createApp(ctx: AppContext): AppHandle {
     console.error('[remote] outbound connector failed to start', error);
   });
   const remoteController = new RemoteControllerHub(ctx.db, broadcaster,
-    ctx.remoteIdentity ?? createRemoteIdentityFromEnv());
+    ctx.remoteIdentity ?? createRemoteIdentityFromEnv(), origin => remote.controllerAdmission(origin));
   sessions.setRemoteController(remoteController);
 
   // Workbench terminal manager — standalone shell PTYs, independent of

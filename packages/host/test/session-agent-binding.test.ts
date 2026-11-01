@@ -648,6 +648,85 @@ test('Claude and Codex mode creation follows their advertised choices, not a Hos
   }
 });
 
+test('ungated Claude native Agent defaults stay out of legacy approval_mode and reject stale values', async () => {
+  const scenarios = [
+    { id: 'ordinary-claude', cliPath: null, saved: 'acceptEdits', expected: 'acceptEdits' },
+    { id: 'custom-cli-mc', cliPath: '/agents/mc', saved: 'dontAsk', expected: 'dontAsk' },
+    { id: 'empty-default', cliPath: null, saved: '', expected: 'default' },
+  ];
+  for (const scenario of scenarios) {
+    const fixture = nativeModeFixture();
+    fixture.capabilities = {};
+    fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => (
+      option.id === 'permission_mode'
+        ? {
+            ...option,
+            modeKind: undefined,
+            defaultValue: 'default',
+            choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+              value,
+              displayName: value,
+            })),
+          }
+        : option
+    ));
+    const agent = makeAgent({
+      id: scenario.id,
+      proxy: 'claude',
+      cliPath: scenario.cliPath,
+      defaults: { model: 'fixture-model', thinking: 'high', mode: scenario.saved },
+    });
+    const h = setup({ agents: [agent], modeFixture: fixture });
+    try {
+      const session = await h.sessions.createSession({ workspace_id: h.wsId, agent_id: agent.id });
+      assert.equal(session.approval_mode, null);
+      assert.equal(session.turn_config?.permission_mode, scenario.expected);
+      await h.sessions.sendMessage(session.id, 'native default');
+      assert.equal(h.proxyMgr.get(session.id)?.startTurnCalls[0]?.config?.permission_mode, scenario.expected);
+      assert.equal(agent.defaults.mode, scenario.saved);
+      if (scenario.id === 'ordinary-claude') {
+        const legacy = await h.sessions.createSession({
+          workspace_id: h.wsId,
+          agent_id: agent.id,
+          approval_mode: 'auto',
+        });
+        assert.equal(legacy.approval_mode, 'auto');
+        assert.equal(legacy.turn_config?.permission_mode, 'auto');
+      }
+    } finally {
+      h.db.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  }
+
+  for (const saved of ['plan', 'removed-mode']) {
+    const fixture = nativeModeFixture();
+    fixture.capabilities = {};
+    fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => (
+      option.id === 'permission_mode'
+        ? {
+            ...option,
+            modeKind: undefined,
+            choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+              value,
+              displayName: value,
+            })),
+          }
+        : option
+    ));
+    const agent = makeAgent({ proxy: 'claude', defaults: { model: 'fixture-model', thinking: 'high', mode: saved } });
+    const h = setup({ agents: [agent], modeFixture: fixture });
+    try {
+      await assert.rejects(h.sessions.createSession({ workspace_id: h.wsId, agent_id: agent.id }), /not advertised/);
+      assert.equal(h.proxyMgr.createdClients[0]?.lastCreateParams, null);
+      assert.equal(h.proxyMgr.createdClients[0]?.startTurnCalls.length, 0);
+    } finally {
+      h.db.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('legacy native Kimi/Grok/DSH routing still echoes only advertised native choices', async () => {
   for (const proxy of ['kimi', 'grok', 'dsh'] as const) {
     const fixture = nativeModeFixture();

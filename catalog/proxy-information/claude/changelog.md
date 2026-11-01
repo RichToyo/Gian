@@ -2,7 +2,51 @@
 
 Generated from the structured changelog, newest Proxy version first. Original publication and later repository distributions are recorded separately; missing historical details are not invented.
 
-Release combination snapshot: Proxy **0.3.15**, Runtime **2.1.310**. These are distribution targets, not this machine's installed state.
+Release combination snapshot: Proxy **0.3.19**, Runtime **2.1.316**. These are distribution targets, not this machine's installed state.
+
+## 0.3.19
+
+First published: 2026-10-31T18:15:44Z (UTC).
+
+- [RichToyo/Gian-Proxies distribution](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.19): 2026-10-31T18:15:44Z.
+- CLI: 2.1.316 (Manifest compatibility declaration, not local installation state).
+
+### Changed
+
+- Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.316 with pinned binary bytes; the official 2.1.314 through 2.1.316 changelog review found no proxy spawn-flag or permission-mode surface change, while upstream fixed orphaned shell commands on exit and claude -p auto-mode stop explanations. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed. [Source 1](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.19) [Source 2](https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.19/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
+
+## 0.3.18
+
+First published: 2026-10-31T09:24:45Z (UTC).
+
+- [RichToyo/Gian-Proxies distribution](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.18): 2026-10-31T09:24:45Z.
+- CLI: 2.1.314 (Manifest compatibility declaration, not local installation state).
+
+### Changed
+
+- Prevent repeated conversation usage updates from causing a session protocol failure, preserve context updates and record duplicate diagnostics. Retain Claude Code Runtime 2.1.314 and Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed. [Source 1](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.18) [Source 2](https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.18/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
+
+## 0.3.17
+
+First published: 2026-10-30T18:40:04Z (UTC).
+
+- [RichToyo/Gian-Proxies distribution](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.17): 2026-10-30T18:40:04Z.
+- CLI: 2.1.314 (Manifest compatibility declaration, not local installation state).
+
+### Changed
+
+- Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.314 with pinned binary bytes; the official changelog from 2.1.312 through 2.1.314 was reviewed. The 2.1.314 changelog adds an opt-in permissions.blockWritesOutsideWorkingDirectories toggle and fixes claude -p to exit non-zero on startup failure; no proxy spawn flag or permission-mode surface changed. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed. [Source 1](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.17) [Source 2](https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.17/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
+
+## 0.3.16
+
+First published: 2026-10-28T18:54:05Z (UTC).
+
+- [RichToyo/Gian-Proxies distribution](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.16): 2026-10-28T18:54:05Z.
+- CLI: 2.1.312 (Manifest compatibility declaration, not local installation state).
+
+### Changed
+
+- Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.312 with pinned binary bytes; no headless spawn or wire contract change was found in the official 2.1.311-2.1.312 changelog. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed. [Source 1](https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.16) [Source 2](https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.16/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
 
 ## 0.3.15
 

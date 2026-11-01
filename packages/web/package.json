@@ -1,6 +1,6 @@
 {
   "name": "@gian/web",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@gian/chat-ui": "workspace:*",
+    "@gian/remote-web": "workspace:*",
     "@gian/shared": "workspace:*",
     "@lexical/clipboard": "^0.49.0",
     "@lexical/code-core": "^0.49.0",

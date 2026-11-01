@@ -1827,6 +1827,100 @@ describe('NewSessionView', () => {
     expect(payload.turnConfig).toBeUndefined();
   });
 
+  it.each([
+    { id: 'agent-claude-native', savedMode: 'acceptEdits', cliPath: '/bin/claude' },
+    { id: 'agent-mc-native', savedMode: 'dontAsk', cliPath: '/bin/mc' },
+    { id: 'agent-claude-stale', savedMode: 'removed-mode', cliPath: '/bin/claude' },
+  ])('keeps the saved Claude mode through resolve and submit for $id', async (scenario) => {
+    const savedAgent = {
+      ...agent('claude', 'Claude Code'),
+      id: scenario.id,
+      cliPath: scenario.cliPath,
+      defaults: { model: '', thinking: '', mode: scenario.savedMode, options: {} },
+    };
+    vi.mocked(loadAgents).mockResolvedValue([savedAgent]);
+    const options: ConfigOption[] = [{
+      id: 'model', displayName: 'Model', binding: 'turn', role: 'model',
+      control: 'select', required: false, defaultValue: 'model-a',
+      choices: [
+        { value: 'model-a', displayName: 'Model A' },
+        { value: 'model-b', displayName: 'Model B' },
+      ],
+    }, {
+      id: 'permission_mode', displayName: 'Mode', binding: 'turn', role: 'approval_mode',
+      control: 'select', required: false, defaultValue: 'default',
+      choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+        value,
+        displayName: value,
+      })),
+    }];
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      catalogRevision: 'claude-native-1',
+      capabilities: { 'catalog.resolve': 1 },
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+    });
+    vi.mocked(loadResolvedProxyCatalog).mockResolvedValue({
+      catalogRevision: 'claude-native-resolved',
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+      resolvedDefaults: { sessionConfig: {}, turnConfig: { permission_mode: 'auto' } },
+    });
+    const { onCreate } = renderView({ initialAgentId: scenario.id });
+    await waitFor(() => expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent(scenario.savedMode));
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(
+      within(document.querySelector('.model-pop') as HTMLElement)
+        .getByText('Model B', { selector: '.mp-row-title' }),
+    );
+    await waitFor(() => expect(loadResolvedProxyCatalog).toHaveBeenCalledWith('claude', expect.objectContaining({
+      turnConfig: expect.objectContaining({ permission_mode: scenario.savedMode }),
+    }), scenario.id));
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'preserve saved mode');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    const payload = onCreate.mock.calls[0]![0];
+    expect(payload.turnConfig).toEqual({ model: 'model-b', permission_mode: scenario.savedMode });
+    expect(payload.approvalMode).toBeUndefined();
+  });
+
+  it('restores remembered Claude mode only for the Agent that owns it', async () => {
+    const first = {
+      ...agent('claude', 'Claude A'),
+      id: 'agent-claude-a',
+      defaults: { model: '', thinking: '', mode: 'acceptEdits', options: {} },
+    };
+    const second = {
+      ...agent('claude', 'Claude B'),
+      id: 'agent-claude-b',
+      defaults: { model: '', thinking: '', mode: 'dontAsk', options: {} },
+    };
+    vi.mocked(loadAgents).mockResolvedValue([first, second]);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      catalogRevision: 'claude-native-modes',
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'permission_mode', displayName: 'Mode', binding: 'turn', role: 'approval_mode',
+        control: 'select', required: false, defaultValue: 'default',
+        choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+          value,
+          displayName: value,
+        })),
+      }],
+      slashCommands: [],
+    });
+    localStorage.setItem('gian.new-session.last.v1', JSON.stringify({
+      workspaceId: 'ws-1', agentId: first.id, executor: 'claude', approvalMode: 'auto',
+    }));
+    renderView({ initialAgentId: second.id });
+    await waitFor(() => expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('dontAsk'));
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId(`ns-agent-option-${first.id}`));
+    await waitFor(() => expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('auto'));
+  });
+
   it('remembers the last workspace / agent / chips as the next defaults', async () => {
     const first = renderView();
     await openAgentPicker();

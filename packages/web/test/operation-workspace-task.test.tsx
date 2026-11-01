@@ -37,6 +37,7 @@ import {
   type WorkspaceCanonicalSink,
 } from '../src/operations/workspace.js';
 import '../src/operations/session.js';
+import { buildSessionCreatePayload } from '../src/views/new-session-view.js';
 import { createOperationStore, entityFieldKey } from '../src/operations/store.js';
 import {
   OperationDispatcherProvider,
@@ -361,6 +362,33 @@ describe('subtask REST operations (proposal §8, product definitions)', () => {
     expect(createSubtask).toHaveBeenCalledWith('t1', {
       workspace_id: 'w1',
       agent_id: 'agent-dsh',
+    });
+  });
+
+  it('task.createSubtask carries native Claude turn_config without legacy approval_mode', () => {
+    const { dispatcher } = setup();
+    const payload = buildSessionCreatePayload({
+      workspaceId: 'w1',
+      sessionName: 'Native MC',
+      agentId: 'agent-mc',
+      executor: 'claude',
+      approvalMode: 'ask',
+      catalogOptions: [{
+        id: 'permission_mode', displayName: 'Mode', binding: 'turn', role: 'approval_mode',
+        control: 'select', required: false, defaultValue: 'default',
+        choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+          value,
+          displayName: value,
+        })),
+      }],
+      catalogValues: { permission_mode: 'dontAsk' },
+    });
+    dispatcher.dispatch('task.createSubtask', { ...payload, taskId: 't1', agentId: 'agent-mc' });
+    expect(createSubtask).toHaveBeenCalledWith('t1', {
+      workspace_id: 'w1',
+      agent_id: 'agent-mc',
+      name: 'Native MC',
+      turn_config: { permission_mode: 'dontAsk' },
     });
   });
 

@@ -36,7 +36,7 @@ export class RemoteAttachmentService {
   constructor(
     private readonly db: Db,
     private readonly dataDir: string,
-    private readonly sessionVisible?: (sessionId: string) => boolean,
+    private readonly sessionVisible?: (sessionId: string, deviceId?: string) => boolean,
   ) {}
 
   async begin(input: {
@@ -52,7 +52,7 @@ export class RemoteAttachmentService {
     if (input.size > MAX_ATTACHMENT_BYTES) {
       throw new RemoteProtocolError('FILE_TOO_LARGE', 'attachment exceeds 20 MiB');
     }
-    if (this.sessionVisible && !this.sessionVisible(input.sessionId)) {
+    if (this.sessionVisible && !this.sessionVisible(input.sessionId, input.deviceId)) {
       throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'upload session is not visible');
     }
     this.gc();
@@ -179,7 +179,7 @@ export class RemoteAttachmentService {
     const intent = this.get(attachmentId);
     if (!intent || intent.deviceId !== deviceId || intent.state !== 'complete') return null;
     if (sessionId && intent.sessionId !== sessionId) return null;
-    if (this.sessionVisible && !this.sessionVisible(intent.sessionId)) return null;
+    if (this.sessionVisible && !this.sessionVisible(intent.sessionId, deviceId)) return null;
     const path = intent.tempName;
     return intent.mime.startsWith('image/')
       ? { type: 'localImage', path, name: intent.name, mime: intent.mime, size: intent.size }
@@ -211,7 +211,7 @@ export class RemoteAttachmentService {
     if (!intent || intent.deviceId !== deviceId || intent.state !== 'complete') {
       throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'attachment handle is not usable');
     }
-    if (this.sessionVisible && !this.sessionVisible(intent.sessionId)) {
+    if (this.sessionVisible && !this.sessionVisible(intent.sessionId, deviceId)) {
       throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'attachment handle is no longer usable');
     }
     const bytes = await readFile(intent.tempName);
@@ -274,7 +274,7 @@ export class RemoteAttachmentService {
     if (intent.state !== 'open') {
       throw new RemoteProtocolError('UPLOAD_EXPIRED', 'upload handle is no longer open');
     }
-    if (this.sessionVisible && !this.sessionVisible(intent.sessionId)) {
+    if (this.sessionVisible && !this.sessionVisible(intent.sessionId, deviceId)) {
       throw new RemoteProtocolError('UPLOAD_EXPIRED', 'upload session is no longer visible');
     }
     return intent;

@@ -47,6 +47,7 @@ import type { RemoteAttachmentService } from './attachment-stream.js';
 import type { RemoteDeviceRecord } from './device-store.js';
 import type { RemoteFileRefService } from './file-ref.js';
 import type { RemoteExecutionJournal } from './execution-journal.js';
+import type { RemoteDirectory } from './directory.js';
 import { RemoteProjector, assertNoLeak, projectRemoteTranslation, projectRemoteTranslationState, remoteInteractionResourceId, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues, REMOTE_TRANSLATION_INLINE_TEXT_LIMIT } from './projection.js';
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -67,6 +68,7 @@ export interface RemoteCommandAdapterDeps {
   fileRefs: RemoteFileRefService;
   audit: RemoteMutationAudit;
   hostGeneration: string;
+  directory: RemoteDirectory;
   snapshot: (device: RemoteDeviceRecord, options: { wireFeatures: readonly string[] }) => unknown;
   /** Oversized state.refresh payloads follow a pending snapshot receipt. */
   pushSnapshotParts?: (deviceId: string, part: StateSnapshotPart) => Promise<void>;
@@ -119,24 +121,51 @@ export class RemoteCommandAdapter {
     data?: unknown;
     error?: { code: string; message: string };
   }> {
+    return this.deps.directory.run(device.id, hooks?.wireFeatures ?? [], async () => {
+      try {
+        if (this.deps.directory.negotiated(device.id)) device = this.deps.directory.currentDevice(device);
+        return await this.executeScoped(device, command, hooks);
+      } catch (error) { return { ok: false, error: asRemoteError(mapError(error)) }; }
+    });
+  }
+
+  private async executeScoped(device: RemoteDeviceRecord, command: CommandRequest, hooks?: RemoteCommandHooks): Promise<{
+    ok: boolean; data?: unknown; error?: { code: string; message: string };
+  }> {
+    let directoryClaimed = false;
+    let dispatched = false;
+    let data: unknown;
     try {
       const claimed = this.claim(device, command);
       if (claimed.kind === 'done') return claimed.result;
+      directoryClaimed = true;
       await hooks?.onAccepted?.();
-      const data = await this.dispatch(device, command, claimed.params, hooks);
+      data = await this.dispatch(device, command, claimed.params, hooks);
+      dispatched = true;
+      this.authorizeDirectoryResult(device, command.method, data);
       assertNoLeak(data);
       if (isMutation(command.method)) {
-        this.upsertLedger(device.id, command, 'succeeded', data);
+        this.upsertLedger(device.id, command, 'succeeded', this.createReceipt(device, command, data) ?? data);
         this.record(device, command, 'succeeded');
       }
       return { ok: true, data };
     } catch (error) {
       const mapped = asRemoteError(mapError(error));
+      const toolSucceeded = directoryClaimed && isMutation(command.method)
+        && this.deps.tool.lookupRequest(this.actor(device).callerId, command.command_id)?.status === 'succeeded';
+      const effectDispatched = dispatched || toolSucceeded;
+      const outcome = effectDispatched && isMutation(command.method)
+        ? asRemoteError({ code: 'UNKNOWN_OUTCOME', message: 'command outcome is uncertain' }) : mapped;
       if (isMutation(command.method)) {
-        this.upsertLedger(device.id, command, mapped.code === 'UNKNOWN_OUTCOME' ? 'unknown_outcome' : 'failed', undefined, mapped);
-        this.record(device, command, categoryFor(mapped.code));
+        const prior = this.ledger(device.id, command.command_id);
+        const frozen = prior ? this.directoryCreateReceipt(prior) : null;
+        const state = dispatched && data !== undefined && isPostAuthorizationFailure(mapped.code) ? 'succeeded'
+          : mapped.code === 'UNKNOWN_OUTCOME' || effectDispatched ? 'unknown_outcome' : 'failed';
+        if (!frozen || directoryClaimed) this.upsertLedger(device.id, command, state,
+          state === 'succeeded' ? this.createReceipt(device, command, data) ?? data : frozen ?? this.createReceipt(device, command), outcome);
+        this.record(device, command, categoryFor(outcome.code));
       }
-      return { ok: false, error: mapped };
+      return { ok: false, error: outcome };
     }
   }
 
@@ -152,16 +181,27 @@ export class RemoteCommandAdapter {
       return { kind: 'done', result: fail('COMMAND_EXPIRED', 'command_id is outside the 90-day window') };
     }
     const prior = this.ledger(device.id, command.command_id);
+    if (prior && this.directoryCreateReceipt(prior)) {
+      const receipt = this.directoryCreateReceipt(prior)!;
+      if (!this.deps.directory.negotiated(device.id)) {
+        throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'directory create recovery was not negotiated');
+      }
+      if (command.method !== 'session.create' || canonicalJson(parseRemoteMethodParams(command.method, command.params)) !== canonicalJson(receipt.params)) {
+        throw new RemoteProtocolError('IDEMPOTENCY_CONFLICT', 'create identity was already used with different input');
+      }
+      const recovered = this.recoverDirectoryCreate(device, prior);
+      if (recovered) return { kind: 'done', result: { ok: true, data: recovered } };
+    }
     if (prior?.state === 'succeeded' || prior?.state === 'failed' || prior?.state === 'unknown_outcome') {
       return { kind: 'done', result: this.reproject(device, prior) };
     }
     const params = parseRemoteMethodParams(command.method, command.params);
     this.rejectCraftedFields(command.params);
-    if (command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read'
+    if (command.method !== 'directory.list' && command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read'
       && command.method !== 'proxy.logo' && command.method !== 'execution.list' && command.method !== 'execution.sync'
       && command.method !== 'translation.state' && command.method !== 'translation.result_text'
       && command.method !== 'translation.request_status' && command.method !== 'translation.cancel') {
-      this.upsertLedger(device.id, command, 'accepted');
+      this.upsertLedger(device.id, command, 'accepted', this.createReceipt(device, command));
     }
     return { kind: 'accepted', params };
   }
@@ -200,6 +240,8 @@ export class RemoteCommandAdapter {
   ): Promise<unknown> {
     const method = command.method;
     switch (method) {
+      case 'directory.list':
+        return this.deps.directory.list(device, params, hooks?.wireFeatures ?? []);
       case 'execution.create':
         return this.createExecution(device, command, params as Record<string, unknown>);
       case 'catalog.agent':
@@ -270,12 +312,12 @@ export class RemoteCommandAdapter {
       case 'file.tree': {
         const input = params as { session_id: string; directory: string; after?: string };
         this.assertVisibleSession(input.session_id, device);
-        return this.deps.fileRefs.tree({ sessionId: input.session_id, directory: input.directory, after: input.after });
+        return this.deps.fileRefs.tree({ sessionId: input.session_id, directory: input.directory, after: input.after, deviceId: device.id });
       }
       case 'file.list': {
         const input = params as { session_id: string; after?: string };
         this.assertVisibleSession(input.session_id, device);
-        return this.deps.fileRefs.listFiles(input.session_id, input.after);
+        return this.deps.fileRefs.listFiles(input.session_id, input.after, device.id);
       }
       case 'git.read': {
         const input = params as { session_id: string };
@@ -314,7 +356,7 @@ export class RemoteCommandAdapter {
   }
 
   private async createExecution(device: RemoteDeviceRecord, command: CommandRequest, params: Record<string, unknown>): Promise<unknown> {
-    if (!device.accountId || !this.deps.executions) throw new RemoteProtocolError('AUTH_REQUIRED', 'verified execution account required');
+    if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution unavailable');
     if (params['catalog_revision'] !== this.deps.projector.catalogRevision()) {
       throw precondition('catalog_revision', this.deps.projector.catalogRevision());
     }
@@ -335,8 +377,7 @@ export class RemoteCommandAdapter {
     return this.deps.executions.session(sessionId, device);
   }
 
-  private async agentCatalog(device: RemoteDeviceRecord, params: Record<string, unknown>): Promise<unknown> {
-    if (!device.accountId) throw new RemoteProtocolError('AUTH_REQUIRED', 'verified account required');
+  private async agentCatalog(_device: RemoteDeviceRecord, params: Record<string, unknown>): Promise<unknown> {
     const id = this.resolveAgentId(String(params['agent_id']));
     const agent = this.deps.listAgents?.().find(item => item.id === id);
     // pluginId is the live identity; a null legacy proxy alias is a
@@ -367,7 +408,7 @@ export class RemoteCommandAdapter {
     command: CommandRequest,
     params: { session_id: string },
     hooks?: RemoteCommandHooks,
-  ): { session: RemoteSession; cursor: string; translation?: RemoteTranslationState } {
+  ): { session: RemoteSession; cursor: string; translation?: RemoteTranslationState; interactions?: import('@gian/remote-protocol').RemoteInteraction[] } {
     this.assertVisibleSession(params.session_id, device);
     this.deps.db.prepare(
       `DELETE FROM remote_file_refs WHERE device_id = ? AND session_id != ?`,
@@ -383,7 +424,9 @@ export class RemoteCommandAdapter {
       && hooks?.wireFeatures?.includes('wire.conversation_translation')
       ? this.translationStateFor(this.deps.translation, params.session_id)
       : undefined;
-    return { session, cursor: session.revision, ...(translation ? { translation } : {}) };
+    return { session, cursor: session.revision, ...(translation ? { translation } : {}),
+      ...(this.deps.directory.negotiated(device.id)
+        ? { interactions: this.deps.projector.interactionsForSession(params.session_id) } : {}) };
   }
 
   private page(
@@ -598,6 +641,10 @@ export class RemoteCommandAdapter {
     }
     const row = this.ledger(device.id, params.command_id);
     if (!row) return { command_id: params.command_id, state: 'not_seen' };
+    if (this.directoryCreateReceipt(row)) {
+      const session = this.recoverDirectoryCreate(device, row);
+      if (session) return { command_id: params.command_id, state: 'succeeded', result: session };
+    }
     const projected = this.reproject(device, row);
     return {
       command_id: params.command_id,
@@ -619,19 +666,20 @@ export class RemoteCommandAdapter {
     if (params['catalog_revision'] !== this.deps.projector.catalogRevision()) {
       throw precondition('catalog_revision', this.deps.projector.catalogRevision());
     }
+    if (this.deps.directory.negotiated(device.id)) this.deps.directory.assertWorkspace(String(params['workspace_id']));
     const taskId = typeof params['task_id'] === 'string' ? params['task_id'] : null;
-    if (!taskId) {
+    if (!taskId && !this.deps.directory.negotiated(device.id)) {
       throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'Remote sessions require an open Doing Task');
     }
-    const task = this.deps.db.prepare('SELECT status FROM tasks WHERE id = ?')
-      .get(taskId) as { status: string } | undefined;
-    if (!task || task.status !== 'open') {
+    const task = taskId ? this.deps.db.prepare('SELECT status FROM tasks WHERE id = ?')
+      .get(taskId) as { status: string } | undefined : undefined;
+    if (taskId && (!task || task.status !== 'open')) {
       throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'Task is not open');
     }
     const result = await this.toolCall(device, command, 'session.create', {
       workspace_id: params['workspace_id'],
       agent_id: this.resolveAgentId(String(params['agent_id'])),
-      task_id: taskId,
+      ...(taskId ? { task_id: taskId } : {}),
       ...(params['name'] ? { name: params['name'] } : {}),
       config: {
         ...(params['model'] ? { model: params['model'] } : {}),
@@ -882,6 +930,10 @@ export class RemoteCommandAdapter {
   }
 
   private assertVisibleSession(sessionId: string, device: RemoteDeviceRecord): void {
+    if (this.deps.directory.negotiated(device.id)) {
+      this.deps.directory.assertAccess(sessionId, device);
+      return;
+    }
     if (this.deps.executions?.contains(sessionId)) {
       this.deps.executions.authorize(sessionId, device);
       return;
@@ -913,7 +965,7 @@ export class RemoteCommandAdapter {
         return resolved;
       }
       if (record.type === 'compiled_text' && record.attachment_id) {
-        if (!device.accountId || !this.deps.executions?.contains(sessionId)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'compiled input requires execution authorization');
+        if (!this.deps.executions?.contains(sessionId)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'compiled input requires execution authorization');
         this.deps.executions.authorize(sessionId, device);
         if (!this.deps.attachments.resolveHandle(device.id, record.attachment_id, sessionId)) throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'compiled input missing');
         const read = await this.deps.attachments.readBytes(device.id, record.attachment_id);
@@ -1113,9 +1165,15 @@ export class RemoteCommandAdapter {
   }
 
   private reproject(device: RemoteDeviceRecord, row: LedgerRow): { ok: boolean; data?: unknown; error?: { code: string; message: string } } {
-    void device;
+    if (this.directoryCreateReceipt(row)) {
+      const session = this.recoverDirectoryCreate(device, row);
+      if (session) return { ok: true, data: session };
+      return { ok: false, error: row.error_json ? asRemoteError(JSON.parse(row.error_json))
+        : { code: 'UNKNOWN_OUTCOME', message: 'create outcome is not yet known; retain the original command identity' } };
+    }
     if (row.tool_result_json) {
       const data = JSON.parse(row.tool_result_json) as unknown;
+      this.authorizeDirectoryResult(device, row.method, data);
       assertNoLeak(data);
       return { ok: true, data };
     }
@@ -1125,6 +1183,51 @@ export class RemoteCommandAdapter {
         ? asRemoteError(JSON.parse(row.error_json) as { code: string; message: string })
         : { code: 'UNKNOWN_OUTCOME', message: 'command outcome is unknown' },
     };
+  }
+
+  private createReceipt(device: RemoteDeviceRecord, command: CommandRequest, data?: unknown): DirectoryCreateReceipt | undefined {
+    if (command.method !== 'session.create' || !this.deps.directory.negotiated(device.id)) return undefined;
+    // Preserve the immutable wire input even when only the Tool domain row
+    // committed before acknowledgement loss or process termination.
+    return { directory_create_v1: 1, scope: this.deps.directory.scope(device), params: parseRemoteMethodParams('session.create', command.params),
+      ...(data && typeof data === 'object' && 'id' in data ? { session_id: String(data.id) } : {}) };
+  }
+
+  private directoryCreateReceipt(row: LedgerRow): DirectoryCreateReceipt | null {
+    if (row.method !== 'session.create' || !row.tool_result_json) return null;
+    const data = JSON.parse(row.tool_result_json) as Partial<DirectoryCreateReceipt>;
+    return data.directory_create_v1 === 1 && data.params ? data as DirectoryCreateReceipt : null;
+  }
+
+  private recoverDirectoryCreate(device: RemoteDeviceRecord, row: LedgerRow): RemoteSession | null {
+    const receipt = this.directoryCreateReceipt(row);
+    if (!receipt) return null;
+    if (!this.deps.directory.negotiated(device.id)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'directory create recovery was not negotiated');
+    device = this.deps.directory.currentDevice(device);
+    if (receipt.scope !== this.deps.directory.scope(device)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'create receipt belongs to a different pairing scope');
+    this.requireDeviceGrant(device, 'session.create');
+    const tool = this.deps.tool.lookupRequest(this.actor(device).callerId, row.command_id);
+    const sessionId = receipt.session_id ?? (tool?.method === 'session.create' ? tool.domainId : null);
+    if (!sessionId || !this.deps.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)) return null;
+    this.deps.directory.assertAccess(sessionId, device);
+    return this.deps.projector.projectSession(this.deps.sessions.getSession(sessionId), device.id);
+  }
+
+  private authorizeDirectoryResult(device: RemoteDeviceRecord, method: RemoteMethod, data: unknown): void {
+    if (!this.deps.directory.negotiated(device.id)) return;
+    device = this.deps.directory.currentDevice(device);
+    const grants: Partial<Record<RemoteMethod, GianToolMethod>> = {
+      'session.create': 'session.create', 'session.update': 'session.update', 'session.send': 'session.send',
+      'session.stop': 'session.stop', 'queue.update': 'queue.update', 'queue.remove': 'queue.remove',
+      'queue.clear': 'queue.clear', 'queue.send_now': 'queue.send_now', 'interaction.respond': 'interaction.respond',
+      'translation.request': 'session.send', 'translation.set_auto': 'session.send',
+    };
+    const grant = grants[method];
+    if (grant) this.requireDeviceGrant(device, grant);
+    if (!data || typeof data !== 'object') return;
+    const result = data as { id?: unknown; session_id?: unknown; session?: { id?: unknown } };
+    const sessionId = method === 'session.create' || method === 'session.update' ? result.id : result.session?.id ?? result.session_id;
+    if (typeof sessionId === 'string') this.deps.directory.assertAccess(sessionId, device);
   }
 
   private record(device: RemoteDeviceRecord, command: CommandRequest, category: RemoteAuditCategory): void {
@@ -1148,6 +1251,13 @@ interface LedgerRow {
   error_json: string | null;
 }
 
+interface DirectoryCreateReceipt {
+  directory_create_v1: 1;
+  scope: string;
+  params: unknown;
+  session_id?: string;
+}
+
 function isMutation(method: RemoteMethod): boolean {
   return method === 'execution.create' || method === 'execution.configure' || method === 'session.create'
     || method === 'session.update'
@@ -1162,6 +1272,11 @@ function isMutation(method: RemoteMethod): boolean {
     // paid model call or flip the persisted switch twice.
     || method === 'translation.set_auto'
     || method === 'translation.request';
+}
+
+function isPostAuthorizationFailure(code: string): boolean {
+  return code === 'DEVICE_REVOKED' || code === 'DEVICE_NOT_PAIRED'
+    || code === 'REMOTE_CAPABILITY_DENIED' || code === 'AUTH_REQUIRED';
 }
 
 function asRemoteError(error: { code: string; message: string }): { code: RemoteErrorCode; message: string } {

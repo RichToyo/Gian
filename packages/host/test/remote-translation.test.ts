@@ -48,6 +48,8 @@ async function setup(t: TestContext) {
   f.sessions.setRemoteController(hub);
   const requests: Array<{ method: RemoteMethod; params: Record<string, unknown>; commandId?: string }> = [];
   t.mock.method(hub, 'client', () => ({ environment, connected: true,
+    async connect() {},
+    supports() { return false; },
     async request(method: RemoteMethod, params: Record<string, unknown>, commandId?: string) {
       requests.push({ method, params, commandId });
       if (method === 'execution.sync') {

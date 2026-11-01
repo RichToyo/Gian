@@ -131,6 +131,9 @@ export interface DeviceRelayClientOptions {
   deviceId: string;
   cryptoConnectionId: string;
   handlers: DeviceRelayHandlers;
+  /** Native Desktop supplies an IPC-backed socket with the same browser
+   * WebSocket surface; ordinary Remote Web keeps the platform constructor. */
+  createSocket?: (url: string) => WebSocket;
 }
 
 export class DeviceRelayClient implements DeviceRelayLike {
@@ -367,7 +370,7 @@ export class DeviceRelayClient implements DeviceRelayLike {
 
   private authenticate(): Promise<{ connection_id: string }> {
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(this.input.wsUrl);
+      const socket = this.input.createSocket?.(this.input.wsUrl) ?? new WebSocket(this.input.wsUrl);
       this.socket = socket;
       const timer = setTimeout(() => reject(new Error('device relay auth timed out')), 5_000);
       socket.addEventListener('error', () => {

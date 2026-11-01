@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { directoryChangedSchema, directoryListParamsSchema, directoryListResultSchema } from './directory.js';
 import { remoteAgentCatalogSchema, remoteConfigMapSchema, remoteConfigValueSchema, remoteConfigOptionSchema } from './catalog.js';
 
 import {
@@ -513,6 +514,7 @@ export const REMOTE_METHOD_PARAMS = {
     stream_id: canonicalIdSchema.optional() }),
   'catalog.read': catalogReadParamsSchema,
   'state.refresh': stateRefreshParamsSchema,
+  'directory.list': directoryListParamsSchema,
   'session.subscribe': sessionSubscribeParamsSchema,
   'session.page': sessionPageParamsSchema,
   'command.status': commandStatusParamsSchema,
@@ -763,9 +765,12 @@ export const REMOTE_METHOD_RESULTS = {
   'execution.sync': executionSyncResultSchema,
   'catalog.read': catalogReadResultSchema,
   'state.refresh': stateRefreshResultSchema,
+  'directory.list': directoryListResultSchema,
   'session.subscribe': z.strictObject({
     session: remoteSessionSchema,
     cursor: boundedStringSchema,
+    /** Present only for wire.session_directory_v1. */
+    interactions: z.array(remoteInteractionSchema).max(MAX_ARRAY_ITEMS).optional(),
     /** Present only when wire.conversation_translation was negotiated. */
     translation: remoteTranslationStateSchema.optional(),
   }),
@@ -1088,6 +1093,7 @@ export const remoteErrorMessageSchema = z.strictObject({
 });
 
 export const remoteControlMessageSchema = z.discriminatedUnion('type', [
+  directoryChangedSchema,
   helloSchema,
   helloOkSchema,
   remoteStateSnapshotSchema,
@@ -1146,6 +1152,7 @@ export function parseRemoteControlMessage(value: unknown): RemoteControlMessage 
 export const CONTENT_INNER_MESSAGE_TYPES = ['attachment.chunk'] as const;
 
 export const CONTROL_INNER_MESSAGE_TYPES = [
+  'directory.changed',
   'hello',
   'hello.ok',
   'state.snapshot',

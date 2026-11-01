@@ -22,12 +22,32 @@ test('execution targets have no remote Task or credential escape hatch', () => {
     remote_session_id: generateCanonicalId(),
   };
   assert.deepEqual(remoteExecutionTargetSchema.parse(target), target);
+  const { account_id: _accountId, ...missingAccount } = target;
+  assert.equal(remoteExecutionTargetSchema.safeParse(missingAccount).success, false);
+  for (const account_id of ['0', 'github-user', '', '01']) {
+    assert.equal(remoteExecutionTargetSchema.safeParse({ ...target, account_id }).success, false, account_id);
+  }
   for (const extra of [{ task_id: generateCanonicalId() }, { token: 'secret' }, { path: '/tmp/repo' }, { worktree_id: 'viewed-tree' }]) {
     assert.equal(remoteExecutionTargetSchema.safeParse({ ...target, ...extra }).success, false);
   }
   assert.equal(remoteExecutionBindingInputSchema.safeParse({
     local_session_id: generateCanonicalId(), target, remote_task_id: generateCanonicalId(),
   }).success, false);
+
+  const deviceTarget = {
+    target_version: 2,
+    server_origin: target.server_origin,
+    server_identity_fingerprint: target.server_identity_fingerprint,
+    host_id: target.host_id,
+    remote_session_id: target.remote_session_id,
+    device_id: generateCanonicalId(),
+    device_public_key: { kty: 'EC', crv: 'P-256', x: 'A'.repeat(43), y: 'B'.repeat(43) },
+    crypto_connection_id: generateCanonicalId(),
+  };
+  assert.deepEqual(remoteExecutionTargetSchema.parse(deviceTarget), deviceTarget);
+  assert.equal(remoteExecutionTargetSchema.safeParse({ ...deviceTarget, account_id: '123' }).success, false);
+  assert.equal(remoteExecutionTargetSchema.safeParse({ ...deviceTarget, device_id: 'not-a-device' }).success, false);
+  assert.equal(remoteExecutionTargetSchema.safeParse({ ...deviceTarget, target_version: 1 }).success, false);
 });
 
 test('Server identity origins cannot hide credentials, redirects or insecure transport', () => {

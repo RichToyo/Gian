@@ -179,6 +179,33 @@ test('failed Server rename leaves the persisted local name unchanged', async t =
   } finally { await context.close(); }
 });
 
+test('paired device rename stays local, persists through Settings, and rejects unsafe names', async () => {
+  const context = await setup();
+  try {
+    const key = await exportPublicJwk((await generateP256SigningKeyPair()).publicKey);
+    const device = context.host.app.remote.devices.create({
+      publicKey: JSON.stringify(key), name: 'iPad · Safari', platform: 'iPad',
+    });
+    await context.controller.renameDevice(device.id, '  Reading iPad  ');
+    const saved = context.host.app.remote.devices.get(device.id)!;
+    assert.equal(saved.name, 'Reading iPad');
+    assert.equal(saved.nameCustomized, true);
+    assert.equal(saved.publicKey, device.publicKey);
+    assert.equal(saved.revision, device.revision);
+    assert.equal(saved.revokedAt, null);
+    assert.equal(context.controller.getState().devices[0]!.name, 'Reading iPad');
+
+    for (const name of [' ', 'x'.repeat(257), 'bad\u0000name', 'bad\u202Ename']) {
+      const bad = await context.host.fetch('/api/remote/devices/' + device.id + '/name', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }),
+      });
+      assert.equal(bad.status, 400);
+      assert.equal(((await bad.json()) as { error: string }).error, 'invalid_device_name');
+    }
+    assert.equal(context.host.app.remote.devices.get(device.id)!.name, 'Reading iPad');
+  } finally { await context.close(); }
+});
+
 for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter pairs a real Remote Web browser by ${pairingMode} through Server + Host`, async () => {
   const context = await setup();
   const { controller, host, listener } = context;
@@ -222,6 +249,7 @@ for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter p
     await controller.refresh?.();
     assert.equal(controller.getState().pairing.kind, 'consumed');
     assert.equal(controller.getState().devices.length, 1);
+    assert.equal(controller.getState().devices[0].name, 'iOS · Safari');
     assert.equal(controller.getState().devices[0].activeConnections, 1);
     if (pairingMode === 'qr') {
       const hostId = host.app.remote.enrollment.current()!.hostId;

@@ -1,5 +1,5 @@
 import {
-  RemoteProtocolError, executionSessionSchema, executionSyncResultSchema,
+  RemoteProtocolError, canonicalJson, executionSessionSchema, executionSyncResultSchema,
   generateCanonicalId, parseClosed,
   redactRemoteConversationText,
   type ExecutionSession, type ExecutionSyncResult,
@@ -12,16 +12,30 @@ import { RemoteProjector, projectRemoteInteraction, remoteInteractionResourceId,
 import type { RemoteDeviceRecord } from './device-store.js';
 import { RemoteExecutionBindings, type RemoteExecutionBinding } from './execution-bindings.js';
 
+export interface RemoteExecutionIdentity {
+  server_origin: string;
+  server_identity_fingerprint: string;
+  host_id: string;
+}
+
 export class RemoteExecutionJournal {
-  constructor(private readonly db: Db, private readonly sessions: SessionManager, private readonly projector: RemoteProjector) {}
+  constructor(
+    private readonly db: Db,
+    private readonly sessions: SessionManager,
+    private readonly projector: RemoteProjector,
+    private readonly executionIdentity?: () => RemoteExecutionIdentity | null,
+  ) {
+    this.migrateProvenLegacyExports();
+  }
 
   register(sessionId: string, device: RemoteDeviceRecord): void {
-    const accountId = this.account(device);
+    const principal = this.executionIdentity?.() ? this.principal(device) : null;
+    const accountId = principal ? device.accountId ?? null : this.account(device);
     const session = this.sessions.getSession(sessionId);
     if (session.task_id !== null) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution must not belong to a remote Task');
     const inserted = this.db.prepare(`INSERT OR IGNORE INTO remote_execution_exports
-      (session_id, account_id, stream_id, created_at) VALUES (?, ?, ?, ?)`)
-      .run(sessionId, accountId, generateCanonicalId(), Date.now());
+      (session_id, account_id, execution_principal, stream_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(sessionId, accountId, principal, generateCanonicalId(), Date.now());
     this.authorize(sessionId, device);
     if (inserted.changes) for (const event of this.sessions.listEvents(sessionId)) this.append(event);
   }
@@ -31,10 +45,66 @@ export class RemoteExecutionJournal {
   }
 
   authorize(sessionId: string, device: RemoteDeviceRecord): void {
-    const accountId = this.account(device);
-    const row = this.db.prepare('SELECT account_id FROM remote_execution_exports WHERE session_id = ?')
-      .get(sessionId) as { account_id: string } | undefined;
-    if (!row || row.account_id !== accountId) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is not available to this account');
+    if (device.revokedAt) throw new RemoteProtocolError('DEVICE_REVOKED', 'device is revoked');
+    if (this.sessions.getSession(sessionId).remote_execution) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'nested execution is not supported');
+    const row = this.db.prepare('SELECT account_id, execution_principal FROM remote_execution_exports WHERE session_id = ?')
+      .get(sessionId) as { account_id: string | null; execution_principal: string | null } | undefined;
+    if (!row) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is unavailable');
+    if (row.execution_principal !== null) {
+      if (row.execution_principal !== this.principal(device)) {
+        throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is not available to this device');
+      }
+      return;
+    }
+    if (row.account_id !== this.account(device)) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is not available to this legacy account');
+    }
+  }
+
+  scope(device: RemoteDeviceRecord): string {
+    return this.executionIdentity?.() ? this.principal(device) : this.account(device);
+  }
+
+  private principal(device: RemoteDeviceRecord): string {
+    if (device.revokedAt) throw new RemoteProtocolError('DEVICE_REVOKED', 'device is revoked');
+    const identity = this.executionIdentity?.();
+    if (!identity || !device.cryptoConnectionId) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'enrolled Host and paired device identity required');
+    }
+    return canonicalJson({
+      version: 2,
+      ...identity,
+      device_id: device.id,
+      device_public_key: JSON.parse(device.publicKey),
+      device_revision: device.revision,
+      crypto_connection_id: device.cryptoConnectionId,
+    });
+  }
+
+  private migrateProvenLegacyExports(): void {
+    if (!this.executionIdentity) return;
+    const rows = this.db.prepare(`SELECT e.session_id,
+        d.id, d.public_key AS publicKey, d.name, d.platform, d.role, d.grants_json AS grantsJson,
+        d.created_at AS createdAt, d.last_seen_at AS lastSeenAt, d.revoked_at AS revokedAt,
+        d.revision, d.crypto_connection_id AS cryptoConnectionId, d.account_id AS accountId
+      FROM remote_execution_exports e
+      JOIN remote_command_ledger l ON l.method = 'execution.create' AND l.state = 'succeeded'
+        AND json_extract(l.tool_result_json, '$.id') = e.session_id
+      JOIN remote_devices d ON d.id = l.device_id AND d.account_id = e.account_id AND d.revoked_at IS NULL
+      WHERE e.execution_principal IS NULL`).all() as Array<{ session_id: string } & RemoteDeviceRecord>;
+    const candidates = new Map<string, RemoteDeviceRecord[]>();
+    for (const { session_id: sessionId, ...device } of rows) {
+      const list = candidates.get(sessionId) ?? [];
+      if (!list.some(item => item.id === device.id)) list.push(device);
+      candidates.set(sessionId, list);
+    }
+    for (const [sessionId, devices] of candidates) {
+      if (devices.length !== 1) continue;
+      try {
+        this.db.prepare('UPDATE remote_execution_exports SET execution_principal = ? WHERE session_id = ? AND execution_principal IS NULL')
+          .run(this.principal(devices[0]!), sessionId);
+      } catch { /* incomplete enrollment evidence leaves the legacy account binding unchanged */ }
+    }
   }
 
   session(sessionId: string, device: RemoteDeviceRecord): ExecutionSession {
@@ -60,10 +130,14 @@ export class RemoteExecutionJournal {
   }
 
   list(device: RemoteDeviceRecord, after?: string): { sessions: ExecutionSession[]; has_more: boolean } {
-    const accountId = this.account(device);
+    const principal = this.executionIdentity?.() ? this.principal(device) : null;
+    const accountId = principal ? device.accountId ?? null : this.account(device);
     const rows = this.db.prepare(`SELECT e.session_id FROM remote_execution_exports e
-      JOIN sessions s ON s.id = e.session_id WHERE e.account_id = ? AND s.archived = 0
-      AND e.session_id > ? ORDER BY e.session_id LIMIT 101`).all(accountId, after ?? '') as Array<{ session_id: string }>;
+      JOIN sessions s ON s.id = e.session_id
+      WHERE (e.execution_principal = ? OR (e.execution_principal IS NULL AND e.account_id = ?))
+        AND s.archived = 0 AND s.remote_environment_id IS NULL
+        AND e.session_id > ? ORDER BY e.session_id LIMIT 101`)
+      .all(principal, accountId, after ?? '') as Array<{ session_id: string }>;
     return { sessions: rows.slice(0, 100).map(row => this.session(row.session_id, device)), has_more: rows.length > 100 };
   }
 

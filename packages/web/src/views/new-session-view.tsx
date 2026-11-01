@@ -21,6 +21,7 @@ import {
   DEFAULT_TRANSLATION_PREFERENCES,
   MAX_MESSAGE_CONTEXT_ITEMS,
   MAX_PASTED_TEXT_BYTES,
+  catalogOptionUsesProviderNativeMode,
   composerDocumentUserText,
   isApprovalMode,
   isTranslationConfigured,
@@ -162,13 +163,16 @@ export function buildSessionCreatePayload(
   const catalog = form.catalogOptions && form.catalogOptions.length > 0
     ? createConfigsFromCatalog(form.executor, form.catalogOptions, form.catalogValues ?? {})
     : null;
+  const nativeCatalogMode = form.catalogOptions?.some(option => (
+    catalogOptionUsesProviderNativeMode(form.executor, option)
+  )) ?? false;
   return {
     workspaceId: form.workspaceId,
     name: form.sessionName.trim(),
     ...(form.agentId ? { agentId: form.agentId } : {}),
     executor: form.executor,
     ...((catalog?.model ?? form.model) ? { model: catalog?.model ?? form.model } : {}),
-    ...(!usesNativeExecutorConfig(form.executor) && (catalog?.approvalMode ?? form.approvalMode)
+    ...(!usesNativeExecutorConfig(form.executor) && !nativeCatalogMode && (catalog?.approvalMode ?? form.approvalMode)
       ? { approvalMode: catalog?.approvalMode ?? form.approvalMode }
       : {}),
     ...((catalog ? catalog.thinkingEffort : form.thinkingEffort)
@@ -186,9 +190,9 @@ export function buildSessionCreatePayload(
   };
 }
 
-/** Merge explicit chip state onto catalog values. Turn-bound model and
- *  effort replace resolved defaults. The mode chip owns either binding;
- *  other roles only fill gaps. */
+/** Merge explicit chip state and saved Claude mode onto catalog values.
+ *  Turn-bound model and effort replace resolved defaults. The mode chip owns
+ *  either binding; other roles only fill gaps. */
 export function overlayExplicitCatalogChoices(
   options: ConfigOption[],
   values: Record<string, ConfigValue>,
@@ -196,12 +200,19 @@ export function overlayExplicitCatalogChoices(
     model?: string;
     effort?: ThinkingEffort | null;
     mode?: ApprovalMode | null;
+    configuredMode?: ApprovalMode | null;
     serviceTier?: 'fast' | null;
     configuredOptions?: Record<string, ConfigValue>;
   },
 ): Record<string, ConfigValue> {
   const next: Record<string, ConfigValue> = { ...values };
   for (const option of options) {
+    const validExplicitMode = option.role === 'approval_mode' && explicit.mode
+      && (!option.choices || option.choices.some(choice => Object.is(choice.value, explicit.mode)))
+      ? explicit.mode
+      : null;
+    const configuredMode = option.role === 'approval_mode' ? explicit.configuredMode : null;
+    const selectedMode = validExplicitMode ?? configuredMode;
     if (option.role === 'model' && explicit.model
       && (option.binding === 'turn' || next[option.id] === undefined)) {
       next[option.id] = explicit.model;
@@ -212,12 +223,8 @@ export function overlayExplicitCatalogChoices(
       && option.choices?.some(choice => Object.is(choice.value, explicit.effort))
     ) {
       next[option.id] = explicit.effort;
-    } else if (
-      option.role === 'approval_mode'
-      && explicit.mode
-      && (!option.choices || option.choices.some(choice => Object.is(choice.value, explicit.mode)))
-    ) {
-      next[option.id] = explicit.mode;
+    } else if (option.role === 'approval_mode' && selectedMode) {
+      next[option.id] = selectedMode;
     } else if (option.role === 'fast' && next[option.id] === undefined) {
       next[option.id] = explicit.serviceTier === 'fast';
     } else if (!option.role && next[option.id] === undefined) {
@@ -590,7 +597,8 @@ function SessionCreateForm({
   ]);
   // Capability chip state holds only explicit per-draft choices. Catalog-backed
   // native executors use the same state now that their options are available
-  // before session.create; configured Agent defaults remain display fallbacks.
+  // before session.create; configured Agent defaults remain display and create
+  // fallbacks.
   const [model, setModel] = useState(draft?.model ?? '');
   const [effort, setEffort] = useState<ThinkingEffort | null>(draft?.thinkingEffort ?? null);
   const [mode, setMode] = useState<ApprovalMode | null>(draft?.approvalMode ?? null);
@@ -668,8 +676,8 @@ function SessionCreateForm({
   // Chip state holds ONLY explicit choices (restored draft / last-used values
   // for this agent, or rows the user picks from a drop). Display falls back
   // to the Settings-managed proxy defaults, then the capability list's own
-  // defaults; the create payload carries only explicit choices so the host's
-  // configured defaults stay authoritative otherwise. Models/modes load
+  // defaults; the create payload carries explicit chip choices and any saved
+  // native Claude mode, with other defaults left to the Host. Models/modes load
   // lazily per executor (cached).
   useEffect(() => {
     if (!executor) {
@@ -686,7 +694,10 @@ function SessionCreateForm({
       : (last?.executor === executor ? last : null);
     setModel(remembered?.model ?? '');
     setEffort(remembered?.thinkingEffort ?? null);
-    setMode(remembered?.approvalMode ?? null);
+    const rememberedMode = executor === 'claude' && remembered?.agentId !== agentId
+      ? null
+      : remembered?.approvalMode ?? null;
+    setMode(rememberedMode);
     if (usesNativeExecutorConfig(executor)) {
       setModels([]);
       setProxyModes([]);
@@ -773,6 +784,9 @@ function SessionCreateForm({
       model,
       effort,
       mode,
+      configuredMode: executor === 'claude'
+        ? (configuredDefaults?.mode.trim() || null) as ApprovalMode | null
+        : null,
       serviceTier,
       configuredOptions: configuredDefaults?.options,
     });
@@ -820,7 +834,8 @@ function SessionCreateForm({
       const effortValue = resolvedEffort ? mergedDefaults[resolvedEffort.id] : undefined;
       if (typeof effortValue === 'string') setEffort(effortValue);
       const approvalValue = resolvedApproval ? nextDefaults[resolvedApproval.id] : undefined;
-      if (isApprovalMode(approvalValue)) setMode(approvalValue);
+      if (isApprovalMode(approvalValue) && resolvedApproval
+        && !catalogOptionUsesProviderNativeMode(executor, resolvedApproval)) setMode(approvalValue);
       const fastValue = resolvedFast ? nextDefaults[resolvedFast.id] : undefined;
       if (typeof fastValue === 'boolean') setServiceTier(fastValue ? 'fast' : null);
       setCatalogValues(current => applyResolvedDefaults(current, nextDefaults));
@@ -1253,6 +1268,9 @@ function SessionCreateForm({
         model,
         effort,
         mode,
+        configuredMode: executor === 'claude'
+          ? (configuredDefaults?.mode.trim() || null) as ApprovalMode | null
+          : null,
         serviceTier,
         configuredOptions: configuredDefaults?.options,
       })

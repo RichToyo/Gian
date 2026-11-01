@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
 import test from 'node:test';
-import type { ProxyCatalog, UserAgentStatus } from '@gian/shared';
+import type { ProxyCatalog, UserAgent, UserAgentStatus } from '@gian/shared';
 import { AgentManager } from '../src/agents/manager.js';
 import type { CatalogService } from '../src/catalog/service.js';
 import { registerAgentRoutes } from '../src/web/routes/agents.js';
@@ -691,6 +691,42 @@ test('PATCH /api/agents/:id accepts role-less option defaults, deletes on null',
   assert.deepEqual(agents.getAgent(agent.id).defaults.options, {});
 });
 
+test('Dev DSH preference saves retain projected readiness with a persisted legacy CLI path', async t => {
+  const { app, agents, bins } = await makeApp(t, undefined, undefined, DSH_LIKE_CATALOG);
+  const saved = await agents.createAgent({ name: 'DSH', proxy: 'dsh', cliPath: bins.dsh });
+  agents.setProvisionedRuntimes([{
+    pluginId: 'ai.deepseek.harness', runtimeId: 'deepseek-harness', version: '0.1.1-rc.2',
+    entryPath: bins.dsh, artifactSha256: 'a'.repeat(64),
+  }]);
+  const observed = await agents.agentStatus(saved.id);
+  assert.equal(observed.ready, true);
+  assert.equal(observed.cliPath, null, 'Dev status intentionally hides the persisted override');
+  assert.equal(agents.getAgent(saved.id).cliPath, bins.dsh);
+  assert.equal(agents.agentStatusSnapshot(saved.id).ready, true);
+  agents.agentStatus = async () => { throw new Error('preferences must not re-probe Runtime'); };
+  agents.trustedLaunch = async () => { throw new Error('preferences must not inspect Proxy'); };
+  for (const defaults of [
+    { model: 'deepseek-chat' }, { thinking: 'high' }, { mode: 'workspace-write' },
+    { options: { provider: 'vendor-b' } }, { options: { agent_preset: 'standard' } },
+  ]) {
+    const response = await app.request(`/api/agents/${saved.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ defaults }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    const { agent } = await response.json() as { agent: UserAgentStatus };
+    assert.equal(agent.ready, true);
+    assert.equal(agent.plugin.state, 'ready');
+    assert.equal(agent.cliPath, observed.cliPath, 'save must not change the projected identity');
+    assert.deepEqual(agent.cli, observed.cli);
+    assert.deepEqual(agent.runtimeProfile, observed.runtimeProfile);
+    assert.deepEqual(agent.plugin.defaults, agent.defaults);
+    assert.equal(agents.getAgent(saved.id).cliPath, bins.dsh, 'legacy configuration stays untouched');
+  }
+  await agents.updateAgent(saved.id, { home: { kind: 'managed' } });
+  assert.equal(agents.agentStatusSnapshot(saved.id).ready, false, 'a real HOME change still invalidates');
+});
+
 for (const intervening of ['invalidation', 'newer-observation'] as const) {
   test(`preference commit does not revive stale Runtime facts after ${intervening}`, async t => {
     const { agents, bins } = await makeApp(t);
@@ -699,7 +735,7 @@ for (const intervening of ['invalidation', 'newer-observation'] as const) {
     const internals = agents as unknown as {
       saveConfig: (...args: unknown[]) => Promise<void>;
       invalidateAgentStatus: (id: string) => void;
-      agentStatusCache: Map<string, { value: UserAgentStatus; expiresAt: number }>;
+      agentStatusCache: Map<string, { identity: UserAgent; value: UserAgentStatus; expiresAt: number }>;
     };
     const save = internals.saveConfig.bind(agents);
     let started!: () => void;
@@ -715,6 +751,7 @@ for (const intervening of ['invalidation', 'newer-observation'] as const) {
     await writing;
     if (intervening === 'invalidation') internals.invalidateAgentStatus(saved.id);
     else internals.agentStatusCache.set(saved.id, {
+      identity: saved,
       value: { ...observed, cli: { ...observed.cli, version: 'new-observation' } },
       expiresAt: 123,
     });

@@ -10,7 +10,7 @@
 //   of the session.create wire payload.
 
 import { describe, it, expect } from 'vitest';
-import type { ConfigOption } from '@gian/shared';
+import type { ApprovalMode, ConfigOption } from '@gian/shared';
 import { buildSessionCreatePayload, type SessionCreateFormState } from '../src/views/CodingView.js';
 import { overlayExplicitCatalogChoices } from '../src/views/new-session-view.js';
 
@@ -171,6 +171,37 @@ describe('SES-001: minimal session payload from form state', () => {
     expect(payload.turnConfig?.reasoning_effort).toBe('low');
     expect(payload.thinkingEffort).toBe('low');
     expect(payload.approvalMode).toBe(executor === 'grok' || executor === 'kimi' ? undefined : 'auto');
+  });
+
+  it('keeps Claude Agent defaults above resolved defaults and fails closed on stale values', () => {
+    const options: ConfigOption[] = [{
+      id: 'permission_mode', displayName: 'Mode', binding: 'turn', role: 'approval_mode',
+      control: 'select', required: false, defaultValue: 'default',
+      choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+        value,
+        displayName: value,
+      })),
+    }];
+    const resolved = { permission_mode: 'default' };
+    const saved = overlayExplicitCatalogChoices(options, resolved, {
+      configuredMode: 'acceptEdits' as ApprovalMode,
+    });
+    expect(saved.permission_mode).toBe('acceptEdits');
+    const explicit = overlayExplicitCatalogChoices(options, resolved, {
+      mode: 'auto', configuredMode: 'acceptEdits' as ApprovalMode,
+    });
+    expect(explicit.permission_mode).toBe('auto');
+    const stale = overlayExplicitCatalogChoices(options, resolved, {
+      mode: 'plan', configuredMode: 'removed-mode' as ApprovalMode,
+    });
+    expect(stale.permission_mode).toBe('removed-mode');
+    const payload = buildSessionCreatePayload(formState({
+      catalogOptions: options,
+      catalogValues: saved,
+      approvalMode: 'ask',
+    }));
+    expect(payload.turnConfig).toEqual({ permission_mode: 'acceptEdits' });
+    expect(payload.approvalMode).toBeUndefined();
   });
 
   it('does not replace an advertised mode with an invalid remembered chip value', () => {

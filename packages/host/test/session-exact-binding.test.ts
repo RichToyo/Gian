@@ -856,10 +856,20 @@ test('new managed launches and inspection select the active exact tuple, not the
   }
   const custom = await new SessionBindingPlanner({
     ...options, resolveActiveGeneration: async () => { throw new Error('custom must not adopt managed Runtime'); },
-  }).prepareCurrent({ agent: { ...agent, runtime: { kind: 'custom', path: '/tmp/custom-cli' } }, selectedPath: '/tmp/old-cli' });
+  }).prepareCurrent({
+    agent: {
+      ...agent,
+      runtime: { kind: 'custom', path: '/tmp/custom-cli' },
+      home: { kind: 'custom', path: '/tmp/custom-home' },
+    },
+    selectedPath: '/tmp/old-cli',
+  });
   assert.equal(custom.sessionBinding.pluginVersion, '2.0.0');
   assert.equal(sessionRuntimeCliPath(custom.sessionBinding.runtimeProfile), '/tmp/custom-cli');
-  await custom.releaseUnusedLease();
+  assert.equal(custom.sessionBinding.runtimeProfile?.configHome, '/tmp/custom-home');
+  const customLease = await custom.acquireLease();
+  assert.equal(customLease?.env.CLAUDE_CONFIG_DIR, '/tmp/custom-home');
+  await customLease?.release();
   const fallback = await new SessionBindingPlanner({
     ...options, resolveActiveGeneration: async () => null,
   }).prepareCurrent({ agent, selectedPath: '/tmp/source-cli' });

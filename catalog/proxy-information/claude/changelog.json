@@ -1,8 +1,176 @@
 {
   "schemaVersion": 1,
   "pluginId": "claude",
-  "currentVersion": "0.3.15",
+  "currentVersion": "0.3.19",
   "entries": [
+    {
+      "version": "0.3.19",
+      "firstPublishedAt": "2026-10-31T18:15:44Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichToyo/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.19",
+          "publishedAt": "2026-10-31T18:15:44Z",
+          "releaseUrl": "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.19",
+          "manifestUrl": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.19/gian-proxy-claude-0.3.19-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "c11df7ecda6237e00a2f8c07e642542339dd2216bc730917c33cc27b06d702e3",
+          "archive": {
+            "url": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.19/gian-proxy-claude-0.3.19-darwin-arm64.tar.gz",
+            "sha256": "5f2dac34151a3ab8f25154b70dda375ccccc211560067bd6f1d0b2126f0f66b2",
+            "size": 630602
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.316"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.316 with pinned binary bytes; the official 2.1.314 through 2.1.316 changelog review found no proxy spawn-flag or permission-mode surface change, while upstream fixed orphaned shell commands on exit and claude -p auto-mode stop explanations. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.",
+          "evidence": [
+            "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.19",
+            "https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.19/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.18",
+      "firstPublishedAt": "2026-10-31T09:24:45Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichToyo/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.18",
+          "publishedAt": "2026-10-31T09:24:45Z",
+          "releaseUrl": "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.18",
+          "manifestUrl": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.18/gian-proxy-claude-0.3.18-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "1b9058d878308b273fd8186746bdd5238850e32a03e1486580f6289ffb090ea5",
+          "archive": {
+            "url": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.18/gian-proxy-claude-0.3.18-darwin-arm64.tar.gz",
+            "sha256": "239e54fc201ec527362a46a500938f57a4f82a16d64fe4079dae0ece8d57970e",
+            "size": 630607
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.314"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Prevent repeated conversation usage updates from causing a session protocol failure, preserve context updates and record duplicate diagnostics. Retain Claude Code Runtime 2.1.314 and Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.",
+          "evidence": [
+            "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.18",
+            "https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.18/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.17",
+      "firstPublishedAt": "2026-10-30T18:40:04Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichToyo/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.17",
+          "publishedAt": "2026-10-30T18:40:04Z",
+          "releaseUrl": "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.17",
+          "manifestUrl": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.17/gian-proxy-claude-0.3.17-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "28b149d6b568813d84eaece039f205f79745b9c0615ba2d34c24142202b7f7a5",
+          "archive": {
+            "url": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.17/gian-proxy-claude-0.3.17-darwin-arm64.tar.gz",
+            "sha256": "b6aa76d14e4b06044cf3885ff9ceb66e5b319c673bd88f3ec3bd3bc3770d732e",
+            "size": 629715
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.314"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.314 with pinned binary bytes; the official changelog from 2.1.312 through 2.1.314 was reviewed. The 2.1.314 changelog adds an opt-in permissions.blockWritesOutsideWorkingDirectories toggle and fixes claude -p to exit non-zero on startup failure; no proxy spawn flag or permission-mode surface changed. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.",
+          "evidence": [
+            "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.17",
+            "https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.17/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.16",
+      "firstPublishedAt": "2026-10-28T18:54:05Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichToyo/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.16",
+          "publishedAt": "2026-10-28T18:54:05Z",
+          "releaseUrl": "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.16",
+          "manifestUrl": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.16/gian-proxy-claude-0.3.16-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "f579dbe6eaab22b6a7fc37bfa8dcd1c7e8ba4656620512df2394cf6806947261",
+          "archive": {
+            "url": "https://github.com/RichToyo/Gian-Proxies/releases/download/proxy-claude-v0.3.16/gian-proxy-claude-0.3.16-darwin-arm64.tar.gz",
+            "sha256": "88787767e3fc137cc7a01d75323dc7d1bc7d59f747d94d59496c2b3b4232b39f",
+            "size": 629721
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.312"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.312 with pinned binary bytes; no headless spawn or wire contract change was found in the official 2.1.311-2.1.312 changelog. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.",
+          "evidence": [
+            "https://github.com/RichToyo/Gian-Proxies/releases/tag/proxy-claude-v0.3.16",
+            "https://github.com/RichToyo/Gian-Proxies/blob/proxy-claude-v0.3.16/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.15",
       "firstPublishedAt": "2026-10-27T13:43:29Z",

@@ -1080,6 +1080,52 @@ test('advertised opaque approval choices persist while unadvertised create value
   }
 });
 
+test('native Claude approval writes stay verbatim through broadcast and turn dispatch', async () => {
+  const { dir, db, wsId, proxyMgr, broadcaster, sessions } = setup();
+  try {
+    proxyMgr.client.catalogOverride = {
+      catalogRevision: 'claude-native-approval',
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'permission_mode',
+        displayName: 'Mode',
+        binding: 'turn',
+        role: 'approval_mode',
+        control: 'select',
+        required: false,
+        defaultValue: 'default',
+        choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+          value,
+          displayName: value,
+        })),
+      }],
+      slashCommands: [],
+    };
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      turn_config: { permission_mode: 'default' },
+    });
+    assert.equal(session.approval_mode, null);
+    for (const value of ['auto', 'acceptEdits', 'bypassPermissions'] as const) {
+      await sessions.setTurnConfigValue(session.id, 'permission_mode', value);
+      const current = sessions.getSession(session.id);
+      assert.equal(current.approval_mode, null);
+      assert.equal(current.turn_config?.permission_mode, value);
+      const update = broadcaster.messages.filter(message => message.type === 'session:updated').at(-1);
+      assert.ok(update?.type === 'session:updated');
+      assert.equal(update.session.turn_config?.permission_mode, value);
+    }
+    await sessions.sendMessage(session.id, 'use native permission');
+    assert.deepEqual(proxyMgr.client.startTurnCalls[0]?.config, {
+      permission_mode: 'bypassPermissions',
+    });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('startTurn uses session turn_config_options instead of the process catalog', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setup();
   try {

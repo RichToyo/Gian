@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ApprovalMode, ComposerDocument, ComposerReferenceSegment, ConfigOption, ConfigValue, Executor, MessageContextItem, PickComposerResourcesResult, NativeConfigValue, ProductExecutor, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
-import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, attachmentReferenceNumbers, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, numberImageAttachmentLabels, usesCliCapabilitySurface, usesNativeExecutorConfig } from '@gian/shared';
+import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, attachmentReferenceNumbers, catalogOptionUsesProviderNativeMode, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, numberImageAttachmentLabels, usesCliCapabilitySurface, usesNativeExecutorConfig } from '@gian/shared';
 import { MAX_FILE_BYTES, dedupeAttachmentName, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
 import type { UploadedAttachment } from '../api.js';
 import {
@@ -1465,7 +1465,7 @@ export function Composer({
     }
     else if (option.role === 'effort') onSetEffort(value == null ? null : String(value));
     else if (option.role === 'approval_mode') {
-      if (isApprovalMode(value) && !usesNativeExecutorConfig(executor)) onSetMode(value);
+      if (isApprovalMode(value) && !catalogOptionUsesProviderNativeMode(executor, option)) onSetMode(value);
       else onSetTurnConfig?.(option.id, value);
     } else if (option.role === 'fast') onSetServiceTier?.(value === true ? 'fast' : null);
     else onSetTurnConfig?.(option.id, value);

@@ -100,25 +100,31 @@ test('Dev Catalog ignores published versions, installed packages and refresh fai
   await assert.rejects(service.rollback('grok'), /source Proxies/);
 });
 
-test('Dev Catalog reports a verified provisioned CLI without requiring any saved Agent', async () => {
+test('Dev Catalog caches Runtime display status and forces validation on sync', async () => {
   const launch: TrustedLaunch = { pluginId: 'grok', displayName: 'Grok Build', pluginVersion: '0.3.8-Dev',
     manifestSha256: 'a'.repeat(64), protocolRange: '>=2.2 <3.0', entryPath: '/dev/proxy.mjs',
     processScope: 'session', schemaVersion: 4, source: 'official-development',
     runtime: { kind: 'external', id: 'grok', verifiedVersions: ['1.0.46'] } };
+  const refreshes: boolean[] = [];
   const service = new CatalogService({
     store: { snapshot: () => ({ state: 'empty', index: null }) } as never,
     plugins: {} as never,
     policy: { sourceId: 'gian-official', repository: 'RichLogic/Gian-Proxies',
       artifactRepositories: [], pinnedPublicKeys: {} },
     developmentProxies: async () => [launch],
-    developmentRuntime: async () => ({ state: 'ready', displayName: 'Grok CLI',
-      path: '/test/runtimes/grok/1.0.46/bin/grok', version: '1.0.46' }),
+    developmentRuntime: async (_pluginId, options) => {
+      refreshes.push(options?.refresh === true);
+      return { state: 'ready', displayName: 'Grok CLI',
+        path: '/test/runtimes/grok/1.0.46/bin/grok', version: '1.0.46' };
+    },
   });
   const item = (await service.list()).items[0]!;
   assert.equal(item.installation.source, 'giandev');
   assert.equal(item.runtime.state, 'ready');
   assert.equal(item.runtime.version, '1.0.46');
   assert.deepEqual(item.availableActions, ['create_agent']);
+  await service.sync();
+  assert.deepEqual(refreshes, [false, true]);
 });
 
 test('trusted Catalog builds the exact managed Runtime install plan from the installed Proxy receipt', async () => {

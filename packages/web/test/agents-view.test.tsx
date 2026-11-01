@@ -1794,6 +1794,81 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     });
   }
 
+  it.each([
+    ["/Users/test/DSH runtime/bin.js", "node '/Users/test/DSH runtime/bin.js'"],
+    ["/Users/test/DSH's runtime/dsh", "'/Users/test/DSH'\\''s runtime/dsh'"],
+  ])('copies the official DSH Web command for the selected Runtime %s', async (path, command) => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    mockApi([{
+      ...dshAgent(), cliPath: '/stale/runtime',
+      cli: { state: 'ready', path, version: '0.2.1-rc.2', source: 'managed' },
+      home: { kind: 'custom', path: "/Users/test/DSH's home" },
+    }]);
+    renderAgents();
+    await user.click(await screen.findByRole('button', { name: /DSH Agent/ }));
+    const row = await screen.findByTestId('dsh-official-web-command');
+    const expected = `DSH_HOME='/Users/test/DSH'\\''s home' ${command} --profile web`;
+    expect(row.querySelector('code')?.textContent).toBe(expected);
+    await user.click(within(row).getByRole('button', { name: 'Copy' }));
+    expect(writeText).toHaveBeenCalledWith(expected);
+    expect(api.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it('does not invent a DSH Web command when the resolved Runtime path is unavailable', async () => {
+    mockApi([{
+      ...dshAgent(), cliPath: '/stale/runtime',
+      cli: { state: 'missing', path: null, version: null, source: null },
+    }]);
+    renderAgents();
+    fireEvent.click(await screen.findByRole('button', { name: /DSH Agent/ }));
+    await screen.findByTestId('agents-detail-panel');
+    expect(screen.queryByTestId('dsh-official-web-command')).toBeNull();
+  });
+
+  it('keeps DSH permissions and presets selectable after consecutive local preference saves', async () => {
+    mockApi([{
+      ...dshAgent(), cliPath: null,
+      cli: { state: 'ready', path: '/managed/dsh/bin.js', version: '0.2.1-rc.2', source: 'managed' },
+    }]);
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue({
+      ...dshLikeCapabilities(),
+      configOptions: [
+        ...dshLikeCapabilities().configOptions,
+        { id: 'permission_preset', displayName: 'Permission', binding: 'turn', role: 'approval_mode',
+          control: 'select', required: false, defaultValue: 'workspace-write', choices: [
+            { value: 'workspace-write', displayName: 'Workspace Write' },
+            { value: 'full-access', displayName: 'Full access' },
+          ] },
+        { id: 'agent_preset', displayName: 'Agent preset', binding: 'session', control: 'select',
+          required: false, defaultValue: 'standard', choices: [
+            { value: 'standard', displayName: 'Standard' }, { value: 'minimal', displayName: 'Minimal' },
+          ] },
+      ],
+    } as never);
+    renderAgents();
+    fireEvent.click(await screen.findByRole('button', { name: /DSH Agent/ }));
+    const panel = await screen.findByTestId('agents-detail-panel');
+    await within(panel).findByRole('option', { name: 'Workspace Write' });
+    const mode = within(panel).getByLabelText('Mode') as HTMLSelectElement;
+    const preset = within(panel).getByTestId('agent-default-option-agent_preset') as HTMLSelectElement;
+    fireEvent.change(within(panel).getByLabelText('Model'), { target: { value: 'deepseek-reasoner' } });
+    await waitFor(() => expect(api.updateAgent).toHaveBeenCalledWith('a-dsh', {
+      defaults: { model: 'deepseek-reasoner' },
+    }));
+    await waitFor(() => expect(mode.disabled).toBe(false));
+    fireEvent.change(mode, { target: { value: 'workspace-write' } });
+    await waitFor(() => expect(mode.value).toBe('workspace-write'));
+    await waitFor(() => expect(preset.disabled).toBe(false));
+    fireEvent.change(preset, { target: { value: 'minimal' } });
+    await waitFor(() => expect(preset.value).toBe('minimal'));
+    expect(within(panel).getByTestId('agent-default-option-provider')).toBeTruthy();
+    expect(within(panel).getByTestId('dsh-official-web-command')).toBeTruthy();
+    expect(api.loadAgents).toHaveBeenCalledTimes(1);
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(1);
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+  });
+
   /** Resolve mock: model choices depend on the requested provider. */
   function mockProviderDependentResolve() {
     vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(async (_kind, params) => {
@@ -2378,6 +2453,59 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(screen.getByRole('combobox', { name: 'Mode' })).toHaveValue('auto_edit');
     expect(reopened.onSetDefaults).not.toHaveBeenCalled();
     expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { id: 'ordinary-claude', cliPath: null, savedMode: 'ask', selected: 'auto' },
+    { id: 'custom-mc', cliPath: '/agents/mc', savedMode: '', selected: 'acceptEdits' },
+  ])('enables and saves native Claude mode defaults for $id without a runtime resolve', async (scenario) => {
+    resetCatalogMocks();
+    const nativeCatalog = defaultsCatalog(['model', 'thinking', 'mode']);
+    nativeCatalog.specialCatalogs = {
+      ...nativeCatalog.specialCatalogs,
+      approvalMode: 'permission_mode',
+    };
+    nativeCatalog.configOptions = nativeCatalog.configOptions.map(option => (
+      option.role === 'approval_mode'
+        ? {
+            ...option,
+            id: 'permission_mode',
+            defaultValue: 'default',
+            choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+              value,
+              displayName: value,
+            })),
+          }
+        : option
+    ));
+    const saved = {
+      ...detailAgent(scenario.id, 'stored-model'),
+      pluginId: 'claude',
+      proxy: 'claude' as const,
+      cliPath: scenario.cliPath,
+      defaults: { model: 'stored-model', thinking: 'high', mode: scenario.savedMode, options: {} },
+    };
+    mockApi([saved]);
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(nativeCatalog);
+    renderAgents();
+    fireEvent.click(await screen.findByRole('button', { name: /Writer/ }));
+    const mode = await screen.findByRole('combobox', { name: 'Mode' }) as HTMLSelectElement;
+    await waitFor(() => expect(mode).toBeEnabled());
+    expect(mode).toHaveValue(scenario.savedMode);
+    expect(Array.from(mode.options, option => option.value)).toEqual([
+      '',
+      ...(scenario.savedMode ? [scenario.savedMode] : []),
+      'default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk',
+    ]);
+    expect(Array.from(mode.options, option => option.value)).not.toContain('plan');
+    const runtimeReads = vi.mocked(api.loadManagedRuntimeStatus).mock.calls.length;
+    fireEvent.change(mode, { target: { value: scenario.selected } });
+    await waitFor(() => expect(api.updateAgent).toHaveBeenCalledWith(scenario.id, {
+      defaults: { mode: scenario.selected },
+    }));
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(1);
+    expect(api.loadResolvedProxyCatalog).not.toHaveBeenCalled();
+    expect(api.loadManagedRuntimeStatus).toHaveBeenCalledTimes(runtimeReads);
   });
 
   it('keeps dropdowns disabled while discovery is pending, then enables genuine choices without resetting preferences', async () => {

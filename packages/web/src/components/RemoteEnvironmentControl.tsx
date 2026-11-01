@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { authorizeRemoteAccount } from '../auth/github-authorization.js';
+
 import { useT } from '../i18n/index.js';
 import { remoteRequest, type RemoteEnvironment, type RemoteSessionChoice } from '../remote-environments.js';
 import { useUpDrop } from './composer/option-drops.js';
@@ -103,8 +103,6 @@ export function RemoteEnvironmentControl({ value, onChange, onTakeover, disabled
       <label>{t('remote.pairingCode')}<input value={code} disabled={disabled || busy} autoComplete="off" onChange={event => setCode(event.target.value)} /></label>
       <button type="button" className="btn primary" disabled={disabled || busy || !origin.trim() || !name.trim() || !code.trim()}
         onClick={() => void run(async signal => {
-          await authorizeRemoteAccount(origin.trim(), 'controller', { signal });
-          if (signal.aborted) return;
           const serverUrl = new URL(origin.trim()).origin;
           const result = await dispatchRemoteEnvironment(dispatch, { connection:
             { server_url: serverUrl, name: name.trim(), code: code.trim() } }) as { environment: RemoteEnvironment };

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { CopyButton } from '@gian/chat-ui';
 import type {
   AgentProxyDefaults,
   ConfigOption,
@@ -18,6 +19,15 @@ import {
 import { agentIdEntityKey } from '../operations/agents.js';
 import { usePendingOperations } from '../operations/use-operations.js';
 import type { ProxyLogoDisplay } from './catalog-model.js';
+
+function dshOfficialWebCommand(agent: UserAgentStatus): string | null {
+  const path = agent.cli.path;
+  const home = agent.home?.path;
+  if (!path || !home) return null;
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const command = /\.[cm]?js$/i.test(path) ? `node ${quote(path)}` : quote(path);
+  return `DSH_HOME=${quote(home)} ${command} --profile web`;
+}
 
 /** Fixed reason tokens. A switch never resolves constructor or __proto__. */
 function capabilityReasonKey(reason: string): string | null {
@@ -206,7 +216,7 @@ export function AgentDetailPanel({
     }
   }
   const { models, thinkingLevels: catalogThinking, modes } =
-    executorSettingsFromCapabilities(pluginId, settingsCapabilities);
+    executorSettingsFromCapabilities(executorId ?? pluginId, settingsCapabilities);
   const baseCatalog = catalogFromCapabilities(capabilities);
   const effectiveCatalog = catalogFromCapabilities(settingsCapabilities);
   // Role-less select options (e.g. provider) persist as per-Agent defaults in
@@ -278,6 +288,7 @@ export function AgentDetailPanel({
     setCapabilityAttempt(attempt => attempt + 1);
   }
   const externalHome = agent.home === null;
+  const officialWebCommand = executorId === 'dsh' ? dshOfficialWebCommand(agent) : null;
 
   return (
     <>
@@ -383,6 +394,13 @@ export function AgentDetailPanel({
             </div>
           )}
           {executorId === 'dsh' && <p className="s2-help">{t('agents.detail.dshLoginHelp')}</p>}
+          {officialWebCommand && (
+            <div className="rt-line" data-testid="dsh-official-web-command">
+              <code className="cli-path-val">{officialWebCommand}</code>
+              <CopyButton text={officialWebCommand} title={t('common.copy')}
+                          className="btn icon compact" />
+            </div>
+          )}
           {executorId === 'zcode' && <p className="s2-help">{t('agents.detail.zcodeHomeHelp')}</p>}
         </section>
 

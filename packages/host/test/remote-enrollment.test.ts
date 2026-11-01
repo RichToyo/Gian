@@ -17,8 +17,9 @@ async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 5_000): Promis
   throw new Error(`timed out waiting for condition: ${String(last)}`);
 }
 
-/** Since account admission (gian.remote 1.2), every Server call needs a GitHub
- *  account session. The test Server authorizes the first poll immediately. */
+/** GitHub Device Flow remains for account-scoped APIs. Enrollment claim and
+ *  relay reconnect do not require a live GitHub session. The test Server
+ *  authorizes the first account poll immediately when a test does sign in. */
 async function loginGitHub(hostApp: Awaited<ReturnType<typeof makeTestApp>>, serverUrl: string): Promise<void> {
   const started = await hostApp.fetch('/api/remote/account/start', {
     method: 'POST',
@@ -34,7 +35,7 @@ async function loginGitHub(hostApp: Awaited<ReturnType<typeof makeTestApp>>, ser
   assert.equal(polled.status, 200, JSON.stringify(await polled.json()));
 }
 
-test('enrollment without Host authorization returns a recoverable error without consuming the token', async () => {
+test('native client enrollment does not require GitHub authorization', async () => {
   const hostApp = await makeTestApp();
   const server = await makeRemoteTestApp();
   const listened = await listenRemoteApp(server.handle);
@@ -43,19 +44,16 @@ test('enrollment without Host authorization returns a recoverable error without 
       method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' },
       body: JSON.stringify({ protocol: AUTH_PROTOCOL }),
     })).json() as { enrollment_token: string };
-    const enroll = () => hostApp.fetch('/api/remote/enroll', {
+    const enrolled = await hostApp.fetch('/api/remote/enroll', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ server_url: listened.url, enrollment_token: issued.enrollment_token, host_name: 'Studio Mac' }),
     });
-    const missing = await enroll();
-    assert.equal(missing.status, 401);
-    assert.deepEqual(await missing.json(), { error: 'remote_auth_required' });
-    assert.equal(hostApp.app.remote.settingsState().enrolled, false);
-    await loginGitHub(hostApp, listened.url);
-    const recovered = await enroll();
-    assert.equal(recovered.status, 200);
-    assert.equal((await recovered.json() as { enrolled: boolean }).enrolled, true);
+    assert.equal(enrolled.status, 200, JSON.stringify(await enrolled.json()));
+    assert.equal(hostApp.app.remote.settingsState().enrolled, true);
     assert.equal(hostApp.app.remote.settingsState().host_name, 'Studio Mac');
+    const admission = server.handle.services.repos.getController(hostApp.app.remote.settingsState().host_id!);
+    assert.equal(admission?.revoked_at, null);
+    assert.equal(admission?.browser_installation_id, hostApp.app.remote.settingsState().host_id);
   } finally { hostApp.app.remote.close(); listened.close(); await hostApp.cleanup(); }
 });
 
@@ -90,7 +88,7 @@ test('enrollment transport failures are distinct from missing authorization and 
   } finally { hostApp.app.remote.close(); await hostApp.cleanup(); }
 });
 
-test('expired Host authorization fails before dispatching an enrollment claim', async t => {
+test('an expired GitHub session does not block an enrollment claim', async t => {
   const identity = new MemoryRemoteIdentity();
   t.mock.method(identity, 'getAccountSession', async () => ({
     role: 'host' as const, serverOrigin: 'https://remote.test', serverFingerprint: 'a'.repeat(64),
@@ -99,11 +97,15 @@ test('expired Host authorization fails before dispatching an enrollment claim', 
   let requests = 0;
   const client = new HttpRemoteServerAuthClient('https://remote.test', identity, async () => {
     requests += 1;
-    throw new Error('must not reach the server');
+    return Response.json({ error: { code: 'AUTH_REQUIRED' } }, { status: 401 });
   });
   await assert.rejects(client.claimEnrollment({ enrollmentToken: 'private-enrollment-token', hostName: 'Mac',
-    hostVersion: 'test', hostPublicKey: (await identity.ensurePublic()).public_key }), RemoteAccountRequiredError);
-  assert.equal(requests, 0);
+    hostVersion: 'test', hostPublicKey: (await identity.ensurePublic()).public_key }), (error: unknown) => {
+    assert.ok(error instanceof RemoteProtocolError);
+    assert.equal(error instanceof RemoteAccountRequiredError, false);
+    return true;
+  });
+  assert.equal(requests, 1);
 });
 
 for (const failure of ['transport', 'rate-limit', 'upstream'] as const) {

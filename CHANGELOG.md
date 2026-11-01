@@ -7,6 +7,31 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.10] - 2026-10-29
+
+### Added
+
+- Admit and operate Remote by paired device, with unified native Remote
+  admission, device-scoped execution targets, and preserved device sessions
+  across GitHub login.
+- Add negotiated Remote conversation directory v1 for compatible clients.
+
+### Changed
+
+- Upgrade the managed Kimi Code Runtime to 2.3.3.
+
+### Fixed
+
+- Restore Claude native approval modes.
+- Isolate DeepSeek Harness profiles and restore Agent presets while preserving
+  DSH defaults and the web command.
+- Retain Kimi turns for native background work so owned tasks, questions and
+  continuations finish within the admitted Gian turn.
+- Resolve explicitly selected model settings before validating a new session.
+- Cache Dev Runtime readiness for Agents and allow transient Runtime probe
+  groups to exit cleanly.
+- Patch high-severity App and Proxy dependency advisories.
+
 ## [0.6.9] - 2026-10-28
 
 ### Added

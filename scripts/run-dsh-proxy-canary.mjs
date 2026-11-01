@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -53,25 +53,6 @@ function isolatedEnvironment(home) {
     FORCE_COLOR: '0',
     NO_COLOR: '1',
   };
-}
-
-async function createIsolatedProfile(canaryRoot, packageDir) {
-  const home = join(canaryRoot, 'home');
-  const profileDir = join(home, 'profiles/gian');
-  const scopedModules = join(profileDir, 'node_modules/@gian');
-  await mkdir(scopedModules, { recursive: true });
-  await writeFile(join(profileDir, 'package.json'), `${JSON.stringify({
-    name: 'gian-dsh-proxy-canary-profile',
-    private: true,
-    dependencies: { '@gian/dsh-bridge': `file:${packageDir}` },
-    dsh: {
-      profile: {
-        bundles: ['@deepseek-ai/dsh-base', '@gian/dsh-bridge'],
-      },
-    },
-  }, null, 2)}\n`, 'utf8');
-  await symlink(packageDir, join(scopedModules, 'dsh-bridge'), 'dir');
-  return { home, profileDir };
 }
 
 async function installedDshVersion(binaryPath) {
@@ -127,7 +108,6 @@ class DshProxyClient {
       env: {
         ...this.options.environment,
         GIAN_RUNTIME_BIN: this.options.binaryPath,
-        GIAN_DSH_HOST_ENTRY: this.options.binaryPath,
       },
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -285,12 +265,13 @@ async function waitForEmptyProcessGroup(processGroupId, timeoutMs) {
 export async function runDshProxyCanary(options = {}) {
   const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
   const proxyPath = options.proxyPath ?? defaultProxyPath;
+  const zeroModel = options.zeroModel ?? false;
   const binaryPath = await resolveDshBinary(
     options.binaryPath ?? process.env.DSH_PROXY_CANARY_BIN ?? process.env.DSH_BRIDGE_CANARY_BIN,
   );
   const dshVersion = await installedDshVersion(binaryPath);
-  const mockModule = await resolveMockServerModule(options);
-  const mockServer = await mockModule.startMockLlmServer({
+  const mockModule = zeroModel ? null : await resolveMockServerModule(options);
+  const mockServer = mockModule === null ? null : await mockModule.startMockLlmServer({
     host: '127.0.0.1',
     port: 0,
     apiKey: 'mock-key',
@@ -302,19 +283,23 @@ export async function runDshProxyCanary(options = {}) {
   });
   const canaryRoot = await mkdtemp(join(tmpdir(), 'gian-dsh-proxy-canary-'));
   const workspace = join(canaryRoot, 'workspace');
+  const home = join(canaryRoot, 'home');
   let client;
   let processGroupId;
 
   try {
     await mkdir(workspace, { recursive: true });
-    const profile = await createIsolatedProfile(
-      canaryRoot,
-      options.bridgePackageDir ?? bridgePackageDir,
-    );
     const environment = {
-      ...isolatedEnvironment(profile.home),
-      DEEPSEEK_BASE_URL: `${mockServer.baseURL}/v1`,
-      DEEPSEEK_API_KEY: 'mock-key',
+      ...isolatedEnvironment(home),
+      GIAN_DATA_DIR: join(canaryRoot, 'gian-data'),
+      GIAN_DSH_BRIDGE_PACKAGE_DIR: options.bridgePackageDir ?? bridgePackageDir,
+      ...(mockServer === null ? {
+        DEEPSEEK_BASE_URL: 'http://127.0.0.1:9/v1',
+        DEEPSEEK_API_KEY: 'isolated-no-requests',
+      } : {
+        DEEPSEEK_BASE_URL: `${mockServer.baseURL}/v1`,
+        DEEPSEEK_API_KEY: 'mock-key',
+      }),
     };
     client = new DshProxyClient({
       proxyPath,
@@ -342,12 +327,14 @@ export async function runDshProxyCanary(options = {}) {
     assert.ok(modelOption);
     const model = modelOption.defaultValue ?? modelOption.choices?.[0]?.value;
     assert.equal(typeof model, 'string');
+    const presetOption = catalog.configOptions.find(option => option?.id === 'agent_preset');
+    assert.deepEqual(presetOption?.choices?.map(choice => choice.value), ['standard', 'ptc', 'minimal', 'cordis']);
 
     const sessionId = `gian-dsh-proxy-${randomUUID()}`;
     const created = await client.request('session.create', {
       sessionId,
       workspace: { cwd: workspace, roots: [workspace] },
-      config: {},
+      config: zeroModel ? { agent_preset: 'minimal' } : {},
     });
     assert.equal(created?.session?.id, sessionId);
     assert.equal(created?.session?.state, 'idle');
@@ -357,40 +344,42 @@ export async function runDshProxyCanary(options = {}) {
     processGroupId = client.child?.pid;
     assert.ok(Number.isInteger(processGroupId) && processGroupId > 0);
 
-    const turnId = `gian-dsh-turn-${randomUUID()}`;
-    const started = await client.request('turn.start', {
-      sessionId,
-      streamId,
-      turnId,
-      input: [{ type: 'text', text: 'hello from the DSH proxy canary' }],
-      config: { model },
-    });
-    assert.equal(started?.accepted, true);
-    assert.equal(started?.turnId, turnId);
+    if (!zeroModel) {
+      const turnId = `gian-dsh-turn-${randomUUID()}`;
+      const started = await client.request('turn.start', {
+        sessionId,
+        streamId,
+        turnId,
+        input: [{ type: 'text', text: 'hello from the DSH proxy canary' }],
+        config: { model },
+      });
+      assert.equal(started?.accepted, true);
+      assert.equal(started?.turnId, turnId);
 
-    const completed = await client.waitFor(
-      notification => notification?.method === 'turn.completed'
-        && notification?.params?.sessionId === sessionId
-        && notification?.params?.turnId === turnId,
-      `turn ${turnId} completion`,
-    );
-    assert.ok(completed);
+      const completed = await client.waitFor(
+        notification => notification?.method === 'turn.completed'
+          && notification?.params?.sessionId === sessionId
+          && notification?.params?.turnId === turnId,
+        `turn ${turnId} completion`,
+      );
+      assert.ok(completed);
 
-    const methods = new Set(client.notifications.map(notification => notification.method));
-    for (const expected of ['turn.started', 'step.updated', 'request.updated', 'content.delta', 'content.completed', 'usage.updated', 'turn.completed']) {
-      assert.ok(methods.has(expected), `expected DSH proxy notification ${expected}; saw ${[...methods].join(', ')}`);
+      const methods = new Set(client.notifications.map(notification => notification.method));
+      for (const expected of ['turn.started', 'step.updated', 'request.updated', 'content.delta', 'content.completed', 'usage.updated', 'turn.completed']) {
+        assert.ok(methods.has(expected), `expected DSH proxy notification ${expected}; saw ${[...methods].join(', ')}`);
+      }
+
+      const replay = await client.request('session.replay', {
+        sessionId,
+        streamId,
+        cursor: null,
+        limit: 500,
+      });
+      assert.equal(typeof replay?.replayStreamId, 'string');
+      assert.ok(Array.isArray(replay?.events));
+      assert.ok(replay.events.some(event => event?.method === 'turn.completed'));
+      assert.ok(replay.events.some(event => event?.method === 'usage.updated' || event?.method === 'content.completed'));
     }
-
-    const replay = await client.request('session.replay', {
-      sessionId,
-      streamId,
-      cursor: null,
-      limit: 500,
-    });
-    assert.equal(typeof replay?.replayStreamId, 'string');
-    assert.ok(Array.isArray(replay?.events));
-    assert.ok(replay.events.some(event => event?.method === 'turn.completed'));
-    assert.ok(replay.events.some(event => event?.method === 'usage.updated' || event?.method === 'content.completed'));
 
     const closed = await client.request('session.close', { sessionId, streamId });
     assert.equal(closed?.ok, true);
@@ -402,13 +391,65 @@ export async function runDshProxyCanary(options = {}) {
     assert.equal(exit.signal, null);
     client.assertStdoutPurity();
 
-    assert.ok(mockServer.requests.length >= 1, 'mock LLM server received no chat completion request.');
-    const mockRequest = mockServer.requests[0];
-    assert.ok(mockRequest.path.endsWith('/chat/completions'));
-    assert.ok(
-      mockServer.requests.some(request => request.body?.model === model),
-      `mock LLM server did not receive the Catalog-selected model ${model}`,
-    );
+    let isolatedProfiles;
+    if (zeroModel) {
+      const profileRoot = join(home, 'profiles');
+      const firstNames = await readdir(profileRoot);
+      assert.deepEqual(firstNames.length, 1);
+      const firstContents = await Promise.all(firstNames.map(
+        name => readFile(join(profileRoot, name, 'package.json'), 'utf8'),
+      ));
+      assert.deepEqual(await waitForEmptyProcessGroup(processGroupId, 2_000), []);
+
+      client = new DshProxyClient({
+        proxyPath,
+        binaryPath,
+        cwd: workspace,
+        environment: { ...environment, GIAN_DATA_DIR: join(canaryRoot, 'gian-dev-data') },
+        timeoutMs,
+      });
+      const secondInitialized = await client.request('initialize', {
+        protocol: { name: 'gian.proxy', versions: ['2.1'] },
+        host: { name: 'Gian DSH proxy isolation canary', version: '0.0.0' },
+      });
+      assert.equal(secondInitialized?.protocol?.version, '2.1');
+      const secondSessionId = `gian-dsh-proxy-dev-${randomUUID()}`;
+      const secondCreated = await client.request('session.create', {
+        sessionId: secondSessionId,
+        workspace: { cwd: workspace, roots: [workspace] },
+        config: { agent_preset: 'standard' },
+      });
+      assert.equal(secondCreated?.session?.state, 'idle');
+      const secondClosed = await client.request('session.close', {
+        sessionId: secondSessionId,
+        streamId: secondCreated.session.streamId,
+      });
+      assert.equal(secondClosed?.ok, true);
+      const secondShutdown = await client.request('shutdown');
+      assert.equal(secondShutdown?.ok, true);
+      const secondExit = await client.waitForExit(shutdownTimeoutMs);
+      assert.equal(secondExit.code, 0, `Second DSH proxy exited with signal ${secondExit.signal}.${client.stderrSuffix()}`);
+      assert.equal(secondExit.signal, null);
+      client.assertStdoutPurity();
+      processGroupId = client.child?.pid;
+
+      const secondNames = await readdir(profileRoot);
+      assert.deepEqual(secondNames.length, 2);
+      for (const [index, name] of firstNames.entries()) {
+        assert.equal(await readFile(join(profileRoot, name, 'package.json'), 'utf8'), firstContents[index]);
+      }
+      isolatedProfiles = secondNames.sort();
+    }
+
+    if (mockServer !== null) {
+      assert.ok(mockServer.requests.length >= 1, 'mock LLM server received no chat completion request.');
+      const mockRequest = mockServer.requests[0];
+      assert.ok(mockRequest.path.endsWith('/chat/completions'));
+      assert.ok(
+        mockServer.requests.some(request => request.body?.model === model),
+        `mock LLM server did not receive the Catalog-selected model ${model}`,
+      );
+    }
 
     const remainingProcesses = await waitForEmptyProcessGroup(processGroupId, 2_000);
     assert.deepEqual(
@@ -422,7 +463,7 @@ export async function runDshProxyCanary(options = {}) {
         package: '@deepseek-ai/dsh',
         version: dshVersion,
         binary: relative(rootDir, binaryPath),
-        profile: 'gian',
+        profile: 'binding-scoped',
         bundles: ['@deepseek-ai/dsh-base', '@gian/dsh-bridge'],
       },
       proxy: {
@@ -431,7 +472,7 @@ export async function runDshProxyCanary(options = {}) {
         processScope: 'shared',
         binary: relative(rootDir, proxyPath),
       },
-      mockLlm: {
+      mockLlm: mockServer === null ? { requests: 0 } : {
         package: '@deepseek-ai/dsh-llm-mock-server',
         baseURL: mockServer.baseURL,
         randomSeed: mockServer.randomSeed,
@@ -439,7 +480,10 @@ export async function runDshProxyCanary(options = {}) {
       },
       quotaConsuming: false,
       modelTurnsSent: 0,
-      lifecycle: ['initialize', 'catalog.list', 'session.create', 'turn.start', 'turn.completed', 'session.replay', 'session.close', 'shutdown'],
+      ...(isolatedProfiles === undefined ? {} : { isolatedProfiles }),
+      lifecycle: zeroModel
+        ? ['initialize', 'catalog.list', 'session.create', 'session.close', 'binding-isolation', 'shutdown']
+        : ['initialize', 'catalog.list', 'session.create', 'turn.start', 'turn.completed', 'session.replay', 'session.close', 'shutdown'],
       notifications: {
         total: client.notifications.length,
         methods: [...new Set(client.notifications.map(notification => notification.method))],
@@ -453,13 +497,13 @@ export async function runDshProxyCanary(options = {}) {
   } finally {
     await client?.forceStop();
     if (processGroupId) await waitForEmptyProcessGroup(processGroupId, 2_000).catch(() => []);
-    await mockServer.close().catch(() => undefined);
+    await mockServer?.close().catch(() => undefined);
     await rm(canaryRoot, { recursive: true, force: true });
   }
 }
 
 export async function main() {
-  const summary = await runDshProxyCanary();
+  const summary = await runDshProxyCanary({ zeroModel: process.argv.includes('--zero-model') });
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 

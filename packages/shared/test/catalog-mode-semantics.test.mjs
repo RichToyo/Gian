@@ -3,7 +3,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { catalogModeSemantics } from '../dist/index.js';
+import { catalogModeSemantics, catalogOptionUsesProviderNativeMode } from '../dist/index.js';
 
 function catalog(options) {
   return {
@@ -60,4 +60,30 @@ test('mixed markers resolve provider-native (fail-safe towards verbatim values)'
     { id: 'b', role: 'execution_mode', modeKind: 'provider-native' },
   ]);
   assert.equal(catalogModeSemantics('claude', mixed), 'provider-native');
+});
+
+test('per-option routing recognizes ungated Claude native permission choices', () => {
+  const native = catalog([{
+    id: 'permission_mode', role: 'approval_mode', binding: 'turn',
+    choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto'].map(value => ({ value })),
+  }]).configOptions[0];
+  assert.equal(catalogOptionUsesProviderNativeMode('claude', native), true);
+});
+
+test('per-option routing honors explicit preset markers before Claude fallback', () => {
+  const preset = catalog([{
+    id: 'permission_mode', role: 'approval_mode', modeKind: 'gian-preset',
+    choices: [{ value: 'default' }, { value: 'acceptEdits' }],
+  }]).configOptions[0];
+  assert.equal(catalogOptionUsesProviderNativeMode('claude', preset), false);
+});
+
+test('per-option routing never classifies model or effort as a native mode', () => {
+  for (const role of ['model', 'effort']) {
+    const option = catalog([{
+      id: role, role, choices: [{ value: 'default' }, { value: 'acceptEdits' }],
+    }]).configOptions[0];
+    assert.equal(catalogOptionUsesProviderNativeMode('kimi', option), false);
+    assert.equal(catalogOptionUsesProviderNativeMode('claude', option), false);
+  }
 });

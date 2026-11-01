@@ -54,6 +54,7 @@ const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_TERMINATE_GRACE_MS = 250;
 const DEFAULT_MAX_BUFFER_BYTES = 256 * 1024;
 const GROUP_POLL_MS = 20;
+const CLEAN_EXIT_GRACE_MS = 100;
 
 function errnoCode(error: unknown): string | undefined {
   return error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
@@ -259,6 +260,19 @@ export function runBoundedCommand(
             terminating ? terminateGraceMs + 1_500 : 2_000,
           );
         };
+
+        if (
+          exitCode === 0
+          && !exitSignal
+          && !overflowed
+          && !timedOut
+          && !terminating
+          && detached
+          && pgid != null
+        ) {
+          await waitForGroupEmpty(pgid, CLEAN_EXIT_GRACE_MS);
+          if (settled) return;
+        }
 
         if (overflowed || timedOut || terminating) {
           let empty = await proveEmpty();

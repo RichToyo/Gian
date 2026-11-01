@@ -214,7 +214,7 @@ async function main(): Promise<void> {
     officialPresence: async (pluginId) => agentManager.officialPresence(pluginId),
     ...(process.env.GIAN_MANAGED_PLUGINS !== '1'
       ? { developmentProxies: () => agentManager.developmentLaunches() } : {}),
-    developmentRuntime: pluginId => agentManager.provisionedRuntimeStatus(pluginId),
+    developmentRuntime: (pluginId, options) => agentManager.provisionedRuntimeStatus(pluginId, options),
     onPluginGenerationChanged: (pluginId) => {
       readinessCache.invalidate(pluginId);
       runtimeResolver.invalidate(parseProxyPluginId(pluginId));

@@ -66,6 +66,10 @@ import {
 } from './remote-identity-broker.js';
 import { FileRemoteIdentityStore } from './remote-identity-store.js';
 import {
+  DesktopRemoteTransport,
+  type RemoteNativeRequest,
+} from './remote-transport.js';
+import {
   DESKTOP_TOKEN_HEADER,
   resolveManagedHostPaths,
   resolveUnpackedAppPath,
@@ -198,6 +202,7 @@ let legacyHostRetirement: Promise<void> | null = null;
 let githubAuthService: GitHubAuthService | null = null;
 let githubReleaseBroker: GitHubReleaseMetadataBroker | null = null;
 let remoteIdentityBroker: RemoteIdentityBroker | null = null;
+let remoteTransport: DesktopRemoteTransport | null = null;
 let loadingSurface:
   | { window: BrowserWindow; promise: Promise<boolean> }
   | null = null;
@@ -373,6 +378,16 @@ async function ensureBrowserUseBroker(): Promise<void> {
 
 function isMainWindowSender(sender: WebContents): boolean {
   return !!mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents;
+}
+
+function desktopRemoteTransport(): DesktopRemoteTransport {
+  if (remoteTransport) return remoteTransport;
+  remoteTransport = new DesktopRemoteTransport(event => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('desktop:remote-transport:socket', event);
+    }
+  }, (input, init) => net.fetch(input instanceof URL ? input.toString() : input, init));
+  return remoteTransport;
 }
 
 const ZOOM_CHANGED_CHANNEL = 'desktop:zoom-changed';
@@ -1335,6 +1350,8 @@ async function createMainWindow(): Promise<BrowserWindow> {
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => {
     screenshotController?.invalidateTarget();
+    remoteTransport?.close();
+    remoteTransport = null;
     controller.destroy();
     if (browserAutomationService) browserAutomationService = null;
     if (browserController === controller) browserController = null;
@@ -1350,6 +1367,27 @@ async function createMainWindow(): Promise<BrowserWindow> {
   if (!window.isVisible()) window.show();
   return window;
 }
+
+ipcMain.handle('desktop:remote-transport:request', async (event, input: RemoteNativeRequest) => {
+  if (!isMainWindowSender(event.sender)) throw new Error('remote caller denied');
+  return desktopRemoteTransport().request(input);
+});
+ipcMain.handle('desktop:remote-transport:cancel', (event, id: unknown) => {
+  if (!isMainWindowSender(event.sender) || typeof id !== 'string') return false;
+  return desktopRemoteTransport().cancelRequest(id);
+});
+ipcMain.handle('desktop:remote-transport:open-socket', async (event, origin: unknown) => {
+  if (!isMainWindowSender(event.sender) || typeof origin !== 'string') throw new Error('remote caller denied');
+  return desktopRemoteTransport().openSocket(origin);
+});
+ipcMain.handle('desktop:remote-transport:send-socket', (event, id: unknown, data: unknown) => {
+  if (!isMainWindowSender(event.sender) || typeof id !== 'string' || typeof data !== 'string') return false;
+  return desktopRemoteTransport().sendSocket(id, data);
+});
+ipcMain.handle('desktop:remote-transport:close-socket', (event, id: unknown) => {
+  if (!isMainWindowSender(event.sender) || typeof id !== 'string') return false;
+  return desktopRemoteTransport().closeSocket(id);
+});
 
 ipcMain.handle('desktop:retry-connection', async event => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return false;

@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createOperationDispatcher, type OperationTransport } from '../src/operations/dispatcher.js';
 // Side effect: registers the product Session definitions used below.
 import '../src/operations/session.js';
+import { buildSessionCreatePayload } from '../src/views/new-session-view.js';
 import { createOperationStore, entityFieldKey } from '../src/operations/store.js';
 import {
   OperationDispatcherProvider,
@@ -222,6 +223,34 @@ describe('session operations (proposal §8, product definitions)', () => {
     transport.emitResult(requestIdOf(transport.sent[0]), true);
     expect(store.getRun(create.id)?.phase).toBe('confirmed');
     expect(store.getRun(fork.id)?.phase).toBe('pending');
+  });
+
+  it('session.create carries native Claude turn_config without legacy approval_mode', () => {
+    const { transport, dispatcher } = setup();
+    const payload = buildSessionCreatePayload({
+      workspaceId: 'w1',
+      sessionName: 'Native Claude',
+      agentId: 'agent-claude',
+      executor: 'claude',
+      approvalMode: 'ask',
+      catalogOptions: [{
+        id: 'permission_mode', displayName: 'Mode', binding: 'turn', role: 'approval_mode',
+        control: 'select', required: false, defaultValue: 'default',
+        choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+          value,
+          displayName: value,
+        })),
+      }],
+      catalogValues: { permission_mode: 'acceptEdits' },
+    });
+    dispatcher.dispatch('session.create', payload);
+    expect(transport.sent[0]).toMatchObject({
+      type: 'session:create',
+      workspace_id: 'w1',
+      agent_id: 'agent-claude',
+      turn_config: { permission_mode: 'acceptEdits' },
+    });
+    expect(transport.sent[0]).not.toHaveProperty('approval_mode');
   });
 
   it('session.create timeout remains an unknown outcome after the fake-timer deadline', () => {

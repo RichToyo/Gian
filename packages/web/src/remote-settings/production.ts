@@ -1,6 +1,8 @@
 import type { RemoteSettingsSnapshot, RemoteSettingsPairing, RemoteSettingsAuditEntry } from '@gian/shared';
 import type { RemoteSettingsController, RemoteSettingsState, RemotePairingState, RemoteAuditEntry } from './types.js';
 import { authorizeRemoteAccount } from '../auth/github-authorization.js';
+// authorizeRemoteAccount stays available for an explicit caller. Enroll and
+// reconnect do not pass authorizeUrl, so a missing GitHub session does not block them.
 
 export interface RemoteSettingsOptions {
   fetchFn?: typeof fetch;
@@ -192,9 +194,9 @@ export function createRemoteSettingsController(options: RemoteSettingsOptions = 
       enrollment_token: input.enrollmentToken,
       ...(input.hostName ? { host_name: input.hostName } : {}),
     },
-      { enrollment: { kind: 'connecting', serverUrl: input.serverUrl } }, input.serverUrl),
+      { enrollment: { kind: 'connecting', serverUrl: input.serverUrl } }),
     disconnect: () => mutate('/disconnect'),
-    reconnect: () => mutate('/reconnect', {}, undefined, snapshot?.server_url ?? undefined),
+    reconnect: () => mutate('/reconnect'),
     disableRemote: () => mutate('/disable'),
     setPublicUrl: url => mutate('/public-url', { public_url: url }),
     setHostName: name => mutate('/host-name', { host_name: name }),
@@ -211,6 +213,7 @@ export function createRemoteSettingsController(options: RemoteSettingsOptions = 
       const path = pairingPath('cancel');
       return path ? mutate(path) : Promise.resolve();
     },
+    renameDevice: (id, name) => mutate('/devices/' + encodeURIComponent(id) + '/name', { name }),
     revokeDevice: id => mutate('/devices/' + encodeURIComponent(id) + '/revoke'),
     async loadAudit(id) {
       const mutation = mutations;

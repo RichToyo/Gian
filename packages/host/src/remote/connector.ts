@@ -169,7 +169,7 @@ export class RemoteConnector {
       /** Per-session translation state pushed after a resume, so a
        *  reconnecting negotiated client recovers missed toggle/progress
        *  changes without a state.refresh. */
-      translationState?: (sessionId: string) => object | null;
+      translationState?: (sessionId: string, deviceId: string) => object | null;
     },
     private readonly initialSnapshotGraceMs: number = SNAPSHOT_PUSH_GRACE_MS,
     private readonly transcriptCoalesceMs: number = TRANSCRIPT_COALESCE_MS,
@@ -421,7 +421,7 @@ export class RemoteConnector {
           ? this.services?.transcriptPage?.(subscribedSessionId, this.device.id, { wireFeatures: this.negotiatedWireFeatures }) ?? null
           : null;
         const translationState = subscribedSessionId && this.supportsFeature('wire.conversation_translation')
-          ? this.services?.translationState?.(subscribedSessionId) ?? null
+          ? this.services?.translationState?.(subscribedSessionId, this.device.id) ?? null
           : null;
         await this.sendControl({
           type: 'resume.ok',

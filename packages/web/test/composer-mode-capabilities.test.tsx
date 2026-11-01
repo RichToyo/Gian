@@ -189,6 +189,45 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     expect(screen.getByText('Skip permission prompts', { selector: '.mp-row-title' })).toBeTruthy();
   });
 
+  it('routes ungated Claude native modes verbatim, including the auto overlap', async () => {
+    const user = userEvent.setup();
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-claude-native',
+      input: [{ type: 'text' }],
+      slashCommands: [],
+      specialCatalogs: { approvalMode: 'permission_mode' },
+      configOptions: [{
+        id: 'permission_mode',
+        displayName: 'Permission mode',
+        binding: 'turn',
+        role: 'approval_mode',
+        control: 'select',
+        required: false,
+        defaultValue: 'default',
+        choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto', 'dontAsk'].map(value => ({
+          value,
+          displayName: value,
+        })),
+      }],
+    });
+    const callbacks = renderComposer(makeSession('claude', {
+      approval_mode: null,
+      turn_config: { permission_mode: 'default' },
+    }));
+
+    for (const [label, value] of [
+      ['auto', 'auto'],
+      ['acceptEdits', 'acceptEdits'],
+      ['bypassPermissions', 'bypassPermissions'],
+    ] as const) {
+      await user.click(document.querySelector('.cmp-approval-btn')!);
+      expect(screen.queryByText('Plan', { selector: '.approval-pop .mp-row-title' })).toBeNull();
+      await user.click(await screen.findByText(label, { selector: '.approval-pop .mp-row-title' }));
+      expect(callbacks.onSetTurnConfig).toHaveBeenLastCalledWith('permission_mode', value);
+      expect(callbacks.onSetMode).not.toHaveBeenCalled();
+    }
+  });
+
   it('renders codex capability modes including plan once capabilities resolve', async () => {
     const user = userEvent.setup();
     loadProxyCapabilitiesMock.mockImplementation(async (executor: string) => ({

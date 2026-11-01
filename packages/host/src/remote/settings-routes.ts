@@ -32,7 +32,8 @@ export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): 
         return context.json({ error: 'remote_auth_required' }, 401);
       }
       const safe = ['invalid_url', 'already_enrolled', 'not_enrolled', 'identity_changed',
-        'pairing_busy', 'connection_cancelled', 'pairing_not_found', 'invalid_host_name'];
+        'pairing_busy', 'connection_cancelled', 'pairing_not_found', 'invalid_host_name',
+        'invalid_device_name', 'device_not_found'];
       const message = error instanceof Error && safe.includes(error.message)
         ? error.message : 'remote_action_failed';
       return context.json({ error: message }, 400);
@@ -87,6 +88,11 @@ export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): 
     remote.confirmPairing(context.req.param('id')!, 'reject'), result => result));
   app.post('/api/remote/pairings/:id/cancel', mutate(context =>
     remote.cancelPairing(context.req.param('id')!)));
+  app.post('/api/remote/devices/:id/name', mutate(async context => {
+    const input = await body(context);
+    if (typeof input.name !== 'string') throw new Error('invalid_device_name');
+    return remote.renameDevice(context.req.param('id')!, input.name);
+  }));
   app.post('/api/remote/devices/:id/revoke', mutate(context =>
     remote.revokeDevice(context.req.param('id')!), device => ({
       id: device.id, revoked_at: device.revokedAt, revision: device.revision,

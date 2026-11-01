@@ -21,7 +21,7 @@ import type {
   TraceSnapshot,
   UserAgent,
 } from '@gian/shared';
-import { isApprovalMode, sessionRuntimeCliPath, resolvePluginIdInput } from '@gian/shared';
+import { catalogOptionUsesProviderNativeMode, isApprovalMode, sessionRuntimeCliPath, resolvePluginIdInput } from '@gian/shared';
 import type { SessionBindingPlanner } from './binding-planner.js';
 import { agentMatchesSessionKind, pluginIdForSessionIdentity } from './compatibility-executor.js';
 import { existsSync } from 'node:fs';
@@ -1954,7 +1954,9 @@ export class SessionManager {
       return;
     }
     if (option?.role === 'approval_mode') {
-      if (isApprovalMode(value)) this.setApprovalMode(sessionId, value);
+      if (isApprovalMode(value) && !catalogOptionUsesProviderNativeMode(session.executor, option)) {
+        this.setApprovalMode(sessionId, value);
+      }
       else this.mergeTurnConfig(sessionId, { [optionId]: value });
       return;
     }

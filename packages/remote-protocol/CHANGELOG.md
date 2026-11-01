@@ -1,5 +1,13 @@
 # Remote Protocol package
 
+## [1.5.0]
+
+- Add device-based Server identity, native controller admission, and scoped
+  device execution targets alongside the existing account-based contracts.
+- Add the negotiated `wire.session_directory_v1` capability for paginated
+  conversation discovery and taskless Session creation. Existing peers do
+  not receive the new capability unless they negotiate it.
+
 ## [1.4.0]
 
 - Adds conversation translation under the new `wire.conversation_translation`
