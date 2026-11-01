@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "6aaf0ae5e2434b6be560f90dbc307527f83f6c1e",
+  "sourceCommit": "4ac291122b0827d93e2e60b3ed671bbee354d724",
   "workingTree": false,
   "files": [
     {
@@ -2869,7 +2869,7 @@
     {
       "path": "packages/host/src/session/lifecycle-service.ts",
       "mode": 420,
-      "sha256": "9b6195a80d8282a6bdc84d5ed22843dc61b88d69100ec38019ccad6be2260fc6"
+      "sha256": "acbc42ee5c3e77610dac611f0376df1d3e6fcb9fc5a3b33aa565156852773605"
     },
     {
       "path": "packages/host/src/session/manager.ts",
@@ -4509,7 +4509,7 @@
     {
       "path": "packages/host/test/session-exact-binding.test.ts",
       "mode": 420,
-      "sha256": "de9022ca3b0e7689b71b161bf83015fbb4b69bea8d1d01e8213b431ff5dc26d4"
+      "sha256": "7dfb505b39d0abf853aedcc5ea3ba3ed2e104ac3cbf23b09afdf71a201b87e61"
     },
     {
       "path": "packages/host/test/session-inbox-adapter.test.ts",
