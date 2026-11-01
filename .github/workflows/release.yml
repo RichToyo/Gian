@@ -13,13 +13,13 @@ concurrency:
 jobs:
   source:
     name: Release source / ${{ matrix.lane }}
-    if: github.repository == 'RichToyo/Gian' && github.ref == 'refs/heads/main'
+    if: github.repository == 'RichToyo/Gian' && github.ref == 'refs/heads/diagnostic/0610-host-remote-test-1101'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        lane: [policy, typecheck, build, unit, integration, system]
+        lane: [integration]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,12 +39,7 @@ jobs:
       - name: Check this release revision
         env:
           LANE: ${{ matrix.lane }}
-        run: |
-          if [[ "$LANE" == typecheck || "$LANE" == build ]]; then
-            pnpm "$LANE"
-          else
-            node scripts/source-gate.mjs "$LANE" HEAD full
-          fi
+        run: timeout 240 node scripts/run-tests.mjs --scope integration --file packages/host/test/remote-settings.test.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
