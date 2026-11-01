@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "1e11014386ed5d09e4d48b13aad1529257a0d680",
+  "sourceCommit": "ea034f3e78db810a6c9a3fd5c33788bcfb85ead1",
   "workingTree": false,
   "files": [
     {
@@ -734,7 +734,7 @@
     {
       "path": "delivery/remote/protocol-package.json",
       "mode": 420,
-      "sha256": "86fd45706db6c58557d8c053e1a3809e46e381996a6649e5ec837091e601d3a3"
+      "sha256": "74a6d194de7ef47ef5ea01abe2148f678f56951d952d214d2004197efd0d9286"
     },
     {
       "path": "delivery/remote/README.md",
