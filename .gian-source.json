@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "a637623ab338f4ba197ef9908427521f760e5665",
+  "sourceCommit": "c950cc0efda50f2ab6270e3b4c47f3274c18fc24",
   "workingTree": false,
   "files": [
     {
@@ -4314,7 +4314,7 @@
     {
       "path": "packages/host/test/remote-settings.test.ts",
       "mode": 420,
-      "sha256": "c21f0626150f7c2628262fa70033e00075300321aac83f15b7b9eb0f353abe1d"
+      "sha256": "6979ee287aaee7bce955f5d4112d0cfd08a7e99f9ccc8f06fff8631f6b5974e8"
     },
     {
       "path": "packages/host/test/remote-translation-sync.test.ts",

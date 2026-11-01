@@ -126,6 +126,16 @@ async function setup() {
   };
 }
 
+function serverIdentityFetch(server: Awaited<ReturnType<typeof makeRemoteTestApp>>): typeof fetch {
+  return (async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    if (url.origin === server.publicOrigin && url.pathname === '/api/v1/server-identity') {
+      return server.fetch(url.pathname, init);
+    }
+    return fetch(input, init);
+  }) as typeof fetch;
+}
+
 test('account confirmation does not reconnect a deliberately disconnected Host until the original action continues', async () => {
   const context = await setup();
   try {
@@ -201,7 +211,7 @@ test('paired device rename stays local, persists through Settings, and rejects u
 
 for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter pairs a real Remote Web browser by ${pairingMode} through Server + Host`, async () => {
   const context = await setup();
-  const { controller, host, listener } = context;
+  const { controller, host, listener, server } = context;
   let browser: ReturnType<typeof createProductionController> | undefined;
   try {
     await controller.setPublicUrl?.('https://phone.example.test');
@@ -219,6 +229,7 @@ for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter p
 
     browser = createProductionController({
       baseUrl: listener.url, publicOrigin: 'https://remote.test', wsUrl: listener.wsUrl,
+      fetchFn: serverIdentityFetch(server),
       identity: new MemoryBrowserIdentityStore(), cache: new MemoryEncryptedHostCache(),
       autoRestore: false, platform: 'iOS', userAgent: 'Version/26.0 Mobile Safari/605.1.15',
       ...(pairingMode === 'qr' ? { pairingNonce: new URLSearchParams(qr.hash.slice(1)).get('nonce')! } : {}),
@@ -266,6 +277,7 @@ test('device revoke reauthenticates once after an expired Host access token', as
       baseUrl: listener.url,
       publicOrigin: 'https://remote.test',
       wsUrl: listener.wsUrl,
+      fetchFn: serverIdentityFetch(server),
       identity: new MemoryBrowserIdentityStore(),
       cache: new MemoryEncryptedHostCache(),
       autoRestore: false,
