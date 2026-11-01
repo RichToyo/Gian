@@ -19,6 +19,7 @@
     {
       "id": "remote-directory-v1",
       "patterns": ["packages/host/src/remote/directory.ts", "packages/host/test/remote-directory*.test.ts", "packages/remote-protocol/src/directory.ts", "packages/remote-protocol/test/directory.test.ts", "docs/architecture/remote-directory-v1.md"],
+      "optionalPatterns": ["docs/architecture/remote-directory-v1.md"],
       "modules": ["host", "remote-protocol"],
       "scopes": ["unit", "integration"],
       "checks": ["typecheck", "quality:test-catalog"],

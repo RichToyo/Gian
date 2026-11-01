@@ -138,8 +138,7 @@ describe('Settings › Remote — Control this Gian', () => {
     else expect(connect).toBeDisabled();
   });
 
-  it('confirms Host identity in the App dialog, keeps polling pending states, then submits the original enrollment once', async () => {
-    vi.useFakeTimers();
+  it('submits Host enrollment once without starting GitHub authorization', async () => {
     const environments = stubEnvironments([]);
     const url = 'https://remote.example.com';
     let backend: RemoteSettingsSnapshot = {
@@ -148,20 +147,12 @@ describe('Settings › Remote — Control this Gian', () => {
       server_identity_fingerprint: null, pending_identity_fingerprint: null,
       identity_changed_at: null, pairing: null, pending_pairings: [], devices: [],
     };
-    let polls = 0;
     const enrollments: unknown[] = [];
+    const requests: string[] = [];
     const fetchFn: typeof fetch = async (path, init) => {
-      if (String(path) === '/api/remote/account/start') {
-        expect(JSON.parse(String(init?.body))).toEqual({ server_url: url });
-        backend = { ...backend, account: { status: 'pending', server_url: url, user_code: 'HOST-CODE',
-          verification_uri: 'https://github.com/login/device', expires_at: Date.now() + 300_000, interval_seconds: 5 } };
-      }
-      if (String(path) === '/api/remote/account/poll' && ++polls === 3) {
-        backend = { ...backend, account: { status: 'authorized', server_url: url, login: 'RichLogic', expires_at: Date.now() + 300_000 } };
-      }
+      requests.push(String(path));
       if (String(path) === '/api/remote/enroll') {
         enrollments.push(JSON.parse(String(init?.body)));
-        if (backend.account?.status !== 'authorized') return Response.json({ error: 'remote_auth_required' }, { status: 401 });
         backend = { ...backend, enrolled: true, host_id: 'host', host_name: 'Studio Mac', server_url: url,
           server_identity_fingerprint: 'a'.repeat(64), connection: 'online' };
       }
@@ -179,25 +170,14 @@ describe('Settings › Remote — Control this Gian', () => {
       fireEvent.change(token, { target: { value: 'first-secret' } });
       await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' })); });
       expect(token.value).toBe('');
-      expect(enrollments).toHaveLength(0);
-      expect(within(dialog).queryByText('HOST-CODE')).toBeNull();
-      const authorization = screen.getByRole('dialog', { name: 'Confirm GitHub account' });
-      expect(within(authorization).getByText('HOST-CODE')).toBeTruthy();
-      expect((within(dialog).getByLabelText('Remote Server URL') as HTMLInputElement).value).toBe(url);
-      expect((within(dialog).getByLabelText('Machine name') as HTMLInputElement).value).toBe('Studio Mac');
-      for (let i = 1; i <= 3; i++) {
-        await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
-        expect(polls).toBe(i);
-      }
       expect(enrollments).toEqual([
         { server_url: url, enrollment_token: 'first-secret', host_name: 'Studio Mac' },
       ]);
+      expect(requests.some(path => path.startsWith('/api/remote/account/'))).toBe(false);
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(screen.getByTestId('remote-link-status').textContent).toBe('Online');
       expect(document.body.textContent).not.toMatch(/first-secret|fresh-secret/);
-      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-      expect(polls).toBe(3);
-    } finally { view.unmount(); controller.dispose?.(); environments.restore(); vi.useRealTimers(); }
+    } finally { view.unmount(); controller.dispose?.(); environments.restore(); }
   });
 
   it('does not independently poll an account from inside the enrollment form', async () => {
@@ -644,15 +624,7 @@ describe('Settings › Remote — Control other Gian installs', () => {
   });
 
   it('the connect dialog pairs without opening a GitHub account dialog', async () => {
-    const original = globalThis.fetch;
-    const requests: string[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = String(input);
-      requests.push(path);
-      if (path === '/api/remote/environments' && init?.method === 'POST') return Response.json({ environment: environment() });
-      if (path === '/api/remote/environments') return Response.json({ environments: [] });
-      return new Response('unauthorized', { status: 401 });
-    }) as typeof fetch;
+    const stub = stubEnvironments([]);
     const fixture = createRemoteSettingsFixture({ enrolled: true });
     const startLogin = vi.fn().mockResolvedValue(undefined);
     fixture.startAccountLogin = startLogin;
@@ -664,10 +636,10 @@ describe('Settings › Remote — Control other Gian installs', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
       await screen.findByText('Mac mini');
       expect(startLogin).not.toHaveBeenCalled();
-      expect(requests.some(path => path.includes('account/start'))).toBe(false);
+      expect(stub.calls.some(call => call.path.includes('account/start'))).toBe(false);
       expect(screen.queryByRole('dialog', { name: 'Confirm GitHub account' })).toBeNull();
     } finally {
-      globalThis.fetch = original;
+      stub.restore();
     }
   });
 });

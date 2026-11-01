@@ -1918,7 +1918,7 @@ describe('NewSessionView', () => {
     await waitFor(() => expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('dontAsk'));
     await openAgentPicker();
     await userEvent.click(screen.getByTestId(`ns-agent-option-${first.id}`));
-    await waitFor(() => expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('auto'));
+    await waitFor(() => expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Auto'));
   });
 
   it('remembers the last workspace / agent / chips as the next defaults', async () => {

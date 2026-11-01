@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "ea034f3e78db810a6c9a3fd5c33788bcfb85ead1",
+  "sourceCommit": "55b26ebe95829202000d24faf22a8fbccb9d3b98",
   "workingTree": false,
   "files": [
     {
@@ -4514,7 +4514,7 @@
     {
       "path": "packages/host/test/session-manager.test.ts",
       "mode": 420,
-      "sha256": "1fb3736554b7bc21d0418dfa19e3584efca5114c2c86e28dd8507394e38e5f77"
+      "sha256": "7a9e4c79263e86e73b2975fcd7c14158ba4c149d52f6609ef794d13bb12be29f"
     },
     {
       "path": "packages/host/test/session-name-001.test.ts",
@@ -7254,7 +7254,7 @@
     {
       "path": "packages/remote-server/src/auth/enrollment-password.ts",
       "mode": 420,
-      "sha256": "1cc2ceeaadddd204e4024b20814e1e25463f6f96840309ac621be3b1ae8b7161"
+      "sha256": "f017630df4c7d4b45e3bf21764bdc3752b7f1d8d07b6c2df2d89db63a2f3a1e2"
     },
     {
       "path": "packages/remote-server/src/auth/github-identity.ts",
@@ -7299,7 +7299,7 @@
     {
       "path": "packages/remote-server/src/controller-enrollment-routes.ts",
       "mode": 420,
-      "sha256": "00b34ac09e201049f54a2e55df3408400869b0324d915fcc80bc00abc8e46296"
+      "sha256": "bcea292121abdd2a7abd52e1f52e5bbda1733df7d987b4a02be2fcfc9d11199b"
     },
     {
       "path": "packages/remote-server/src/crypto-hash.ts",
@@ -7394,7 +7394,7 @@
     {
       "path": "packages/remote-server/test/controller-enrollment.test.ts",
       "mode": 420,
-      "sha256": "a8fd28e28f483988a9b52151163abd26bf07d2c64c567af7940d403df65bacf0"
+      "sha256": "150d28b44888d2c8a44a20f7ccd0050c75faf6df2df345972759d3e9bc886180"
     },
     {
       "path": "packages/remote-server/test/enrollment.test.ts",
@@ -7444,7 +7444,7 @@
     {
       "path": "packages/remote-server/test/server-identity.test.ts",
       "mode": 420,
-      "sha256": "383df8797854290855459a6bb854b1c337d205f01adf6d9e084fda05783ef5fd"
+      "sha256": "979e6a1dacae77a50bdffed31eba473dfcd6247c159e1392738c0c0d33bd429c"
     },
     {
       "path": "packages/remote-server/test/sessions.test.ts",
@@ -9929,7 +9929,7 @@
     {
       "path": "packages/web/test/composer-mode-capabilities.test.tsx",
       "mode": 420,
-      "sha256": "d4a3c4cb3b8b22ec5a8f62c4f2fd351b272c7353848c2a21f7ea7f154046f545"
+      "sha256": "f39da0363b450b0429f2a4edac18c492240d3e67890759c05d49c5cc8fed68a1"
     },
     {
       "path": "packages/web/test/composer-mode-helpers.test.ts",
@@ -10454,7 +10454,7 @@
     {
       "path": "packages/web/test/ses-001-new-session-view.test.tsx",
       "mode": 420,
-      "sha256": "4954e4db0862e305a902bea363b9c980bb75f65a5daa4487e81a8b28053e8018"
+      "sha256": "cb664eec7f7943032d3101861a92d7de59ffb4a2a20d057272aa7765602664e1"
     },
     {
       "path": "packages/web/test/ses-001-session-create-payload.test.ts",
@@ -10569,7 +10569,7 @@
     {
       "path": "packages/web/test/settings-remote.test.tsx",
       "mode": 420,
-      "sha256": "eedaa7099ac955cb79e050c65664e51df9c4e9f2bfc824a87fe4abae9975e30f"
+      "sha256": "2bf7eede92857c7d071e7add8fa25a2b70881de5807d4afd83903165fe1a027d"
     },
     {
       "path": "packages/web/test/settings-screenshot.test.tsx",
@@ -11134,7 +11134,7 @@
     {
       "path": "scripts/dev-runtime-source-assets.test.mjs",
       "mode": 420,
-      "sha256": "c15dcc86b10e5c94e2bbb26adc82be2a0f2f17d0268815504f5302a3a602a92d"
+      "sha256": "38504845c6845560c33e408285472eef818f6f9c3da19c91068c249ff99d0d35"
     },
     {
       "path": "scripts/dev-runtime.mjs",
@@ -11734,7 +11734,7 @@
     {
       "path": "test/selection-map.json",
       "mode": 420,
-      "sha256": "fdaec2cddc09e36c2b4bd4b131cc5367ddc62de21da189d3077bcf0db7059563"
+      "sha256": "26be4a3c5f1d6c5c6ae393752764b3765650bad407fb76ce18bf5109daaab565"
     },
     {
       "path": "tsconfig.base.json",

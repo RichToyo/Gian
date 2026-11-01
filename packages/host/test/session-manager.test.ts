@@ -1034,6 +1034,7 @@ test('advertised opaque approval choices persist while unadvertised create value
         displayName: 'Mode',
         binding: 'turn',
         role: 'approval_mode',
+        modeKind: 'gian-preset',
         control: 'select',
         required: false,
         defaultValue: 'default',

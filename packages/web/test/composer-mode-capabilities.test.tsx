@@ -216,7 +216,7 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     }));
 
     for (const [label, value] of [
-      ['auto', 'auto'],
+      ['Auto', 'auto'],
       ['acceptEdits', 'acceptEdits'],
       ['bypassPermissions', 'bypassPermissions'],
     ] as const) {
