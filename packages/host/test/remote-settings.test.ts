@@ -126,13 +126,6 @@ async function setup() {
   };
 }
 
-async function signInBrowser(controller: ReturnType<typeof createProductionController>) {
-  controller.actions.startGitHubLogin!();
-  await until(() => controller.state.account?.userCode);
-  controller.actions.pollGitHubLogin!();
-  await until(() => controller.state.account?.status === 'signed_in');
-}
-
 test('account confirmation does not reconnect a deliberately disconnected Host until the original action continues', async () => {
   const context = await setup();
   try {
@@ -230,7 +223,7 @@ for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter p
       autoRestore: false, platform: 'iOS', userAgent: 'Version/26.0 Mobile Safari/605.1.15',
       ...(pairingMode === 'qr' ? { pairingNonce: new URLSearchParams(qr.hash.slice(1)).get('nonce')! } : {}),
     });
-    await signInBrowser(browser);
+    assert.equal(browser.state.account?.status, 'signed_out');
     if (pairingMode === 'qr') {
       assert.equal(browser.state.auth.kind, 'pairing');
       assert.equal(host.app.remote.pairings.latest()?.status, 'pending_claim');
@@ -279,7 +272,7 @@ test('device revoke reauthenticates once after an expired Host access token', as
       platform: 'iOS',
       userAgent: 'Version/26.0 Mobile Safari/605.1.15',
     });
-    await signInBrowser(browser);
+    assert.equal(browser.state.account?.status, 'signed_out');
     browser.actions.submitPairingCode(grant.code);
     await until(() => controller.getState().pairing.kind === 'claimed');
     await controller.confirmPairingClaim('allow');
