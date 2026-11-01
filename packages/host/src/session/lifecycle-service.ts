@@ -327,7 +327,7 @@ export class SessionLifecycleService {
             (option.binding === 'turn' ? modeTurnConfig : sessionConfig)[option.id] = value!;
             // The old column is a compatibility projection of a declared
             // string choice, not an independent permission policy.
-            if (!nativeMode && !catalogOptionUsesProviderNativeMode(executor, option)
+            if (!nativeMode && (legacyExplicit || !catalogOptionUsesProviderNativeMode(executor, option))
               && modes.length === 1 && typeof value === 'string') approvalMode = value as ApprovalMode;
           }
           catalogValidated = true;

@@ -39,7 +39,7 @@ jobs:
       - name: Check this release revision
         env:
           LANE: ${{ matrix.lane }}
-        run: timeout 240 node scripts/run-tests.mjs --scope integration --file packages/host/test/remote-web-controller.test.ts --file packages/host/test/remote-web-upload.test.ts
+        run: timeout 240 node scripts/run-tests.mjs --scope integration --file packages/host/test/sec-012-one-shot-bypass.test.ts --file packages/host/test/session-agent-binding.test.ts --file packages/host/test/session-exact-binding.test.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:

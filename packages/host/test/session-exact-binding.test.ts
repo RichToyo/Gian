@@ -868,7 +868,8 @@ test('new managed launches and inspection select the active exact tuple, not the
   assert.equal(sessionRuntimeCliPath(custom.sessionBinding.runtimeProfile), '/tmp/custom-cli');
   assert.equal(custom.sessionBinding.runtimeProfile?.configHome, '/tmp/custom-home');
   const customLease = await custom.acquireLease();
-  assert.equal(customLease?.env.CLAUDE_CONFIG_DIR, '/tmp/custom-home');
+  assert.equal(customLease?.env.GIAN_AGENT_HOME, '/tmp/custom-home');
+  assert.equal(customLease?.env.CLAUDE_CONFIG_DIR, undefined);
   await customLease?.release();
   const fallback = await new SessionBindingPlanner({
     ...options, resolveActiveGeneration: async () => null,
