@@ -31,7 +31,8 @@ test('native Remote HTTP uses the native Server origin without CORS preflight an
     assert.equal(new Headers(calls[0]!.init?.headers).get('origin'), 'https://remote.example');
     assert.ok(response.headers.some(([name, value]) => name === 'set-cookie' && value.includes('SameSite=Strict')));
     await assert.rejects(transport.request({ ...request, path: '/api/v1/admin/host-enrollments' }), /remote path denied/);
-    await assert.rejects(transport.request({ ...request, headers: { origin: 'http://local.host' } }), /remote origin mismatch/);
+    await assert.rejects(transport.request({ ...request, headers: { origin: 'https://other.example' } }), /remote origin mismatch/);
+    await assert.rejects(transport.request({ ...request, headers: { origin: 'http://local.host' } }), /invalid remote origin/);
     assert.equal(calls.length, 1);
   } finally { transport.close(); }
 });
