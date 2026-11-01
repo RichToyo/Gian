@@ -136,6 +136,23 @@ function serverIdentityFetch(server: Awaited<ReturnType<typeof makeRemoteTestApp
   }) as typeof fetch;
 }
 
+function installTestPinStorage(): () => void {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    },
+  });
+  return () => {
+    if (previous) Object.defineProperty(globalThis, 'localStorage', previous);
+    else Reflect.deleteProperty(globalThis, 'localStorage');
+  };
+}
+
 test('account confirmation does not reconnect a deliberately disconnected Host until the original action continues', async () => {
   const context = await setup();
   try {
@@ -212,6 +229,7 @@ test('paired device rename stays local, persists through Settings, and rejects u
 for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter pairs a real Remote Web browser by ${pairingMode} through Server + Host`, async () => {
   const context = await setup();
   const { controller, host, listener, server } = context;
+  const restorePinStorage = installTestPinStorage();
   let browser: ReturnType<typeof createProductionController> | undefined;
   try {
     await controller.setPublicUrl?.('https://phone.example.test');
@@ -241,6 +259,7 @@ for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter p
       browser.actions.confirmQrPairing();
     } else browser.actions.submitPairingCode(grant.code);
     await until(() => controller.getState().pairing.kind === 'claimed');
+    assert.equal(globalThis.localStorage.getItem('gian.remote.server_identity_fingerprint'), server.handle.services.identity.fingerprint);
     assert.equal(host.app.remote.devices.list().length, 0, 'claim is not authorization');
     const claimed = controller.getState().pairing;
     if (claimed.kind === 'claimed') {
@@ -262,12 +281,13 @@ for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter p
       assert.equal(host.app.remote.enrollment.current()!.hostId, hostId);
       assert.equal(controller.getState().devices.length, 1);
     }
-  } finally { browser?.close(); await context.close(); }
+  } finally { browser?.close(); restorePinStorage(); await context.close(); }
 });
 
 test('device revoke reauthenticates once after an expired Host access token', async t => {
   const context = await setup();
   const { controller, host, listener, server } = context;
+  const restorePinStorage = installTestPinStorage();
   let browser: ReturnType<typeof createProductionController> | undefined;
   try {
     await controller.startPairing();
@@ -309,6 +329,7 @@ test('device revoke reauthenticates once after an expired Host access token', as
     assert.ok(server.handle.services.repos.getPairing(device.id)?.revoked_at);
   } finally {
     browser?.close();
+    restorePinStorage();
     await context.close();
   }
 });
