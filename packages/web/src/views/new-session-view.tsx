@@ -28,6 +28,7 @@ import {
   normalizeBrowserElementCapture,
   normalizeComposerDocument,
   usesCliCapabilitySurface,
+  usesAgentScopedModePreferences,
   usesNativeExecutorConfig,
 } from '@gian/shared';
 import { loadAgents, loadResolvedProxyCatalog, loadSettings, peekAgents } from '../api.js';
@@ -694,7 +695,7 @@ function SessionCreateForm({
       : (last?.executor === executor ? last : null);
     setModel(remembered?.model ?? '');
     setEffort(remembered?.thinkingEffort ?? null);
-    const rememberedMode = executor === 'claude' && remembered?.agentId !== agentId
+    const rememberedMode = usesAgentScopedModePreferences(executor) && remembered?.agentId !== agentId
       ? null
       : remembered?.approvalMode ?? null;
     setMode(rememberedMode);
@@ -784,7 +785,7 @@ function SessionCreateForm({
       model,
       effort,
       mode,
-      configuredMode: executor === 'claude'
+      configuredMode: usesAgentScopedModePreferences(executor)
         ? (configuredDefaults?.mode.trim() || null) as ApprovalMode | null
         : null,
       serviceTier,
@@ -1268,7 +1269,7 @@ function SessionCreateForm({
         model,
         effort,
         mode,
-        configuredMode: executor === 'claude'
+        configuredMode: usesAgentScopedModePreferences(executor)
           ? (configuredDefaults?.mode.trim() || null) as ApprovalMode | null
           : null,
         serviceTier,

@@ -3,7 +3,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { catalogModeSemantics, catalogOptionUsesProviderNativeMode } from '../dist/index.js';
+import { catalogModeSemantics, catalogOptionUsesProviderNativeMode, usesAgentScopedModePreferences } from '../dist/index.js';
 
 function catalog(options) {
   return {
@@ -68,6 +68,12 @@ test('per-option routing recognizes ungated Claude native permission choices', (
     choices: ['default', 'acceptEdits', 'bypassPermissions', 'auto'].map(value => ({ value })),
   }]).configOptions[0];
   assert.equal(catalogOptionUsesProviderNativeMode('claude', native), true);
+});
+
+test('legacy Claude mode preferences remain scoped to the owning Agent', () => {
+  assert.equal(usesAgentScopedModePreferences('claude'), true);
+  assert.equal(usesAgentScopedModePreferences('codex'), false);
+  assert.equal(usesAgentScopedModePreferences('com.example.custom'), false);
 });
 
 test('per-option routing honors explicit preset markers before Claude fallback', () => {

@@ -633,6 +633,7 @@ describe('Settings › Remote — Control other Gian installs', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
       const dialog = screen.getByRole('dialog', { name: 'Connect another Gian' });
       fireEvent.change(within(dialog).getByLabelText('Host pairing code'), { target: { value: 'ABCD-EFGH' } });
+      fireEvent.change(within(dialog).getByLabelText('Name'), { target: { value: 'Mac mini' } });
       fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
       await screen.findByText('Mac mini');
       expect(startLogin).not.toHaveBeenCalled();

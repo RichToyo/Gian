@@ -1,6 +1,6 @@
 {
   "name": "@gian/dsh-bridge",
-  "version": "0.1.9-Dev",
+  "version": "0.1.9",
   "private": true,
   "description": "Gian-managed Cordis bundle that speaks gian.dsh.bridge/1.0 inside a binding-scoped DSH profile",
   "type": "module",

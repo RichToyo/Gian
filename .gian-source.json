@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "55b26ebe95829202000d24faf22a8fbccb9d3b98",
+  "sourceCommit": "94828e064dd8f80fd8fdfc5977203eb8a95e9019",
   "workingTree": false,
   "files": [
     {
@@ -5584,7 +5584,7 @@
     {
       "path": "packages/proxies/dsh-bridge/package.json",
       "mode": 420,
-      "sha256": "14230012fd73004796d27b0e6ade20cf7bbdc7a9ad332fb142df38abc492f5bb"
+      "sha256": "4000acbb26abcddb50f5b43c026f38ff3ed7244aa6b92dfa28dbde451ffce11a"
     },
     {
       "path": "packages/proxies/dsh-bridge/presets/cordis.patch.yml",
@@ -5609,7 +5609,7 @@
     {
       "path": "packages/proxies/dsh-bridge/README.md",
       "mode": 420,
-      "sha256": "d12a82994277623b3acb126f76e7597ef28455fdfb32ae55f86ad2be1232ef7c"
+      "sha256": "fb5ee9093b1410e846cb50a096d9dcbe8674d82984d10f2524e69ad5a528b4b7"
     },
     {
       "path": "packages/proxies/dsh-bridge/src/cli.ts",
@@ -8029,7 +8029,7 @@
     {
       "path": "packages/shared/src/model.ts",
       "mode": 420,
-      "sha256": "765fceffc2cca0680432af45195a336b8128408a043a8893f9ba1651dd18d9b1"
+      "sha256": "01ac87221b476ec492009fb93abf3e2738829aed7b128337b5d8dc9257f19e60"
     },
     {
       "path": "packages/shared/src/native.ts",
@@ -8154,7 +8154,7 @@
     {
       "path": "packages/shared/test/catalog-mode-semantics.test.mjs",
       "mode": 420,
-      "sha256": "39c618af1af7414d3e84ca22c38342f23e4383862fa152ce2be52c5a6914a48a"
+      "sha256": "e75d2998f514c4a184d2762a1346fa9e05b5f3f129385ea20a53a881fe32a7d7"
     },
     {
       "path": "packages/shared/test/context-document.test.mjs",
@@ -8224,7 +8224,7 @@
     {
       "path": "packages/tool-cli/package.json",
       "mode": 420,
-      "sha256": "ed40243e90b31a6dac42a54bb6c7d9d0523279ffbad6b600c5faa29d2a58c48a"
+      "sha256": "d933cba5919cbb1f57c5b0b80715475413c170444c2529673c858da6b1a63ee1"
     },
     {
       "path": "packages/tool-cli/skill/gian-tool/scripts/gian-tool-mcp",
@@ -8274,7 +8274,7 @@
     {
       "path": "packages/tool-mcp/package.json",
       "mode": 420,
-      "sha256": "72cc6cbeddcb5971d8b41c4faa71dd87478286845563915247630291098597d1"
+      "sha256": "d31fae272ba3492826459ebf18aa7573febfc4586e5598ae706de31c333bcb1c"
     },
     {
       "path": "packages/tool-mcp/src/adapter.ts",
@@ -9604,7 +9604,7 @@
     {
       "path": "packages/web/src/views/new-session-view.tsx",
       "mode": 420,
-      "sha256": "f9cfbe57918a7955d9d6e7aecd6628d0e65f0c7deefd2566a125cd9b39e89e67"
+      "sha256": "ad69bc8a793636db44e7d81095e07a922b9c5f847bce4321f7b423514091e5c1"
     },
     {
       "path": "packages/web/src/views/OnboardingView.tsx",
@@ -10569,7 +10569,7 @@
     {
       "path": "packages/web/test/settings-remote.test.tsx",
       "mode": 420,
-      "sha256": "2bf7eede92857c7d071e7add8fa25a2b70881de5807d4afd83903165fe1a027d"
+      "sha256": "44c374b4457da853af0174b0cd09e96be3b98eaafce7cda13ad13c555019a3f3"
     },
     {
       "path": "packages/web/test/settings-screenshot.test.tsx",
@@ -11424,7 +11424,7 @@
     {
       "path": "scripts/run-affected-tests.test.mjs",
       "mode": 420,
-      "sha256": "8c5a564a068c784fb684925df5cd77d63f7abe98878576c14b89694f432418a7"
+      "sha256": "e3e53ec3e33ce969a276f0760a12db175da117cee98d8fe17b33c927b1393686"
     },
     {
       "path": "scripts/run-codex-compat-canary.mjs",
@@ -11629,7 +11629,7 @@
     {
       "path": "scripts/typecheck.mjs",
       "mode": 420,
-      "sha256": "0f74f6b8c83aee0981c586ac23fe0893751b013ed381f446d4fab30198677e97"
+      "sha256": "f8789256548fc4307a3ae96a5edb349a641f44f2464f57fe02128270013c6fe7"
     },
     {
       "path": "scripts/uninstall.sh",
