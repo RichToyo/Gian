@@ -16,6 +16,7 @@ import { MemoryEncryptedHostCache } from '../../remote-web/src/cache/encrypted-c
 import { MemoryBrowserIdentityStore } from '../../remote-web/src/transport/identity.js';
 import { setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 import { authenticatedRemoteFixture } from './fixtures/remote-account.js';
+import { installTestPinStorage, serverIdentityFetch } from './fixtures/remote-browser.js';
 
 async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promise<T> {
   const started = Date.now();
@@ -29,7 +30,7 @@ async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promi
 }
 
 async function enrollAndStart(context: ReturnType<typeof setupRemoteHarness>) {
-  const { handle, fetch: unauthenticated } = await makeRemoteTestApp({
+  const server = await makeRemoteTestApp({
     clock: {
       get now() {
         return Date.now();
@@ -37,74 +38,90 @@ async function enrollAndStart(context: ReturnType<typeof setupRemoteHarness>) {
       tick() {},
     },
   });
+  const { handle, fetch: unauthenticated } = server;
   const listened = await listenRemoteApp(handle);
-  const fetch = await authenticatedRemoteFixture(unauthenticated, context.identity, listened.url);
-  const identity = await context.identity.ensurePublic();
-  const created = await (await fetch('/api/v1/admin/host-enrollments', {
-    method: 'POST',
-    headers: {
-      authorization: 'Bearer admin-test-token',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ protocol: AUTH_PROTOCOL }),
-  })).json() as { enrollment_token: string };
-  const claimed = await (await fetch('/api/v1/host-enrollments/claim', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      protocol: AUTH_PROTOCOL,
-      enrollment_token: created.enrollment_token,
-      host_name: 'Office Mac',
-      host_version: '0.5.3',
-      host_public_key: identity.public_key,
-    }),
-  })).json() as {
-    host_id: string;
-    connector_refresh_secret: string;
-    server_identity: { public_key: { kty: 'EC'; crv: 'P-256'; x: string; y: string }; fingerprint: string };
-  };
-  await context.runtime.enrollment.recordClaim({
-    hostId: claimed.host_id,
-    serverUrl: listened.url,
-    serverIdentity: claimed.server_identity,
-    hostName: 'Office Mac',
-    refreshSecret: claimed.connector_refresh_secret,
-  });
-  await context.runtime.start();
-  return { handle, fetch, listened, hostId: claimed.host_id };
+  try {
+    const fetch = await authenticatedRemoteFixture(unauthenticated, context.identity, listened.url);
+    const identity = await context.identity.ensurePublic();
+    const created = await (await fetch('/api/v1/admin/host-enrollments', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer admin-test-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ protocol: AUTH_PROTOCOL }),
+    })).json() as { enrollment_token: string };
+    const claimed = await (await fetch('/api/v1/host-enrollments/claim', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        protocol: AUTH_PROTOCOL,
+        enrollment_token: created.enrollment_token,
+        host_name: 'Office Mac',
+        host_version: '0.5.3',
+        host_public_key: identity.public_key,
+      }),
+    })).json() as {
+      host_id: string;
+      connector_refresh_secret: string;
+      server_identity: { public_key: { kty: 'EC'; crv: 'P-256'; x: string; y: string }; fingerprint: string };
+    };
+    await context.runtime.enrollment.recordClaim({
+      hostId: claimed.host_id,
+      serverUrl: listened.url,
+      serverIdentity: claimed.server_identity,
+      hostName: 'Office Mac',
+      refreshSecret: claimed.connector_refresh_secret,
+    });
+    await context.runtime.start();
+    return { handle, fetch, listened, hostId: claimed.host_id, server };
+  } catch (error) {
+    listened.close();
+    throw error;
+  }
 }
 
 async function pairController(context: ReturnType<typeof setupRemoteHarness>) {
   const enrolled = await enrollAndStart(context);
+  const restorePinStorage = installTestPinStorage();
   const identity = new MemoryBrowserIdentityStore();
   const controller = createProductionController({
     baseUrl: enrolled.listened.url,
     publicOrigin: 'https://remote.test',
     wsUrl: enrolled.listened.wsUrl,
+    fetchFn: serverIdentityFetch(enrolled.server),
     identity,
     cache: new MemoryEncryptedHostCache(),
     autoRestore: false,
     platform: 'macOS',
     userAgent: 'GianRemoteUploadTest',
   });
-  controller.actions.startGitHubLogin!();
-  await waitUntil(() => controller.state.account?.userCode);
-  controller.actions.pollGitHubLogin!();
-  await waitUntil(() => controller.state.account?.status === 'signed_in');
-  const grant = await context.runtime.createPairingGrant();
-  controller.actions.submitPairingCode(grant.code);
-  const pending = await waitUntil(() => (
-    context.runtime.settingsState().pending_pairings
-      .find((row) => row.status === 'pending_confirmation') ?? null
-  ));
-  await context.runtime.confirmPairing(pending.id, 'confirm');
-  await waitUntil(() => (
-    controller.state.auth.kind === 'authenticated'
-    && controller.state.connection.kind === 'online'
-      ? controller.state
-      : null
-  ));
-  return { enrolled, controller };
+  try {
+    controller.actions.startGitHubLogin!();
+    await waitUntil(() => controller.state.account?.userCode);
+    controller.actions.pollGitHubLogin!();
+    await waitUntil(() => controller.state.account?.status === 'signed_in');
+    const grant = await context.runtime.createPairingGrant();
+    controller.actions.submitPairingCode(grant.code);
+    const pending = await waitUntil(() => (
+      context.runtime.settingsState().pending_pairings
+        .find((row) => row.status === 'pending_confirmation') ?? null
+    ));
+    assert.equal(globalThis.localStorage.getItem('gian.remote.server_identity_fingerprint'), enrolled.handle.services.identity.fingerprint);
+    await context.runtime.confirmPairing(pending.id, 'confirm');
+    await waitUntil(() => (
+      controller.state.auth.kind === 'authenticated'
+      && controller.state.connection.kind === 'online'
+        ? controller.state
+        : null
+    ));
+    return { enrolled, controller, restorePinStorage };
+  } catch (error) {
+    controller.close();
+    restorePinStorage();
+    enrolled.listened.close();
+    throw error;
+  }
 }
 
 async function contendEventLoop(signal: Promise<unknown>): Promise<void> {
@@ -220,6 +237,7 @@ test('1MiB and 20MiB Device uploads stay on content frames and honor the window'
     assert.ok(rawLimit * 4 / 3 + 256 <= MAX_CONTENT_CHUNK_PLAINTEXT_BYTES);
   } finally {
     paired?.controller.close();
+    paired?.restorePinStorage();
     context.runtime.close();
     paired?.enrolled.listened.close();
     teardownRemoteHarness(context);
@@ -259,6 +277,7 @@ test('session.page restores transcript after disconnect when live items are gone
     ), 20_000);
   } finally {
     paired?.controller.close();
+    paired?.restorePinStorage();
     context.runtime.close();
     paired?.enrolled.listened.close();
     teardownRemoteHarness(context);
