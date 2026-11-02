@@ -5,5 +5,12 @@
   "version": "1.5.1",
   "tag": "remote-protocol-v1.5.1",
   "filename": "gian-remote-protocol-1.5.1.tgz",
-  "status": "pending-publication"
+  "url": "https://github.com/RichToyo/Gian/releases/download/remote-protocol-v1.5.1/gian-remote-protocol-1.5.1.tgz",
+  "sourceCommit": "63c406ab38f82c388ee65cf1b20faf1ae751ab14",
+  "size": 103774,
+  "sha256": "5eb2f74671cf7ca743c6a9ea8c89655233c594d5ea021ab67c4a2755a1984c11",
+  "integrity": "sha512-/w8mOhM1dcQdmCn/AXfOcfN1bADgvxlm9i3nUYmztGSXbyLjMLsCGnLrNwussX/YY2eT989p7BDcOa5SxgtpmQ==",
+  "dependencies": {
+    "zod": "4.6.6"
+  }
 }
