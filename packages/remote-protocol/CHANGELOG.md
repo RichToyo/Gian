@@ -1,5 +1,10 @@
 # Remote Protocol package
 
+## [1.5.1]
+
+- Report Server identity rate limits as temporary failures and back off before
+  retrying, while retaining signature and fingerprint verification.
+
 ## [1.5.0]
 
 - Add device-based Server identity, native controller admission, and scoped

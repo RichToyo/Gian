@@ -7,6 +7,13 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.11] - 2026-11-01
+
+### Fixed
+
+- Reduce redundant Remote Server identity checks and back off when identity
+  requests are rate limited, instead of reporting a valid enrollment as rejected.
+
 ## [0.6.10] - 2026-10-29
 
 ### Added

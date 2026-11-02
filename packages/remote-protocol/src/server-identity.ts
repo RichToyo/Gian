@@ -11,6 +11,14 @@ import { bytesToBase64Url, base64UrlToBytes } from './serialize.js';
 import { parseClosed } from './validation.js';
 
 const PROOF_SKEW_MS = 5_000;
+const MAX_IDENTITY_RETRY_SECONDS = 60;
+const identityBackoffs = new WeakMap<typeof fetch, Map<string, number>>();
+
+function retrySeconds(response: Response): number {
+  const value = response.headers.get('retry-after');
+  if (!value || !/^\d+$/.test(value)) return MAX_IDENTITY_RETRY_SECONDS;
+  return Math.max(1, Math.min(MAX_IDENTITY_RETRY_SECONDS, Number(value)));
+}
 
 /** Verify a server-identity proof fetched over HTTPS.
  *
@@ -56,6 +64,15 @@ export async function discoverServerIdentity(input: {
 }): Promise<{ fingerprint: string; proof: ServerIdentityProofResult; firstUse: boolean }> {
   const fetchFn = input.fetchFn ?? globalThis.fetch;
   const now = input.now ?? Date.now;
+  const origin = new URL(input.origin).origin;
+  let backoffs = identityBackoffs.get(fetchFn);
+  const blockedUntil = backoffs?.get(origin) ?? 0;
+  if (blockedUntil > now()) {
+    throw new RemoteProtocolError('RATE_LIMITED', 'server identity temporarily rate limited', {
+      retryAfterSeconds: Math.ceil((blockedUntil - now()) / 1_000),
+    });
+  }
+  backoffs?.delete(origin);
   const nonceBytes = new Uint8Array(32);
   crypto.getRandomValues(nonceBytes);
   const nonce = bytesToBase64Url(nonceBytes);
@@ -79,6 +96,20 @@ export async function discoverServerIdentity(input: {
   } finally {
     clearTimeout(timer);
   }
+  if (response.status === 429) {
+    const seconds = retrySeconds(response);
+    if (!backoffs) {
+      backoffs = new Map();
+      identityBackoffs.set(fetchFn, backoffs);
+    }
+    if (backoffs.size >= 256) {
+      const oldest = backoffs.keys().next().value;
+      if (oldest !== undefined) backoffs.delete(oldest);
+    }
+    backoffs.set(origin, now() + seconds * 1_000);
+    throw new RemoteProtocolError('RATE_LIMITED', 'server identity temporarily rate limited', { retryAfterSeconds: seconds });
+  }
+  if (response.status >= 500) throw new RemoteProtocolError('HOST_OFFLINE', 'server identity temporarily unavailable');
   if (!response.ok) throw new RemoteProtocolError('AUTH_REQUIRED', 'server identity proof rejected');
   let body: unknown;
   try { body = await response.json(); } catch {

@@ -4,6 +4,7 @@ import {
   AUTH_PROTOCOL,
   RemoteProtocolError,
   SERVER_IDENTITY_PROOF_TTL_MS,
+  discoverServerIdentity,
   exportPublicJwk,
   generateP256SigningKeyPair,
   identityFingerprint,
@@ -93,4 +94,22 @@ test('server identity proof uses sorted canonical bytes and rejects replacement'
     }),
     (error: unknown) => error instanceof RemoteProtocolError && error.message === 'server identity proof signature is invalid',
   );
+});
+
+test('identity rate limits back off per origin and do not become authentication failures', async () => {
+  let now = 1_700_000_000_000;
+  let calls = 0;
+  const fetchFn: typeof fetch = async () => {
+    calls += 1;
+    return new Response(null, { status: calls === 3 ? 503 : 429, headers: { 'retry-after': '15' } });
+  };
+  const discover = (origin: string) => discoverServerIdentity({ origin, fetchFn, now: () => now });
+  await assert.rejects(() => discover('https://one.example'), { code: 'RATE_LIMITED' });
+  await assert.rejects(() => discover('https://one.example'), { code: 'RATE_LIMITED' });
+  assert.equal(calls, 1, 'the same origin is blocked locally during the cooldown');
+  await assert.rejects(() => discover('https://two.example'), { code: 'RATE_LIMITED' });
+  assert.equal(calls, 2, 'another origin has an independent cooldown');
+  now += 15_000;
+  await assert.rejects(() => discover('https://one.example'), { code: 'HOST_OFFLINE' });
+  assert.equal(calls, 3, 'the request resumes after cooldown');
 });

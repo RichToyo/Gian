@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichLogic/Gian-Dev",
-  "sourceCommit": "4ac291122b0827d93e2e60b3ed671bbee354d724",
+  "sourceCommit": "b68a4398effc9018a0e088949de2c09ced5e4997",
   "workingTree": false,
   "files": [
     {
@@ -599,7 +599,7 @@
     {
       "path": "CHANGELOG.md",
       "mode": 420,
-      "sha256": "8a3e63acd27fe9b556f06f48cbad8fff749cfa593e33bcffe5da6b37c09f6a13"
+      "sha256": "a36dd2d42158552911d3372eae6bb85722253443f16025d30b967179630d737d"
     },
     {
       "path": "CONTRIBUTING.md",
@@ -719,7 +719,7 @@
     {
       "path": "delivery/remote/CHANGELOG.md",
       "mode": 420,
-      "sha256": "6eeb9d0460d2e79a0820af898e7c0cc2da5621f03932ac02ec8b2bbfeb34a6f4"
+      "sha256": "487eddd258680d49411016a3bbcc29f7560574f058a39d08372dd813dec5c6ca"
     },
     {
       "path": "delivery/remote/compose.yaml",
@@ -734,7 +734,7 @@
     {
       "path": "delivery/remote/protocol-package.json",
       "mode": 420,
-      "sha256": "74a6d194de7ef47ef5ea01abe2148f678f56951d952d214d2004197efd0d9286"
+      "sha256": "686c75c37fe8a01d1cfe6309262b35361de17154ec34d71cbee538707ff030f6"
     },
     {
       "path": "delivery/remote/README.md",
@@ -744,7 +744,7 @@
     {
       "path": "delivery/remote/release.json",
       "mode": 420,
-      "sha256": "975d00931db2b41053bca7b8c5fa875fad5657104c0f7851647536ee3efc4ddb"
+      "sha256": "109298560792e5ad4b53eea818265ab45c2cc66e1dbc7ececcf51f4d9bf929e5"
     },
     {
       "path": "delivery/remote/runtime.env.example",
@@ -839,12 +839,12 @@
     {
       "path": "package.json",
       "mode": 420,
-      "sha256": "62c246ac0725d72bf0352102736b38152f43611e0a4849dea1d76e224f1593ab"
+      "sha256": "3a9cd049d4cebf5f0b7ea35d8718ba064e7d9404fe53ca9a3d1f487a01a28bd7"
     },
     {
       "path": "packages/chat-ui/package.json",
       "mode": 420,
-      "sha256": "4e2bcbeb4ef6ccfafc46f366edd1a72ff96b872da87206954c1a1da53ae82eb7"
+      "sha256": "08162f516ac354c19e96600c528e3184563c451d7022522ba53550921ade1be1"
     },
     {
       "path": "packages/chat-ui/src/approval-cards.tsx",
@@ -1104,7 +1104,7 @@
     {
       "path": "packages/desktop/package.json",
       "mode": 420,
-      "sha256": "1b8244296031f13944468434b4b1941b64380309ef3ac8faae1be96b97f27f75"
+      "sha256": "b68a1da6c32845fdeb6be8be8cd940f5c115151edc7d62176d5235046752dbcf"
     },
     {
       "path": "packages/desktop/README.md",
@@ -1964,7 +1964,7 @@
     {
       "path": "packages/host/package.json",
       "mode": 420,
-      "sha256": "2fe67b5668ca5b690d1c45012251b732a559069cd1e5f7fe48aada3b7792ba52"
+      "sha256": "a01dcd4e3110c513174a6bfd4234d796d9e85b8a17a531b0477580ba5ca8343b"
     },
     {
       "path": "packages/host/scripts/fix-node-pty-permissions.cjs",
@@ -2434,7 +2434,7 @@
     {
       "path": "packages/host/src/remote/controller-client.ts",
       "mode": 420,
-      "sha256": "c0847751377d5a24c2059bd16971b05a92b3859cefd00bf28d94996a22c9c070"
+      "sha256": "67624f04c955875b814707976676f4750dac469dd770cc1489eb536e7750e7ef"
     },
     {
       "path": "packages/host/src/remote/controller-content.ts",
@@ -2444,7 +2444,7 @@
     {
       "path": "packages/host/src/remote/controller-hub.ts",
       "mode": 420,
-      "sha256": "727e28ff8a568898de490bedacb9ee20f676249baab9e70b3779690499f29230"
+      "sha256": "98ce2a0301448ef8e49166b14f778e9db0b7fba73bfc4fa44fb98d4acb4b1907"
     },
     {
       "path": "packages/host/src/remote/controller-routes.ts",
@@ -2569,7 +2569,7 @@
     {
       "path": "packages/host/src/remote/settings-routes.ts",
       "mode": 420,
-      "sha256": "346c8f26d266ca0da4d436e2488676d56ee0336642149635a0a6bec95f641a59"
+      "sha256": "4f37909e5cc6e3ab982f0eec1bca6963bbd745e48e98584f2a985266dbfc4749"
     },
     {
       "path": "packages/host/src/runtime/activation-service.ts",
@@ -4244,12 +4244,12 @@
     {
       "path": "packages/host/test/remote-controller-client.test.ts",
       "mode": 420,
-      "sha256": "786ef1645a0dfc54ad6fe9093357a1a205b1a64771c966300f1bac3cfd5b9117"
+      "sha256": "84185139743e49659cc1fb606677be3f7a3e81eed526f2aa1c512cf4c13136f5"
     },
     {
       "path": "packages/host/test/remote-controller-hub.test.ts",
       "mode": 420,
-      "sha256": "89951c04141b5144c26b7c14a255aad6e49fcdd7628c4aed2dd953addab89090"
+      "sha256": "aa0ba193557ee448aa27420bfb9d134899a27e41d78b58ea8f78d5b7e30dda99"
     },
     {
       "path": "packages/host/test/remote-controller-routes.test.ts",
@@ -6974,12 +6974,12 @@
     {
       "path": "packages/remote-protocol/CHANGELOG.md",
       "mode": 420,
-      "sha256": "7709c17f1d8d140469e114e88dc939c2e604cf07f4275099feb5b248860880d3"
+      "sha256": "8723299a4d3f73348e1f55c3f0382993796d6a8601c22b1fba736e3e41f972f8"
     },
     {
       "path": "packages/remote-protocol/package.json",
       "mode": 420,
-      "sha256": "7071d4758cc1e00c057643922c5b1ee486034a0a8b478f28577b21620bfea5c7"
+      "sha256": "1a2584b8a34c844e36ef7e041830258d057d7476e361098b56b69447f55deca2"
     },
     {
       "path": "packages/remote-protocol/src/account.ts",
@@ -7094,7 +7094,7 @@
     {
       "path": "packages/remote-protocol/src/server-identity.ts",
       "mode": 420,
-      "sha256": "def76d77f8bc00eca3532975ca8ed2e1abef0a14d8b9e60387bc2d1df4d54254"
+      "sha256": "38469e26686adbc0bac5196d7ba74acfad9e1a3c7de28b3008a94615fc310b49"
     },
     {
       "path": "packages/remote-protocol/src/validation.ts",
@@ -7169,7 +7169,7 @@
     {
       "path": "packages/remote-protocol/test/server-identity.test.ts",
       "mode": 420,
-      "sha256": "427238f59339229680c4b5f59a39cb7bb3631832f99119bf9b03589ee7c30429"
+      "sha256": "f58bdad9ef7d4b2ddb486d0abb85bf4f214e3d01ac374eebb5c6e9dc4300420c"
     },
     {
       "path": "packages/remote-protocol/test/snapshot.test.ts",
@@ -7239,7 +7239,7 @@
     {
       "path": "packages/remote-server/src/app.ts",
       "mode": 420,
-      "sha256": "236d6176dd56493817dec8c24e22eb3355040063893e05e551f89e1d57f9cd15"
+      "sha256": "9d0fdbcae2d5e6a1fb9d0cb263adb82c76950337c97014adca045e85b1c002f7"
     },
     {
       "path": "packages/remote-server/src/auth/account-login.ts",
@@ -7274,7 +7274,7 @@
     {
       "path": "packages/remote-server/src/auth/rate-limit.ts",
       "mode": 420,
-      "sha256": "36d9d7d718c8ed69d55b1d46d0dbcc7f26ad3605c0ce8f438611022c5cd87c1b"
+      "sha256": "e7a4ec7670ce0fe49ad59304b152894f50364564296c570c5d96cb5fd66b76d1"
     },
     {
       "path": "packages/remote-server/src/auth/signatures.ts",
@@ -7414,7 +7414,7 @@
     {
       "path": "packages/remote-server/test/limits.test.ts",
       "mode": 420,
-      "sha256": "81fee7f6dc20ad1ba9c6c4e7ee71f3a28df45f8233aa27dd7d582156ec710534"
+      "sha256": "1962e90c241d5315f2594978a4ab0ffe131f2fc3b2dae445a7a665d02ca01ecc"
     },
     {
       "path": "packages/remote-server/test/migrations.test.ts",
@@ -7449,7 +7449,7 @@
     {
       "path": "packages/remote-server/test/server-identity.test.ts",
       "mode": 420,
-      "sha256": "979e6a1dacae77a50bdffed31eba473dfcd6247c159e1392738c0c0d33bd429c"
+      "sha256": "5a33fa750059a62564a0f720798cd0ebc1119ca00c0780ed4a896151399f1f53"
     },
     {
       "path": "packages/remote-server/test/sessions.test.ts",
@@ -7949,7 +7949,7 @@
     {
       "path": "packages/shared/package.json",
       "mode": 420,
-      "sha256": "b57f63d7b5ba08c764e08f10931589334ea7d19ef46f89ebe527776c142e12b8"
+      "sha256": "228932b04220de7ee6028b27df4243ebccce43a1a5e250f54ebe60dff0a291a4"
     },
     {
       "path": "packages/shared/src/action.ts",
@@ -8229,7 +8229,7 @@
     {
       "path": "packages/tool-cli/package.json",
       "mode": 420,
-      "sha256": "d933cba5919cbb1f57c5b0b80715475413c170444c2529673c858da6b1a63ee1"
+      "sha256": "cc1f9211123fbbf3f10c94ea131ded117a406773c3ca9b030765a0c7a4702c84"
     },
     {
       "path": "packages/tool-cli/skill/gian-tool/scripts/gian-tool-mcp",
@@ -8279,7 +8279,7 @@
     {
       "path": "packages/tool-mcp/package.json",
       "mode": 420,
-      "sha256": "d31fae272ba3492826459ebf18aa7573febfc4586e5598ae706de31c333bcb1c"
+      "sha256": "23c9c69c53af3111cd575d39ec888cc6038015bf3ff358e6002ad265dd09fd6e"
     },
     {
       "path": "packages/tool-mcp/src/adapter.ts",
@@ -8344,7 +8344,7 @@
     {
       "path": "packages/web/package.json",
       "mode": 420,
-      "sha256": "c92e3ea303b1e158a8bf2a5af238cb41e9d426e8815ca3a47835d484d73a6f53"
+      "sha256": "bc0ba0ec6d06bcbbc8e6b84bd701908999be911f629294ceba487f54d2666349"
     },
     {
       "path": "packages/web/public/gian-icon.svg",

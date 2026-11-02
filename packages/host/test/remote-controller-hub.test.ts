@@ -6,6 +6,29 @@ import type { RemoteControllerClient, RemoteControllerEnvironment } from '../src
 import { RemoteControllerHub } from '../src/remote/controller-hub.js';
 import { command, seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 
+test('background synchronization backs off for a full rate-limit window', async t => {
+  const f = setupRemoteHarness();
+  const hub = new RemoteControllerHub(f.db, { broadcast() {} } as unknown as WsBroadcaster, f.identity);
+  try {
+    const id = generateCanonicalId();
+    f.db.prepare('INSERT INTO sessions (id, executor, native_session_id) VALUES (?, ?, ?)')
+      .run(id, 'codex', generateCanonicalId());
+    hub.bindings.bind({ local_session_id: id, target: {
+      server_origin: 'https://remote.test', server_identity_fingerprint: 'a'.repeat(64),
+      account_id: '42', host_id: generateCanonicalId(), remote_session_id: generateCanonicalId(),
+    } });
+    let calls = 0;
+    t.mock.method(hub, 'sync', async () => { calls += 1; throw new RemoteProtocolError('RATE_LIMITED', 'limited'); });
+    hub.start();
+    const deadline = Date.now() + 5_000;
+    const schedule = (hub as unknown as { scheduled: Map<string, { next: number }> }).scheduled;
+    while (!schedule.has(id) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(calls, 1);
+    const next = schedule.get(id)?.next ?? 0;
+    assert.ok(next - Date.now() > 58_000, 'rate-limited synchronization backs off for one minute');
+  } finally { hub.close(); teardownRemoteHarness(f); }
+});
+
 test('Remote ownership probes let local Side Chat sends through without weakening binding validation', async () => {
   const f = setupRemoteHarness();
   const hub = new RemoteControllerHub(f.db, { broadcast() {} } as unknown as WsBroadcaster, f.identity);

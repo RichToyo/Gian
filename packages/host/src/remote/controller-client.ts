@@ -96,6 +96,16 @@ export class RemoteControllerClient {
   }
 
   async connect(): Promise<void> {
+    if (this.connected) return;
+    if (this.connecting) return this.connecting;
+    this.close();
+    const epoch = this.epoch;
+    const run = this.connectVerified(epoch);
+    this.connecting = run;
+    try { await run; } finally { if (this.connecting === run) this.connecting = null; }
+  }
+
+  private async connectVerified(epoch: number): Promise<void> {
     try {
       const discovered = await discoverServerIdentity({
         origin: this.environment.server_origin,
@@ -106,15 +116,11 @@ export class RemoteControllerClient {
         throw new RemoteProtocolError('AUTH_REQUIRED', 'server identity changed');
       }
     } catch (error) {
-      if (error instanceof RemoteProtocolError && error.message === 'server identity changed') this.close();
+      if (this.epoch === epoch && error instanceof RemoteProtocolError && error.message === 'server identity changed') this.close();
       throw error;
     }
-    if (this.connected) return;
-    if (this.connecting) return this.connecting;
-    this.close();
-    const run = this.connectOnce(this.epoch);
-    this.connecting = run;
-    try { await run; } finally { if (this.connecting === run) this.connecting = null; }
+    this.assertEpoch(epoch);
+    await this.connectOnce(epoch);
   }
 
   request(method: RemoteMethod, params: unknown, commandId = generateUuidV7()): Promise<unknown> {

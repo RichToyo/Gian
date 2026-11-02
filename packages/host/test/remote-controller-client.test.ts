@@ -55,7 +55,7 @@ async function until(check: () => boolean) {
   }
 }
 
-async function fixture(onConnectionChange?: (connected: boolean) => void) {
+async function fixture(onConnectionChange?: (connected: boolean) => void, identityGate?: Promise<void>) {
   const server = await makeRemoteTestApp();
   const host = await enrollHost(server.fetch);
   const device = await pairDevice(server.fetch, host.accessToken, host.hostId);
@@ -69,15 +69,55 @@ async function fixture(onConnectionChange?: (connected: boolean) => void) {
     installationId: device.accountPeerId, accountId: '42', accountLogin: 'test-account', token: device.accountToken,
     expiresAt: Date.now() + 60_000 }, 'controller');
   const relays: Relay[] = [];
-  const fetchImpl: typeof fetch = async (url, init) => server.fetch(new URL(String(url)).pathname, init);
+  let identityRequests = 0;
+  const fetchImpl: typeof fetch = async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    if (path === '/api/v1/server-identity') {
+      identityRequests += 1;
+      await identityGate;
+    }
+    return server.fetch(path, init);
+  };
   const client = new RemoteControllerClient({ id: generateCanonicalId(), name: 'test', server_origin: origin,
     server_identity_fingerprint: fingerprint, host_id: host.hostId, browser_id: device.browserId,
     device_id: device.deviceId, device_public_key_json: JSON.stringify(public_key), crypto_connection_id: device.cryptoConnectionId,
     host_public_key_json: null, pairing_id: null, created_at: Date.now() }, identity, () => {}, fetchImpl,
   options => { const relay = new Relay(options); relays.push(relay); return relay; }, onConnectionChange);
-  return { client, relays, controller: () => server.handle.services.repos.getController(device.browserId),
+  return { client, relays, identityRequests: () => identityRequests,
+    controller: () => server.handle.services.repos.getController(device.browserId),
     close() { client.close(); server.handle.shutdown(); } };
 }
+
+test('controller shares connection setup, reuses a live relay, and verifies the pin again after close', async () => {
+  const f = await fixture();
+  try {
+    await Promise.all(Array.from({ length: 8 }, () => f.client.connect()));
+    assert.equal(f.identityRequests(), 1, 'concurrent callers share one identity proof');
+    assert.equal(f.relays.length, 1);
+    await Promise.all(Array.from({ length: 20 }, () => f.client.connect()));
+    assert.equal(f.identityRequests(), 1, 'an established relay does not re-fetch identity');
+    f.client.close();
+    f.client.environment.server_identity_fingerprint = 'b'.repeat(64);
+    await assert.rejects(() => f.client.connect(), { code: 'AUTH_REQUIRED', message: 'server identity changed' });
+    assert.equal(f.identityRequests(), 2, 'a new relay still verifies the pinned identity');
+    assert.equal(f.relays.length, 1, 'a changed pin never opens a relay');
+  } finally { f.close(); }
+});
+
+test('closing during identity verification fences the in-flight connection', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const f = await fixture(undefined, gate);
+  try {
+    const attempt = f.client.connect();
+    const rejected = assert.rejects(attempt, { code: 'HOST_OFFLINE', message: 'remote connection superseded' });
+    await until(() => f.identityRequests() === 1);
+    f.client.close();
+    release();
+    await rejected;
+    assert.equal(f.relays.length, 0, 'a closed generation cannot open a relay');
+  } finally { release(); f.close(); }
+});
 
 test('Host offline invalidates live relay crypto, rejects uncertain writes, and the next request negotiates anew', async () => {
   const f = await fixture();

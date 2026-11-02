@@ -21,7 +21,10 @@ export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): 
       }
       if (error instanceof RemoteAccountRetryError
         || (error instanceof RemoteProtocolError && ['HOST_OFFLINE', 'RATE_LIMITED'].includes(error.code))) {
-        context.header('Retry-After', String(error instanceof RemoteAccountRetryError ? error.retryAfterSeconds : 5));
+        const retryAfter = error instanceof RemoteAccountRetryError ? error.retryAfterSeconds
+          : error.code === 'RATE_LIMITED' && typeof error.details?.retryAfterSeconds === 'number'
+            ? Math.max(1, Math.min(60, error.details.retryAfterSeconds)) : 5;
+        context.header('Retry-After', String(retryAfter));
         return context.json({ error: 'remote_unavailable' }, 503);
       }
       if (context.req.path === '/api/remote/enroll'

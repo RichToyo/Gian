@@ -104,9 +104,11 @@ export class RemoteControllerHub {
           if (this.closed) return;
           const active = this.replicas.snapshot(id)?.session.active_turn;
           this.scheduled.set(id, { failures: 0, next: Date.now() + (active ? 1000 : 15_000) });
-        }).catch(() => {
+        }).catch(error => {
           const failures = (this.scheduled.get(id)?.failures ?? 0) + 1;
-          this.scheduled.set(id, { failures, next: Date.now() + Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)) });
+          const delay = error instanceof RemoteProtocolError && error.code === 'RATE_LIMITED'
+            ? 60_000 : Math.min(30_000, 1000 * 2 ** Math.min(failures, 5));
+          this.scheduled.set(id, { failures, next: Date.now() + delay });
         });
       }
     }, 1000);
