@@ -1,0 +1,1357 @@
+import {
+  COMMAND_RETENTION_MS,
+  COMMAND_TIMESTAMP_SKEW_MS,
+  MAX_PROXY_LOGO_BYTES,
+  REMOTE_METHODS,
+  RemoteProtocolError,
+  SNAPSHOT_PART_BYTES,
+  SNAPSHOT_SPLIT_THRESHOLD_BYTES,
+  canonicalJson,
+  isRemoteErrorCode,
+  parseRemoteMethodParams,
+  redactRemoteConversationText,
+  redactRemoteError,
+  splitSnapshotParts,
+  uuidV7TimestampMs,
+  type CommandRequest,
+  type CommandStatusResult,
+  type RemoteErrorCode,
+  type RemoteMethod,
+  type RemoteSession,
+  type RemoteStateSnapshot,
+  type RemoteTranslationState,
+  type StateSnapshotPart,
+} from '@gian/remote-protocol';
+import { writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import type {
+  ComposerDocument,
+  GianToolCreateOptions,
+  GianToolResult,
+  InputItem,
+  MessageContextItem,
+  TranslationPreferences,
+  TranslationRecord,
+} from '@gian/shared';
+import { DEFAULT_TRANSLATION_PREFERENCES } from '@gian/shared';
+import { ensureSessionAttachmentDir } from '../storage/attachments.js';
+import type { TranslationService } from '../translation/service.js';
+import type { GianToolAccessController } from '../tool/access.js';
+import type { GianToolActor } from '../tool/credentials.js';
+import type { GianToolService } from '../tool/service.js';
+import type { GianToolMethod } from '@gian/shared';
+import type { SessionManager } from '../session/manager.js';
+import type { Db } from '../storage/db.js';
+import type { RemoteAuditCategory, RemoteMutationAudit } from './audit.js';
+import type { RemoteAttachmentService } from './attachment-stream.js';
+import type { RemoteDeviceRecord } from './device-store.js';
+import type { RemoteFileRefService } from './file-ref.js';
+import type { RemoteExecutionJournal } from './execution-journal.js';
+import type { RemoteDirectory } from './directory.js';
+import { RemoteProjector, assertNoLeak, projectRemoteTranslation, projectRemoteTranslationState, projectReadyTranslationState, remoteInteractionResourceId, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues, REMOTE_TRANSLATION_INLINE_TEXT_LIMIT } from './projection.js';
+
+const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function hostServiceTier(value: 'standard' | 'fast'): 'fast' | null {
+  return value === 'fast' ? 'fast' : null;
+}
+
+export interface RemoteCommandAdapterDeps {
+  gitRead?: (params: unknown) => Promise<unknown>;
+  executions?: RemoteExecutionJournal;
+  db: Db;
+  access: GianToolAccessController;
+  tool: GianToolService;
+  sessions: SessionManager;
+  projector: RemoteProjector;
+  attachments: RemoteAttachmentService;
+  fileRefs: RemoteFileRefService;
+  audit: RemoteMutationAudit;
+  hostGeneration: string;
+  directory: RemoteDirectory;
+  snapshot: (device: RemoteDeviceRecord, options: { wireFeatures: readonly string[] }) => unknown;
+  /** Oversized state.refresh payloads follow a pending snapshot receipt. */
+  pushSnapshotParts?: (deviceId: string, part: StateSnapshotPart) => Promise<void>;
+  listAgents?: () => Array<{ id: string; proxy?: string; pluginId?: string }>;
+  onSubscribe?: (deviceId: string, sessionId: string) => void;
+  /** Conversation translation (wire.conversation_translation). The adapter
+   *  reuses the exact same service entry points as the local HTTP routes. */
+  translation?: TranslationService;
+  /** Live Host translation preferences (loadConfig at call time). */
+  translationPreferences?: () => TranslationPreferences;
+  /** Settled remote translation request fan-out. Success carries the
+   *  persisted record (projected into the minimal DTO by the caller);
+   *  failure carries a redacted, display-safe error. */
+  onTranslationSettled?: (sessionId: string, requestId: string, outcome: { record?: TranslationRecord; error?: string }) => void;
+  /** Branding bytes for one Proxy (manifest branding.logo). Null when the
+   *  Proxy or the variant is unknown. Read-only; carries no device grant. */
+  proxyLogo?: (proxy: string, variant: 'light' | 'dark') => Promise<{
+    bytes: Uint8Array;
+    mediaType: 'image/png' | 'image/webp';
+    sha256: string;
+  } | null>;
+}
+
+/** Per-connection command execution context. `wireFeatures` carries the
+ *  negotiated feature ids (empty for legacy no-hello clients) so responses
+ *  never carry fields a closed-schema peer would reject. */
+export interface RemoteCommandHooks {
+  snapshotParts?: boolean;
+  wireFeatures?: readonly string[];
+  onAccepted?: () => Promise<void>;
+  onResultSent?: () => Promise<void>;
+}
+
+export class RemoteCommandAdapter {
+  /** In-flight translation requests by `sessionId:requestId`, so a retried
+   *  command (or a second view) never starts a duplicate model call. */
+  private readonly translationInflight = new Set<string>();
+  /** Bounded settled outcomes for translation.request_status recovery (LRU
+   *  via Map insertion order). */
+  private readonly translationOutcomes = new Map<string, { record?: TranslationRecord; error?: string }>();
+
+  constructor(private readonly deps: RemoteCommandAdapterDeps) {}
+
+  async execute(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    hooks?: RemoteCommandHooks,
+  ): Promise<{
+    ok: boolean;
+    data?: unknown;
+    error?: { code: string; message: string };
+  }> {
+    return this.deps.directory.run(device.id, hooks?.wireFeatures ?? [], async () => {
+      try {
+        if (this.deps.directory.negotiated(device.id)) device = this.deps.directory.currentDevice(device);
+        return await this.executeScoped(device, command, hooks);
+      } catch (error) { return { ok: false, error: asRemoteError(mapError(error)) }; }
+    });
+  }
+
+  private async executeScoped(device: RemoteDeviceRecord, command: CommandRequest, hooks?: RemoteCommandHooks): Promise<{
+    ok: boolean; data?: unknown; error?: { code: string; message: string };
+  }> {
+    let directoryClaimed = false;
+    let dispatched = false;
+    let data: unknown;
+    try {
+      const claimed = this.claim(device, command);
+      if (claimed.kind === 'done') return claimed.result;
+      directoryClaimed = true;
+      await hooks?.onAccepted?.();
+      data = await this.dispatch(device, command, claimed.params, hooks);
+      dispatched = true;
+      this.authorizeDirectoryResult(device, command.method, data);
+      assertNoLeak(data);
+      if (isMutation(command.method)) {
+        this.upsertLedger(device.id, command, 'succeeded', this.createReceipt(device, command, data) ?? data);
+        this.record(device, command, 'succeeded');
+      }
+      return { ok: true, data };
+    } catch (error) {
+      const mapped = asRemoteError(mapError(error));
+      const toolSucceeded = directoryClaimed && isMutation(command.method)
+        && this.deps.tool.lookupRequest(this.actor(device).callerId, command.command_id)?.status === 'succeeded';
+      const effectDispatched = dispatched || toolSucceeded;
+      const outcome = effectDispatched && isMutation(command.method)
+        ? asRemoteError({ code: 'UNKNOWN_OUTCOME', message: 'command outcome is uncertain' }) : mapped;
+      if (isMutation(command.method)) {
+        const prior = this.ledger(device.id, command.command_id);
+        const frozen = prior ? this.directoryCreateReceipt(prior) : null;
+        const state = dispatched && data !== undefined && isPostAuthorizationFailure(mapped.code) ? 'succeeded'
+          : mapped.code === 'UNKNOWN_OUTCOME' || effectDispatched ? 'unknown_outcome' : 'failed';
+        if (!frozen || directoryClaimed) this.upsertLedger(device.id, command, state,
+          state === 'succeeded' ? this.createReceipt(device, command, data) ?? data : frozen ?? this.createReceipt(device, command), outcome);
+        this.record(device, command, categoryFor(outcome.code));
+      }
+      return { ok: false, error: outcome };
+    }
+  }
+
+  private claim(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+  ):
+    | { kind: 'done'; result: { ok: boolean; data?: unknown; error?: { code: string; message: string } } }
+    | { kind: 'accepted'; params: unknown } {
+    if (device.revokedAt) return { kind: 'done', result: fail('DEVICE_REVOKED', 'device is revoked') };
+    if (this.commandExpired(command.command_id)) {
+      this.record(device, command, 'expired');
+      return { kind: 'done', result: fail('COMMAND_EXPIRED', 'command_id is outside the 90-day window') };
+    }
+    const prior = this.ledger(device.id, command.command_id);
+    if (prior && this.directoryCreateReceipt(prior)) {
+      const receipt = this.directoryCreateReceipt(prior)!;
+      if (!this.deps.directory.negotiated(device.id)) {
+        throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'directory create recovery was not negotiated');
+      }
+      if (command.method !== 'session.create' || canonicalJson(parseRemoteMethodParams(command.method, command.params)) !== canonicalJson(receipt.params)) {
+        throw new RemoteProtocolError('IDEMPOTENCY_CONFLICT', 'create identity was already used with different input');
+      }
+      const recovered = this.recoverDirectoryCreate(device, prior);
+      if (recovered) return { kind: 'done', result: { ok: true, data: recovered } };
+    }
+    if (prior?.state === 'succeeded' || prior?.state === 'failed' || prior?.state === 'unknown_outcome') {
+      return { kind: 'done', result: this.reproject(device, prior) };
+    }
+    const params = parseRemoteMethodParams(command.method, command.params);
+    this.rejectCraftedFields(command.params);
+    if (command.method !== 'directory.list' && command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read'
+      && command.method !== 'proxy.logo' && command.method !== 'execution.list' && command.method !== 'execution.sync'
+      && command.method !== 'translation.state' && command.method !== 'translation.result_text'
+      && command.method !== 'translation.request_status' && command.method !== 'translation.cancel') {
+      this.upsertLedger(device.id, command, 'accepted', this.createReceipt(device, command));
+    }
+    return { kind: 'accepted', params };
+  }
+
+  // A pending receipt is not a replacement snapshot. The client retains its
+  // state and command waiter until every part has been verified.
+  private async refresh(
+    device: RemoteDeviceRecord,
+    hooks?: Pick<RemoteCommandHooks, 'onResultSent' | 'snapshotParts' | 'wireFeatures'>,
+  ): Promise<unknown> {
+    const snapshot = this.deps.snapshot(device, { wireFeatures: hooks?.wireFeatures ?? [] }) as RemoteStateSnapshot;
+    const payloadBytes = new TextEncoder().encode(canonicalJson(snapshot)).byteLength;
+    if (payloadBytes <= SNAPSHOT_SPLIT_THRESHOLD_BYTES) {
+      return snapshot;
+    }
+    if (hooks?.snapshotParts === false) {
+      throw new RemoteProtocolError('PROTOCOL_VERSION_UNSUPPORTED', 'The remote client did not negotiate snapshot parts');
+    }
+    if (!this.deps.pushSnapshotParts || !hooks) {
+      throw new RemoteProtocolError('FRAME_TOO_LARGE', 'snapshot part transport is unavailable');
+    }
+    const parts = await splitSnapshotParts(snapshot, SNAPSHOT_PART_BYTES);
+    hooks.onResultSent = async () => {
+      for (const part of parts) {
+        await this.deps.pushSnapshotParts!(device.id, part);
+      }
+    };
+    return { type: 'state.snapshot.pending', snapshot_id: snapshot.snapshot_id };
+  }
+
+  private async dispatch(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    params: unknown,
+    hooks?: RemoteCommandHooks,
+  ): Promise<unknown> {
+    const method = command.method;
+    switch (method) {
+      case 'directory.list':
+        return this.deps.directory.list(device, params, hooks?.wireFeatures ?? []);
+      case 'execution.create':
+        return this.createExecution(device, command, params as Record<string, unknown>);
+      case 'catalog.agent':
+        return this.agentCatalog(device, params as Record<string, unknown>);
+      case 'execution.configure': {
+        const input = params as { session_id: string; session_revision: string; option_id: string;
+          value: import('@gian/shared').ConfigValue; binding: 'session' | 'turn' };
+        this.deps.executions?.authorize(input.session_id, device);
+        if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution unavailable');
+        this.assertSessionRevision(input.session_id, input.session_revision);
+        await this.toolCall(device, command, 'session.update', { session_id: input.session_id,
+          expected_session_revision: input.session_revision, config: { [input.binding]: { [input.option_id]: input.value } } });
+        return this.deps.executions.session(input.session_id, device);
+      }
+      case 'execution.list':
+        if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is unavailable');
+        return this.deps.executions.list(device, (params as { after?: string }).after);
+      case 'execution.sync':
+        if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is unavailable');
+        return this.deps.executions.sync(device, params as { session_id: string; after: number; stream_id?: string },
+          { detail: hooks?.wireFeatures?.includes('wire.execution_detail_v1') === true });
+      case 'catalog.read':
+        return this.catalog(device, command);
+      case 'state.refresh':
+        return this.refresh(device, hooks);
+      case 'session.subscribe':
+        return this.subscribe(device, command, params as { session_id: string }, hooks);
+      case 'session.page':
+        return this.page(device, params as { session_id: string; turns?: number; cursor?: string }, hooks);
+      case 'command.status':
+        return this.status(device, params as { command_id: string });
+      case 'session.create':
+        return this.createSession(device, command, params as Record<string, unknown>);
+      case 'session.update':
+        return this.updateSession(device, command, params as Record<string, unknown>);
+      case 'session.send':
+        return this.send(device, command, params as Record<string, unknown>, hooks);
+      case 'session.stop':
+        return this.stop(device, command, params as Record<string, unknown>);
+      case 'queue.update':
+      case 'queue.remove':
+      case 'queue.clear':
+      case 'queue.send_now':
+        return this.queue(device, command, method, params as Record<string, unknown>);
+      case 'interaction.respond':
+        return this.respond(device, command, params as Record<string, unknown>);
+      case 'translation.state':
+        return this.translationState(device, params as { session_id: string }, hooks);
+      case 'translation.set_auto':
+        return this.translationSetAuto(device, params as { session_id: string; enabled: boolean; expected_enabled?: boolean }, hooks);
+      case 'translation.request':
+        return this.translationRequest(device, params as {
+          session_id: string; request_id: string; purpose: 'send' | 'read';
+          text: string; source_id?: string; composer_document?: unknown;
+        }, hooks);
+      case 'translation.cancel':
+        return this.translationCancel(device, params as { session_id: string; request_id: string }, hooks);
+      case 'translation.result_text':
+        return this.translationResultText(device, params as { session_id: string; record_id: string; offset?: number }, hooks);
+      case 'translation.request_status':
+        return this.translationRequestStatus(device, params as { session_id: string; request_id: string }, hooks);
+      case 'file.preview':
+        return this.preview(device, params as { handle_id: string });
+      case 'file.resolve': {
+        const input = params as { session_id: string; reference: string };
+        this.assertVisibleSession(input.session_id, device);
+        return this.deps.fileRefs.resolveFile({ deviceId: device.id, sessionId: input.session_id, reference: input.reference });
+      }
+      case 'file.tree': {
+        const input = params as { session_id: string; directory: string; after?: string };
+        this.assertVisibleSession(input.session_id, device);
+        return this.deps.fileRefs.tree({ sessionId: input.session_id, directory: input.directory, after: input.after, deviceId: device.id });
+      }
+      case 'file.list': {
+        const input = params as { session_id: string; after?: string };
+        this.assertVisibleSession(input.session_id, device);
+        return this.deps.fileRefs.listFiles(input.session_id, input.after, device.id);
+      }
+      case 'git.read': {
+        const input = params as { session_id: string };
+        if (!this.deps.executions || !this.deps.gitRead) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'remote Git unavailable');
+        this.deps.executions.authorize(input.session_id, device);
+        return this.deps.gitRead(params);
+      }
+      case 'proxy.logo':
+        return this.proxyLogo(params as { proxy: string; variant: 'light' | 'dark' });
+      default: {
+        const _exhaustive: never = method;
+        throw new RemoteProtocolError('INVALID_FRAME', `unsupported method ${String(_exhaustive)}`);
+      }
+    }
+  }
+
+  private async catalog(device: RemoteDeviceRecord, command: CommandRequest): Promise<unknown> {
+    const result = await this.toolCall(device, command, 'catalog.get_create_options', {});
+    const data = result.data as GianToolCreateOptions;
+    const tasks = this.deps.db.prepare(
+      `SELECT id, name, status FROM tasks WHERE status = 'open'`,
+    ).all() as Array<{ id: string; name: string; status: string }>;
+    return this.deps.projector.projectCatalog({ ...data, tasks });
+  }
+
+  private async proxyLogo(params: { proxy: string; variant: 'light' | 'dark' }): Promise<unknown> {
+    const logo = await this.deps.proxyLogo?.(params.proxy, params.variant);
+    if (!logo || logo.bytes.length === 0 || logo.bytes.length > MAX_PROXY_LOGO_BYTES) {
+      throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'proxy logo not found');
+    }
+    return {
+      media_type: logo.mediaType,
+      data_base64: Buffer.from(logo.bytes).toString('base64'),
+      sha256: logo.sha256,
+    };
+  }
+
+  private async createExecution(device: RemoteDeviceRecord, command: CommandRequest, params: Record<string, unknown>): Promise<unknown> {
+    if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution unavailable');
+    if (params['catalog_revision'] !== this.deps.projector.catalogRevision()) {
+      throw precondition('catalog_revision', this.deps.projector.catalogRevision());
+    }
+    const result = await this.toolCall(device, command, 'session.create', {
+      workspace_id: params['workspace_id'], agent_id: this.resolveAgentId(String(params['agent_id'])),
+      ...(params['name'] ? { name: params['name'] } : {}),
+      config: {
+        ...(params['session_config'] ? { session: params['session_config'] } : {}),
+        ...(params['turn_config'] ? { turn: params['turn_config'] } : {}),
+        ...(params['model'] ? { model: params['model'] } : {}),
+        ...(params['thinking'] ? { thinking_effort: params['thinking'] } : {}),
+        ...(params['service_tier'] ? { service_tier: hostServiceTier(params['service_tier'] as 'standard' | 'fast') } : {}),
+        ...(params['approval_mode'] ? { approval_mode: params['approval_mode'] } : {}),
+      },
+    });
+    const sessionId = (result.data as { session: { id: string } }).session.id;
+    this.deps.executions.register(sessionId, device);
+    return this.deps.executions.session(sessionId, device);
+  }
+
+  private async agentCatalog(_device: RemoteDeviceRecord, params: Record<string, unknown>): Promise<unknown> {
+    const id = this.resolveAgentId(String(params['agent_id']));
+    const agent = this.deps.listAgents?.().find(item => item.id === id);
+    // pluginId is the live identity; a null legacy proxy alias is a
+    // pure-plugin Agent, not an unavailable one.
+    if (!agent) throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'Agent unavailable');
+    const pluginId = agent.pluginId ?? agent.proxy;
+    if (!pluginId) throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'Agent unavailable');
+    const inspected = await this.deps.sessions.agentCapabilities(pluginId, id);
+    const resolveSupported = inspected.capabilities['catalog.resolve'] !== undefined;
+    const catalog = params['catalog_revision'] && resolveSupported
+      ? await this.deps.sessions.resolveAgentCatalog(pluginId, id, {
+        catalogRevision: String(params['catalog_revision']),
+        sessionConfig: (params['session_config'] ?? {}) as Record<string, import('@gian/shared').ConfigValue>,
+        turnConfig: (params['turn_config'] ?? {}) as Record<string, import('@gian/shared').ConfigValue>,
+      }) : inspected.catalog;
+    return {
+      ...(catalog.catalogRevision ? { catalogRevision: catalog.catalogRevision } : {}),
+      configOptions: (catalog.configOptions ?? []).filter(option => !option.presentation?.sensitive),
+      input: catalog.input ?? [], specialCatalogs: catalog.specialCatalogs,
+      actions: (catalog.actions ?? []).map(action => ({ ...action,
+        ...(action.id === 'sidechat.create' ? { supported: false, reason: 'Remote Sidechat is unavailable' } : {}) })),
+      resolveSupported: false,
+    };
+  }
+
+  private async subscribe(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    params: { session_id: string },
+    hooks?: RemoteCommandHooks,
+  ): Promise<{ session: RemoteSession; cursor: string; translation?: RemoteTranslationState; interactions?: import('@gian/remote-protocol').RemoteInteraction[] }> {
+    this.assertVisibleSession(params.session_id, device);
+    this.deps.db.prepare(
+      `DELETE FROM remote_file_refs WHERE device_id = ? AND session_id != ?`,
+    ).run(device.id, params.session_id);
+    this.deps.onSubscribe?.(device.id, params.session_id);
+    void command;
+    const session = this.deps.projector.projectSession(this.deps.sessions.getSession(params.session_id));
+    // Exported executions consume controller-prepared input: they get no
+    // translation state at all (ADR-0091 ownership), even when negotiated.
+    const exported = this.deps.db.prepare('SELECT 1 FROM remote_execution_exports WHERE session_id = ?')
+      .get(params.session_id);
+    let translation = !exported && this.deps.translation
+      && hooks?.wireFeatures?.includes('wire.conversation_translation')
+      ? await this.translationStateFor(this.deps.translation, params.session_id)
+      : undefined;
+    this.assertVisibleSession(params.session_id, device);
+    if (this.deps.db.prepare('SELECT 1 FROM remote_execution_exports WHERE session_id = ?').get(params.session_id)) {
+      translation = undefined;
+    }
+    return { session, cursor: session.revision, ...(translation ? { translation } : {}),
+      ...(this.deps.directory.negotiated(device.id)
+        ? { interactions: this.deps.projector.interactionsForSession(params.session_id) } : {}) };
+  }
+
+  private page(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; turns?: number; cursor?: string },
+    hooks?: RemoteCommandHooks,
+  ): unknown {
+    this.assertVisibleSession(params.session_id, device);
+    return this.deps.projector.transcriptPage(params.session_id, params.turns ?? 3, {
+      cursor: params.cursor,
+      deviceId: device.id,
+      includeTranslations: hooks?.wireFeatures?.includes('wire.conversation_translation') === true,
+    });
+  }
+
+  // ── Conversation translation (wire.conversation_translation) ────────────
+
+  private requireTranslation(hooks: RemoteCommandHooks | undefined): TranslationService {
+    if (!hooks?.wireFeatures?.includes('wire.conversation_translation')) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'conversation translation was not negotiated');
+    }
+    if (!this.deps.translation) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'conversation translation is unavailable');
+    }
+    return this.deps.translation;
+  }
+
+  private requireDeviceGrant(device: RemoteDeviceRecord, method: GianToolMethod): void {
+    if (!device.grants.includes(method)) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'device grant missing');
+    }
+  }
+
+  /** Remote session visibility plus the ADR-0091 ownership rule: an exported
+   *  execution consumes controller-prepared input and never translates on
+   *  the execution Host. */
+  private assertTranslatableSession(sessionId: string, device: RemoteDeviceRecord): void {
+    this.assertVisibleSession(sessionId, device);
+    if (this.deps.db.prepare('SELECT 1 FROM remote_execution_exports WHERE session_id = ?').get(sessionId)) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'translation belongs to the controlling Host, not an exported execution');
+    }
+  }
+
+  private translationStateFor(service: TranslationService, sessionId: string): Promise<RemoteTranslationState> {
+    return projectReadyTranslationState(service, sessionId,
+      () => this.deps.translationPreferences?.() ?? { ...DEFAULT_TRANSLATION_PREFERENCES });
+  }
+
+  private async translationState(
+    device: RemoteDeviceRecord,
+    params: { session_id: string },
+    hooks?: RemoteCommandHooks,
+  ): Promise<unknown> {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.read');
+    this.assertTranslatableSession(params.session_id, device);
+    const state = await this.translationStateFor(service, params.session_id);
+    this.assertTranslatableSession(params.session_id, device);
+    return state;
+  }
+
+  private async translationSetAuto(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; enabled: boolean; expected_enabled?: boolean; expected_revision?: number },
+    hooks?: RemoteCommandHooks,
+  ): Promise<unknown> {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.update');
+    this.assertTranslatableSession(params.session_id, device);
+    // Resolve readiness before the mutation: a failed or superseded lookup
+    // must not leave a successful switch change without a durable receipt.
+    const state = await this.translationStateFor(service, params.session_id);
+    this.assertTranslatableSession(params.session_id, device);
+    if (service.configRevision() !== state.config_revision) {
+      throw new RemoteProtocolError('PRECONDITION_FAILED', 'Translation settings changed. Try again.');
+    }
+    if (params.enabled && !state.configured) {
+      throw new RemoteProtocolError('PRECONDITION_FAILED', 'Configure a translation provider and model in Settings first.');
+    }
+    if (params.expected_enabled !== undefined && service.enabled(params.session_id) !== params.expected_enabled) {
+      throw precondition('expected_enabled', String(service.enabled(params.session_id)));
+    }
+    if (params.expected_revision !== undefined && service.stateRevision(params.session_id) !== params.expected_revision) {
+      throw precondition('expected_revision', String(service.stateRevision(params.session_id)));
+    }
+    service.setEnabled(params.session_id, params.enabled);
+    // No asynchronous boundary between the mutation and its result.
+    const preferences = this.deps.translationPreferences?.() ?? { ...DEFAULT_TRANSLATION_PREFERENCES };
+    return projectRemoteTranslationState(service, params.session_id, preferences, state.config_revision, state.configured);
+  }
+
+  private translationRequest(
+    device: RemoteDeviceRecord,
+    params: {
+      session_id: string; request_id: string; purpose: 'send' | 'read';
+      text: string; source_id?: string; composer_document?: unknown;
+    },
+    hooks?: RemoteCommandHooks,
+  ): { request_id: string; status: 'accepted' } {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.send');
+    this.assertTranslatableSession(params.session_id, device);
+    const key = `${params.session_id}:${params.request_id}`;
+    if (this.translationInflight.has(key)) {
+      // Retry of an in-flight request: same receipt, no duplicate model call.
+      return { request_id: params.request_id, status: 'accepted' };
+    }
+    const document = params.composer_document === undefined
+      ? undefined
+      : this.resolveDocument(device, params.composer_document, params.session_id);
+    this.translationInflight.add(key);
+    const preferences = this.deps.translationPreferences?.() ?? { ...DEFAULT_TRANSLATION_PREFERENCES };
+    // The receipt returns immediately; the settled outcome rides the
+    // translation.updated event stream under the same request_id, so a long
+    // model call never holds the per-device command chain or a read timeout.
+    void service.translate({
+      sessionId: params.session_id,
+      requestId: params.request_id,
+      text: params.text,
+      purpose: params.purpose,
+      ...(params.source_id ? { sourceId: params.source_id } : {}),
+      ...(document ? { document } : {}),
+    }, preferences).then(
+      record => {
+        this.rememberTranslationOutcome(key, { record });
+        this.deps.onTranslationSettled?.(params.session_id, params.request_id, { record });
+      },
+      error => {
+        const message = redactRemoteError(error instanceof Error ? error.message : 'Translation failed');
+        this.rememberTranslationOutcome(key, { error: message });
+        this.deps.onTranslationSettled?.(params.session_id, params.request_id, { error: message });
+      },
+    ).finally(() => this.translationInflight.delete(key));
+    return { request_id: params.request_id, status: 'accepted' };
+  }
+
+  private rememberTranslationOutcome(key: string, outcome: { record?: TranslationRecord; error?: string }): void {
+    this.translationOutcomes.delete(key);
+    this.translationOutcomes.set(key, outcome);
+    while (this.translationOutcomes.size > 1024) {
+      const oldest = this.translationOutcomes.keys().next().value;
+      if (oldest === undefined) break;
+      this.translationOutcomes.delete(oldest);
+    }
+  }
+
+  private translationCancel(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; request_id: string },
+    hooks?: RemoteCommandHooks,
+  ): { ok: true } {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.send');
+    this.assertVisibleSession(params.session_id, device);
+    service.cancel(params.session_id, params.request_id);
+    return { ok: true };
+  }
+
+  /** Page one chunk of a descriptor-only translation's complete text. The
+   *  paged string is the SAME redacted full string the descriptor's
+   *  text_length/text_sha256 describe — offsets, chunk content and the final
+   *  hash all line up, and no chunk can expose what the inline path would
+   *  have redacted. Chunks are bounded by the wire text limit and never
+   *  split a surrogate pair. */
+  private translationResultText(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; record_id: string; offset?: number },
+    hooks?: RemoteCommandHooks,
+  ): { text: string; next_offset?: number } {
+    const service = this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.read');
+    this.assertTranslatableSession(params.session_id, device);
+    const record = service.get(params.record_id);
+    if (!record || record.sessionId !== params.session_id) {
+      throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'translation record not found');
+    }
+    const full = redactRemoteConversationText(record.text);
+    const offset = params.offset ?? 0;
+    if (offset < 0 || offset >= full.length) {
+      throw new RemoteProtocolError('INVALID_FRAME', 'offset out of range');
+    }
+    let end = Math.min(offset + REMOTE_TRANSLATION_INLINE_TEXT_LIMIT, full.length);
+    if (end < full.length) {
+      const code = full.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    }
+    const chunk = full.slice(offset, end);
+    return {
+      text: chunk,
+      ...(end < full.length ? { next_offset: end } : {}),
+    };
+  }
+
+  /** Terminal-status recovery for a request identity: the in-flight set, then
+   *  the bounded settled-outcome map, else 'unknown' (client resets the row
+   *  and offers retry instead of showing a permanent pending state). */
+  private translationRequestStatus(
+    device: RemoteDeviceRecord,
+    params: { session_id: string; request_id: string },
+    hooks?: RemoteCommandHooks,
+  ): unknown {
+    this.requireTranslation(hooks);
+    this.requireDeviceGrant(device, 'session.read');
+    this.assertTranslatableSession(params.session_id, device);
+    const key = `${params.session_id}:${params.request_id}`;
+    if (this.translationInflight.has(key)) return { state: 'pending' };
+    const outcome = this.translationOutcomes.get(key);
+    if (!outcome) return { state: 'unknown' };
+    this.translationOutcomes.delete(key);
+    this.translationOutcomes.set(key, outcome);
+    if (outcome.record) {
+      return { state: 'succeeded', record: projectRemoteTranslation(outcome.record) };
+    }
+    return { state: 'failed', error: outcome.error ?? 'Translation failed' };
+  }
+
+  private status(device: RemoteDeviceRecord, params: { command_id: string }): CommandStatusResult {
+    if (this.commandExpired(params.command_id)) {
+      return { command_id: params.command_id, state: 'expired' };
+    }
+    const row = this.ledger(device.id, params.command_id);
+    if (!row) return { command_id: params.command_id, state: 'not_seen' };
+    if (this.directoryCreateReceipt(row)) {
+      const session = this.recoverDirectoryCreate(device, row);
+      if (session) return { command_id: params.command_id, state: 'succeeded', result: session };
+    }
+    const projected = this.reproject(device, row);
+    return {
+      command_id: params.command_id,
+      state: row.state === 'accepted' ? 'accepted'
+        : row.state === 'succeeded' ? 'succeeded'
+          : row.state === 'unknown_outcome' ? 'unknown_outcome'
+            : row.state === 'expired' ? 'expired'
+              : 'failed',
+      ...(projected.ok ? { result: projected.data } : {}),
+      ...(projected.error ? { error: asRemoteError(projected.error) } : {}),
+    };
+  }
+
+  private async createSession(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    params: Record<string, unknown>,
+  ): Promise<RemoteSession> {
+    if (params['catalog_revision'] !== this.deps.projector.catalogRevision()) {
+      throw precondition('catalog_revision', this.deps.projector.catalogRevision());
+    }
+    if (this.deps.directory.negotiated(device.id)) this.deps.directory.assertWorkspace(String(params['workspace_id']));
+    const taskId = typeof params['task_id'] === 'string' ? params['task_id'] : null;
+    if (!taskId && !this.deps.directory.negotiated(device.id)) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'Remote sessions require an open Doing Task');
+    }
+    const task = taskId ? this.deps.db.prepare('SELECT status FROM tasks WHERE id = ?')
+      .get(taskId) as { status: string } | undefined : undefined;
+    if (taskId && (!task || task.status !== 'open')) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'Task is not open');
+    }
+    const result = await this.toolCall(device, command, 'session.create', {
+      workspace_id: params['workspace_id'],
+      agent_id: this.resolveAgentId(String(params['agent_id'])),
+      ...(taskId ? { task_id: taskId } : {}),
+      ...(params['name'] ? { name: params['name'] } : {}),
+      config: {
+        ...(params['model'] ? { model: params['model'] } : {}),
+        ...(params['thinking'] ? { thinking_effort: params['thinking'] } : {}),
+        ...(params['service_tier'] ? {
+          service_tier: hostServiceTier(params['service_tier'] as 'standard' | 'fast'),
+        } : {}),
+      },
+    });
+    const sessionId = (result.data as { session: { id: string } }).session.id;
+    return this.deps.projector.projectSession(this.deps.sessions.getSession(sessionId));
+  }
+
+  private async updateSession(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    params: Record<string, unknown>,
+  ): Promise<RemoteSession> {
+    this.assertVisibleSession(String(params['session_id']), device);
+    this.assertSessionRevision(String(params['session_id']), String(params['session_revision']));
+    await this.toolCall(device, command, 'session.update', {
+      session_id: params['session_id'],
+      expected_session_revision: params['session_revision'],
+      ...(params['name'] !== undefined ? { name: params['name'] } : {}),
+      config: {
+        ...(params['model'] !== undefined ? { model: params['model'] } : {}),
+        ...(params['thinking'] !== undefined ? { thinking_effort: params['thinking'] } : {}),
+        ...(params['service_tier'] !== undefined ? {
+          service_tier: hostServiceTier(params['service_tier'] as 'standard' | 'fast'),
+        } : {}),
+        ...(params['approval_mode'] !== undefined ? { approval_mode: params['approval_mode'] } : {}),
+      },
+    });
+    return this.deps.projector.projectSession(this.deps.sessions.getSession(String(params['session_id'])));
+  }
+
+  private async send(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    params: Record<string, unknown>,
+    hooks?: RemoteCommandHooks,
+  ): Promise<unknown> {
+    this.assertVisibleSession(String(params['session_id']), device);
+    const sessionId = String(params['session_id']);
+    if (params['translation_id'] !== undefined) {
+      // A send-gate receipt is only meaningful on a negotiated connection —
+      // never silently drop it into an untranslated dispatch.
+      if (!hooks?.wireFeatures?.includes('wire.conversation_translation')) {
+        throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'translated sending was not negotiated');
+      }
+      if (!this.deps.translation) {
+        throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'conversation translation is unavailable');
+      }
+    }
+    const items = [
+      ...(await this.resolveItems(device, params['items'], sessionId) ?? []),
+      ...await this.resolveContextFiles(device, params['context_items'], sessionId),
+    ];
+    const contextItems = this.resolveContext(device, params['context_items'], sessionId);
+    const document = this.resolveDocument(device, params['composer_document'], sessionId);
+    let result;
+    try {
+      result = await this.toolCall(device, command, 'session.send', {
+        session_id: params['session_id'],
+        text: params['text'],
+        ...(params['busy'] ? { busy: params['busy'] } : {}),
+        ...(items.length ? { items } : {}),
+        ...(contextItems ? { context_items: contextItems } : {}),
+        ...(document ? { composer_document: document } : {}),
+        ...(params['translation_id'] !== undefined ? { translation_id: params['translation_id'] } : {}),
+      });
+    } catch (error) {
+      this.unpinResolved(items);
+      throw error;
+    }
+    this.pinResolved(items);
+    const delivery = result.data as import('@gian/shared').GianToolDelivery;
+    return {
+      session: this.deps.projector.projectSession(this.deps.sessions.getSession(String(params['session_id']))),
+      ...(delivery.state ? { delivery_state: delivery.state } : {}),
+      ...(delivery.queue_id ? { queue_id: delivery.queue_id } : {}),
+      ...(delivery.turn_number ? { turn_number: delivery.turn_number } : {}),
+      ...((result.data as { delivery_id?: string }).delivery_id
+        ? { delivery_id: (result.data as { delivery_id: string }).delivery_id }
+        : {}),
+    };
+  }
+
+  private async stop(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    this.assertVisibleSession(String(params['session_id']), device);
+    this.assertSessionRevision(String(params['session_id']), String(params['session_revision']));
+    let result: GianToolResult;
+    try {
+      result = await this.toolCall(device, command, 'session.stop', {
+        session_id: params['session_id'],
+        expected_session_revision: params['session_revision'],
+      });
+    } catch (error) {
+      throw stopError(error);
+    }
+    return {
+      already_idle: (result.data as { already_idle: boolean }).already_idle,
+      session_revision: this.deps.sessions.getResourceRevision(String(params['session_id'])),
+    };
+  }
+
+  private async queue(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    method: 'queue.update' | 'queue.remove' | 'queue.clear' | 'queue.send_now',
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    const sessionId = String(params['session_id']);
+    this.assertVisibleSession(sessionId, device);
+    const unpinIds = method === 'queue.remove'
+      ? this.queueAttachmentIds(sessionId, String(params['queue_id']))
+      : method === 'queue.clear'
+        ? this.sessionQueueAttachmentIds(sessionId)
+        : [];
+    const result = await this.toolCall(device, command, method, {
+      ...params,
+      expected_queue_revision: params['expected_queue_revision'],
+    });
+    for (const uploadId of unpinIds) this.deps.attachments.unpin(uploadId);
+    const data = result.data as { queue: unknown[]; queue_revision: string; mode?: string;
+      affected?: Array<{ queue_id: string; state: 'started' | 'steered'; turn_number: number }> };
+    return {
+      queue: this.deps.sessions.getQueue(sessionId).map(entry => (
+        this.deps.projector.projectQueueEntry(entry, device.id)
+      )),
+      queue_revision: data.queue_revision,
+      ...(data.mode ? { mode: data.mode } : {}),
+      ...(data.affected ? { affected: data.affected.map(item => ({ queue_id: item.queue_id,
+        state: item.state, turn_number: item.turn_number })) } : {}),
+    };
+  }
+
+  private async respond(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    const interactionId = String(params['interaction_id']);
+    const matches = this.deps.sessions.listPendingApprovals().filter(record => (
+      remoteInteractionResourceId(record.sessionId, record.turnId, record.id) === interactionId
+    ));
+    if (matches.length > 1) {
+      throw new RemoteProtocolError('PRECONDITION_FAILED', 'interaction id matches more than one session');
+    }
+    const pending = matches[0];
+    if (!pending) {
+      throw new RemoteProtocolError('PRECONDITION_FAILED', 'interaction is not pending');
+    }
+    const nativeInteractionId = pending.id;
+    const interaction = this.deps.db.prepare(
+      `SELECT session_id, resource_revision FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?`,
+    ).get(pending.sessionId, nativeInteractionId) as { session_id: string; resource_revision: number } | undefined;
+    const sessionId = pending.sessionId;
+    this.assertVisibleSession(sessionId, device);
+    const currentRevision = String(interaction?.resource_revision ?? 0);
+    if (currentRevision !== String(params['interaction_revision'])) {
+      throw precondition('interaction_revision', currentRevision);
+    }
+    const mapped = resolveRemoteAction(pending, String(params['action_id'] ?? ''));
+    if (!mapped) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'action_id is not an issued interaction action');
+    }
+    await this.toolCall(device, command, 'interaction.respond', {
+      session_id: sessionId,
+      interaction_id: nativeInteractionId,
+      expected_interaction_revision: params['interaction_revision'],
+      ...(mapped.decision && mapped.decision !== 'submit_answers' ? { decision: mapped.decision } : {}),
+      ...(mapped.native_option_id ? { native_option_id: mapped.native_option_id } : {}),
+      ...(params['values'] && typeof params['values'] === 'object' && !Array.isArray(params['values'])
+        ? { answers: resolveRemoteAnswerValues(pending, params['values'] as Record<string, unknown>) }
+        : {}),
+    });
+    const stored = this.deps.db.prepare(
+      'SELECT resource_revision FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
+    ).get(sessionId, nativeInteractionId) as { resource_revision: number } | undefined;
+    return {
+      interaction_id: interactionId,
+      revision: stored ? String(stored.resource_revision) : '1',
+      resolved: true as const,
+    };
+  }
+
+  private async preview(device: RemoteDeviceRecord, params: { handle_id: string }): Promise<unknown> {
+    const preview = await this.deps.fileRefs.preview({ deviceId: device.id, handleId: params.handle_id });
+    return {
+      transfer_id: preview.transfer_id,
+      file: {
+        id: preview.file.handle_id,
+        session_id: this.deps.fileRefs.get(params.handle_id)!.sessionId,
+        name: preview.file.name,
+        mime: preview.file.mime,
+        size: preview.file.size,
+        revision: preview.file.revision,
+        previewable: true,
+        downloadable: true,
+        expires_at: this.deps.fileRefs.get(params.handle_id)!.expiresAt,
+      },
+      preview_max_bytes: preview.preview_max_bytes,
+    };
+  }
+
+  private async toolCall(
+    device: RemoteDeviceRecord,
+    command: CommandRequest,
+    method: Parameters<GianToolAccessController['call']>[1]['method'],
+    params: Record<string, unknown>,
+  ): Promise<GianToolResult> {
+    const actor = this.actor(device);
+    const result = await this.deps.access.call(actor, {
+      request_id: command.attempt_id,
+      idempotency_key: command.command_id,
+      method,
+      params,
+    });
+    if (!result.ok) {
+      const error = result.error ?? { code: 'UNKNOWN_OUTCOME', message: 'tool call failed' };
+      throw Object.assign(new Error(error.message), {
+        code: error.code,
+        details: 'details' in error ? error.details : undefined,
+      });
+    }
+    return result;
+  }
+
+  private resolveAgentId(remoteId: string): string {
+    const agents = this.deps.listAgents?.() ?? [];
+    const match = agents.find(agent => agent.id === remoteId || remoteStableUuid('agent', agent.id) === remoteId);
+    if (!match) {
+      throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'agent is not available remotely');
+    }
+    return match.id;
+  }
+
+  private actor(device: RemoteDeviceRecord): GianToolActor {
+    return {
+      kind: 'external_controller',
+      credentialId: `remote-device:${device.id}`,
+      clientId: `remote:${device.id}`,
+      callerId: `remote:${device.id}`,
+      role: 'admin',
+      grants: [...device.grants],
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    };
+  }
+
+  private assertVisibleSession(sessionId: string, device: RemoteDeviceRecord): void {
+    if (this.deps.directory.negotiated(device.id)) {
+      this.deps.directory.assertAccess(sessionId, device);
+      return;
+    }
+    if (this.deps.executions?.contains(sessionId)) {
+      this.deps.executions.authorize(sessionId, device);
+      return;
+    }
+    const session = this.deps.sessions.getSession(sessionId);
+    if (!this.deps.projector.isSessionVisible(session)) {
+      throw new RemoteProtocolError(
+        'REMOTE_CAPABILITY_DENIED',
+        'only incomplete Sessions in open Doing Tasks are visible remotely',
+      );
+    }
+  }
+
+  private assertSessionRevision(sessionId: string, expected: string): void {
+    const current = this.deps.sessions.getResourceRevision(sessionId);
+    if (current !== expected) throw precondition('session_revision', current);
+  }
+
+  private async resolveItems(device: RemoteDeviceRecord, items: unknown, sessionId: string): Promise<InputItem[] | undefined> {
+    if (!Array.isArray(items)) return undefined;
+    return Promise.all(items.map(async item => {
+      const record = item as { type?: string; text?: string; attachment_id?: string };
+      if (record.type === 'text' && typeof record.text === 'string') {
+        return { type: 'text' as const, text: record.text };
+      }
+      if (record.type === 'attachment' && record.attachment_id) {
+        const resolved = this.deps.attachments.resolveHandle(device.id, record.attachment_id, sessionId);
+        if (!resolved) throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'attachment handle is not usable');
+        return resolved;
+      }
+      if (record.type === 'compiled_text' && record.attachment_id) {
+        if (!this.deps.executions?.contains(sessionId)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'compiled input requires execution authorization');
+        this.deps.executions.authorize(sessionId, device);
+        if (!this.deps.attachments.resolveHandle(device.id, record.attachment_id, sessionId)) throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'compiled input missing');
+        const read = await this.deps.attachments.readBytes(device.id, record.attachment_id);
+        if (!read || read.bytes.length > 2 * 1024 * 1024) throw new RemoteProtocolError('FILE_TOO_LARGE', 'compiled input too large');
+        return { type: 'text' as const, text: new TextDecoder('utf-8', { fatal: true }).decode(read.bytes) };
+      }
+      throw new RemoteProtocolError('INVALID_FRAME', 'Remote send items must be text or Host attachment handles');
+    }));
+  }
+
+  private pinResolved(items: InputItem[]): void {
+    for (const handle of this.attachmentIdsFromQueueItems(items)) {
+      this.deps.attachments.pin(handle);
+    }
+  }
+
+  private unpinResolved(items: InputItem[]): void {
+    for (const handle of this.attachmentIdsFromQueueItems(items)) {
+      this.deps.attachments.unpin(handle);
+    }
+  }
+
+  private queueAttachmentIds(sessionId: string, queueId: string): string[] {
+    const entry = this.deps.sessions.getQueue(sessionId).find((item) => item.id === queueId);
+    return this.attachmentIdsFromQueueItems(entry?.items);
+  }
+
+  private sessionQueueAttachmentIds(sessionId: string): string[] {
+    return this.deps.sessions.getQueue(sessionId).flatMap((entry) => this.attachmentIdsFromQueueItems(entry.items));
+  }
+
+  private attachmentIdsFromQueueItems(items?: InputItem[]): string[] {
+    if (!items) return [];
+    return items.flatMap((item) => {
+      if ((item.type === 'localFile' || item.type === 'localImage') && 'path' in item && typeof item.path === 'string') {
+        const handle = this.deps.attachments.findHandleByPath(item.path);
+        return handle ? [handle] : [];
+      }
+      return [];
+    });
+  }
+
+  private commandExpired(commandId: string): boolean {
+    if (!UUID_V7_RE.test(commandId)) return true;
+    const timestamp = uuidV7TimestampMs(commandId);
+    const now = Date.now();
+    return now - timestamp > COMMAND_RETENTION_MS || timestamp - now > COMMAND_TIMESTAMP_SKEW_MS;
+  }
+
+  private resolveContext(device: RemoteDeviceRecord, items: unknown, sessionId: string): MessageContextItem[] | undefined {
+    if (!Array.isArray(items)) return undefined;
+    const projected = items.flatMap((item, index) => {
+      const record = item as { type?: string; text?: string; handle_id?: string };
+      if (record.type === 'pasted_text' && typeof record.text === 'string') {
+        const bytes = new TextEncoder().encode(record.text).byteLength;
+        return [{
+          id: `remote-paste-${index}`,
+          type: 'pastedText' as const,
+          text: record.text,
+          lineCount: record.text.split('\n').length,
+          byteSize: bytes,
+        }];
+      }
+      if (record.type === 'file_ref' && record.handle_id) {
+        this.requireIssuedHandle(device, record.handle_id, sessionId);
+        return [];
+      }
+      throw new RemoteProtocolError('INVALID_FRAME', 'Remote context items must be pasted_text or Host-issued file_ref handles');
+    });
+    return projected.length > 0 ? projected : undefined;
+  }
+
+  private async resolveContextFiles(device: RemoteDeviceRecord, items: unknown, sessionId: string): Promise<InputItem[]> {
+    if (!Array.isArray(items)) return [];
+    const resolved: InputItem[] = [];
+    for (const item of items) {
+      const record = item as { type?: string; handle_id?: string };
+      if (record.type !== 'file_ref' || !record.handle_id) continue;
+      resolved.push(await this.resolveHandleItem(device, record.handle_id, sessionId));
+    }
+    return resolved;
+  }
+
+  private async resolveHandleItem(device: RemoteDeviceRecord, handleId: string, sessionId: string): Promise<InputItem> {
+    const attachment = this.deps.attachments.resolveHandle(device.id, handleId, sessionId);
+    if (attachment) return attachment;
+    const file = this.deps.fileRefs.get(handleId);
+    if (!file || file.deviceId !== device.id || file.sessionId !== sessionId) {
+      throw new RemoteProtocolError('FILE_REFERENCE_EXPIRED', 'handle is not a Host-issued file or attachment reference');
+    }
+    const payload = await this.deps.fileRefs.readBytes({
+      deviceId: device.id,
+      handleId,
+    });
+    const dir = await ensureSessionAttachmentDir(sessionId);
+    const filename = basename(payload.name).replace(/[^A-Za-z0-9._-]+/g, '_') || 'file.bin';
+    const path = join(dir, filename);
+    await writeFile(path, payload.bytes);
+    return {
+      type: 'localFile',
+      path,
+      name: payload.name,
+      mime: payload.mime,
+      size: payload.bytes.length,
+    };
+  }
+
+  private resolveDocument(device: RemoteDeviceRecord, value: unknown, sessionId: string): ComposerDocument | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const nodes = (value as { nodes?: unknown }).nodes;
+    if (!Array.isArray(nodes)) return undefined;
+    return {
+      version: 1,
+      segments: nodes.map(node => {
+        const record = node as { type?: string; text?: string; handle_id?: string };
+        if (record.type === 'text' && typeof record.text === 'string') {
+          return { type: 'text' as const, text: record.text };
+        }
+        if (record.type === 'reference' && record.handle_id) {
+          const resolved = this.requireIssuedHandle(device, record.handle_id, sessionId);
+          return {
+            type: 'reference' as const,
+            id: record.handle_id,
+            referenceType: resolved.kind,
+            label: resolved.label,
+          };
+        }
+        throw new RemoteProtocolError('INVALID_FRAME', 'composer reference nodes must resolve to a Host-issued handle');
+      }),
+    };
+  }
+
+  private requireIssuedHandle(
+    device: RemoteDeviceRecord,
+    handleId: string,
+    sessionId: string,
+  ): { kind: 'attachment' | 'context'; label: string } {
+    const file = this.deps.fileRefs.get(handleId);
+    if (file && file.deviceId === device.id && file.sessionId === sessionId) {
+      return { kind: 'attachment', label: file.relativePath.split('/').pop() ?? file.relativePath };
+    }
+    const attachment = this.deps.attachments.resolveHandle(device.id, handleId, sessionId);
+    if (attachment && 'name' in attachment && typeof attachment.name === 'string') {
+      return { kind: 'attachment', label: attachment.name };
+    }
+    throw new RemoteProtocolError('FILE_REFERENCE_EXPIRED', 'handle is not a Host-issued file or attachment reference');
+  }
+
+  private rejectCraftedFields(params: unknown): void {
+    if (!params || typeof params !== 'object') return;
+    const record = params as Record<string, unknown>;
+    // approval_mode is a legitimate session config field (2026-09-15 audit-
+    // mode sync) — only genuinely privileged/crafted keys stay blocked.
+    for (const key of ['role', 'grants', 'caller_id', 'client_id', 'session', 'path', 'native_session_id']) {
+      if (key in record) {
+        throw new RemoteProtocolError('INVALID_FRAME', `crafted field ${key} is not accepted`);
+      }
+    }
+  }
+
+  private ledger(deviceId: string, commandId: string): LedgerRow | null {
+    const row = this.deps.db.prepare(
+      `SELECT * FROM remote_command_ledger WHERE device_id = ? AND command_id = ?`,
+    ).get(deviceId, commandId) as LedgerRow | undefined;
+    return row ?? null;
+  }
+
+  private upsertLedger(
+    deviceId: string,
+    command: CommandRequest,
+    state: LedgerRow['state'],
+    data?: unknown,
+    error?: { code: string; message: string },
+  ): void {
+    const now = new Date().toISOString();
+    this.deps.db.prepare(
+      `INSERT INTO remote_command_ledger
+        (command_id, device_id, method, attempt_id, state, tool_result_json, error_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(device_id, command_id) DO UPDATE SET
+         attempt_id = excluded.attempt_id,
+         state = excluded.state,
+         tool_result_json = excluded.tool_result_json,
+         error_json = excluded.error_json,
+         updated_at = excluded.updated_at`,
+    ).run(
+      command.command_id,
+      deviceId,
+      command.method,
+      command.attempt_id,
+      state,
+      data === undefined ? null : JSON.stringify(data),
+      error ? JSON.stringify(error) : null,
+      now,
+      now,
+    );
+  }
+
+  private reproject(device: RemoteDeviceRecord, row: LedgerRow): { ok: boolean; data?: unknown; error?: { code: string; message: string } } {
+    if (this.directoryCreateReceipt(row)) {
+      const session = this.recoverDirectoryCreate(device, row);
+      if (session) return { ok: true, data: session };
+      return { ok: false, error: row.error_json ? asRemoteError(JSON.parse(row.error_json))
+        : { code: 'UNKNOWN_OUTCOME', message: 'create outcome is not yet known; retain the original command identity' } };
+    }
+    if (row.tool_result_json) {
+      const data = JSON.parse(row.tool_result_json) as unknown;
+      this.authorizeDirectoryResult(device, row.method, data);
+      assertNoLeak(data);
+      return { ok: true, data };
+    }
+    return {
+      ok: false,
+      error: row.error_json
+        ? asRemoteError(JSON.parse(row.error_json) as { code: string; message: string })
+        : { code: 'UNKNOWN_OUTCOME', message: 'command outcome is unknown' },
+    };
+  }
+
+  private createReceipt(device: RemoteDeviceRecord, command: CommandRequest, data?: unknown): DirectoryCreateReceipt | undefined {
+    if (command.method !== 'session.create' || !this.deps.directory.negotiated(device.id)) return undefined;
+    // Preserve the immutable wire input even when only the Tool domain row
+    // committed before acknowledgement loss or process termination.
+    return { directory_create_v1: 1, scope: this.deps.directory.scope(device), params: parseRemoteMethodParams('session.create', command.params),
+      ...(data && typeof data === 'object' && 'id' in data ? { session_id: String(data.id) } : {}) };
+  }
+
+  private directoryCreateReceipt(row: LedgerRow): DirectoryCreateReceipt | null {
+    if (row.method !== 'session.create' || !row.tool_result_json) return null;
+    const data = JSON.parse(row.tool_result_json) as Partial<DirectoryCreateReceipt>;
+    return data.directory_create_v1 === 1 && data.params ? data as DirectoryCreateReceipt : null;
+  }
+
+  private recoverDirectoryCreate(device: RemoteDeviceRecord, row: LedgerRow): RemoteSession | null {
+    const receipt = this.directoryCreateReceipt(row);
+    if (!receipt) return null;
+    if (!this.deps.directory.negotiated(device.id)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'directory create recovery was not negotiated');
+    device = this.deps.directory.currentDevice(device);
+    if (!this.deps.directory.ownsScope(device, receipt.scope)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'create receipt belongs to a different pairing scope');
+    this.requireDeviceGrant(device, 'session.create');
+    const tool = this.deps.tool.lookupRequest(this.actor(device).callerId, row.command_id);
+    const sessionId = receipt.session_id ?? (tool?.method === 'session.create' ? tool.domainId : null);
+    if (!sessionId || !this.deps.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)) return null;
+    this.deps.directory.assertAccess(sessionId, device);
+    return this.deps.projector.projectSession(this.deps.sessions.getSession(sessionId), device.id);
+  }
+
+  private authorizeDirectoryResult(device: RemoteDeviceRecord, method: RemoteMethod, data: unknown): void {
+    if (!this.deps.directory.negotiated(device.id)) return;
+    device = this.deps.directory.currentDevice(device);
+    const grants: Partial<Record<RemoteMethod, GianToolMethod>> = {
+      'session.create': 'session.create', 'session.update': 'session.update', 'session.send': 'session.send',
+      'session.stop': 'session.stop', 'queue.update': 'queue.update', 'queue.remove': 'queue.remove',
+      'queue.clear': 'queue.clear', 'queue.send_now': 'queue.send_now', 'interaction.respond': 'interaction.respond',
+      'translation.request': 'session.send', 'translation.set_auto': 'session.send',
+    };
+    const grant = grants[method];
+    if (grant) this.requireDeviceGrant(device, grant);
+    if (!data || typeof data !== 'object') return;
+    const result = data as { id?: unknown; session_id?: unknown; session?: { id?: unknown } };
+    const sessionId = method === 'session.create' || method === 'session.update' ? result.id : result.session?.id ?? result.session_id;
+    if (typeof sessionId === 'string') this.deps.directory.assertAccess(sessionId, device);
+  }
+
+  private record(device: RemoteDeviceRecord, command: CommandRequest, category: RemoteAuditCategory): void {
+    if (!isMutation(command.method)) return;
+    this.deps.audit.write({
+      deviceId: device.id,
+      method: command.method,
+      commandId: command.command_id,
+      resultCategory: category,
+    });
+  }
+}
+
+interface LedgerRow {
+  command_id: string;
+  device_id: string;
+  method: RemoteMethod;
+  attempt_id: string;
+  state: 'accepted' | 'succeeded' | 'failed' | 'unknown_outcome' | 'expired';
+  tool_result_json: string | null;
+  error_json: string | null;
+}
+
+interface DirectoryCreateReceipt {
+  directory_create_v1: 1;
+  scope: string;
+  params: unknown;
+  session_id?: string;
+}
+
+function isMutation(method: RemoteMethod): boolean {
+  return method === 'execution.create' || method === 'execution.configure' || method === 'session.create'
+    || method === 'session.update'
+    || method === 'session.send'
+    || method === 'session.stop'
+    || method === 'queue.update'
+    || method === 'queue.remove'
+    || method === 'queue.clear'
+    || method === 'queue.send_now'
+    || method === 'interaction.respond'
+    // Ledger dedup: a retried translation command must never start a second
+    // paid model call or flip the persisted switch twice.
+    || method === 'translation.set_auto'
+    || method === 'translation.request';
+}
+
+function isPostAuthorizationFailure(code: string): boolean {
+  return code === 'DEVICE_REVOKED' || code === 'DEVICE_NOT_PAIRED'
+    || code === 'REMOTE_CAPABILITY_DENIED' || code === 'AUTH_REQUIRED';
+}
+
+function asRemoteError(error: { code: string; message: string }): { code: RemoteErrorCode; message: string } {
+  if (error.code === 'PROTOCOL_VIOLATION') return { code: 'UNKNOWN_OUTCOME', message: error.message };
+  if (isRemoteErrorCode(error.code)) return { code: error.code, message: error.message };
+  if (error.code === 'PERMISSION_DENIED' || error.code === 'FORBIDDEN') {
+    return { code: 'REMOTE_CAPABILITY_DENIED', message: error.message };
+  }
+  if (error.code === 'NOT_FOUND') return { code: 'ATTACHMENT_NOT_FOUND', message: error.message };
+  return { code: 'INVALID_FRAME', message: error.message };
+}
+
+/** session.stop failures carry Gian Tool codes the Remote wire does not know.
+ *  The generic fallback would report them as INVALID_FRAME, which reads as a
+ *  malformed request; report what is actually known instead. */
+function stopError(error: unknown): unknown {
+  if (error instanceof RemoteProtocolError) return error;
+  const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code) : '';
+  const message = error instanceof Error ? error.message : String(error);
+  if (isRemoteErrorCode(code) || code === 'PERMISSION_DENIED' || code === 'INVALID_ARGUMENT') return error;
+  if (code === 'NOT_FOUND') return new RemoteProtocolError('RESOURCE_NOT_FOUND', message);
+  if (code === 'SESSION_CLOSED' || code === 'SESSION_BUSY' || code === 'CONFLICT') {
+    return new RemoteProtocolError('PRECONDITION_FAILED', message);
+  }
+  // An unreachable Agent was already force-recovered (stopTurnOrRecover);
+  // what is left is an Agent that did not accept the interrupt.
+  return new RemoteProtocolError('UNKNOWN_OUTCOME',
+    'The Agent did not confirm the stop; the Turn may still be running. Refresh, then stop again.');
+}
+
+function fail(code: string, message: string): { ok: false; error: { code: string; message: string } } {
+  return { ok: false, error: { code, message } };
+}
+
+function precondition(field: string, current: string): RemoteProtocolError {
+  return new RemoteProtocolError('PRECONDITION_FAILED', `${field} mismatch`, {
+    [field]: current,
+  });
+}
+
+function mapError(error: unknown): { code: string; message: string } {
+  if (error instanceof RemoteProtocolError) {
+    return { code: error.code, message: redactRemoteError(error.message) };
+  }
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : 'INVALID_FRAME';
+  const message = error instanceof Error ? error.message : String(error);
+  return { code, message: redactRemoteError(message) };
+}
+
+function categoryFor(code: string): RemoteAuditCategory {
+  if (code === 'COMMAND_EXPIRED') return 'expired';
+  if (code === 'PERMISSION_DENIED' || code === 'REMOTE_CAPABILITY_DENIED') return 'denied';
+  if (code === 'PRECONDITION_FAILED') return 'precondition_failed';
+  if (code === 'UNKNOWN_OUTCOME') return 'unknown_outcome';
+  return 'failed';
+}
+
+void REMOTE_METHODS;

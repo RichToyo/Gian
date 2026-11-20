@@ -1,0 +1,280 @@
+import {
+  exportPublicJwk,
+  generateCanonicalId,
+  RemoteProtocolError,
+  signBytes,
+} from '@gian/remote-protocol';
+import { HostKeyChangedError } from './host-key-pin.js';
+
+/** This browser holds no key for the Host: the pairing cannot be used or
+ *  self-revoked from here any more. Distinct from storage that failed to
+ *  answer, which stays an ordinary, retryable error. */
+export class MissingHostKeyError extends RemoteProtocolError {
+  constructor(hostId: string) {
+    super('DEVICE_NOT_PAIRED', `no Host-scoped browser key for ${hostId}`);
+    this.name = 'MissingHostKeyError';
+  }
+}
+
+async function generateHostScopedSigningKey(): Promise<CryptoKeyPair> {
+  return crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['sign', 'verify'],
+  );
+}
+
+export interface HostScopedIdentity {
+  hostId: string;
+  publicJwk: { kty: 'EC'; crv: 'P-256'; x: string; y: string };
+  privateKey: CryptoKey;
+  /** The Host's E2E key as first seen at login (see host-key-pin.ts). */
+  hostKeyFingerprint?: string;
+}
+
+export interface BrowserIdentityStore {
+  browserInstallationId(): Promise<string>;
+  hostIdentity(hostId: string): Promise<HostScopedIdentity>;
+  createPending(): Promise<HostScopedIdentity>;
+  bindPending(hostId: string): Promise<HostScopedIdentity>;
+  listHostIds(): Promise<string[]>;
+  /** Pin the Host's E2E key on first sight; throw HostKeyChangedError when
+   *  a later login presents a different one. */
+  checkHostKey(hostId: string, fingerprint: string): Promise<void>;
+  clearHost(hostId: string): Promise<void>;
+  clearAll(): Promise<void>;
+}
+
+export class MemoryBrowserIdentityStore implements BrowserIdentityStore {
+  private installationId = generateCanonicalId();
+  private readonly hosts = new Map<string, HostScopedIdentity>();
+  private pending: HostScopedIdentity | null = null;
+
+  async browserInstallationId(): Promise<string> {
+    return this.installationId;
+  }
+
+  async hostIdentity(hostId: string): Promise<HostScopedIdentity> {
+    const existing = this.hosts.get(hostId);
+    if (!existing) throw new MissingHostKeyError(hostId);
+    return existing;
+  }
+
+  async createPending(): Promise<HostScopedIdentity> {
+    const pair = await generateHostScopedSigningKey();
+    this.pending = {
+      hostId: 'pending',
+      publicJwk: await exportPublicJwk(pair.publicKey),
+      privateKey: pair.privateKey,
+    };
+    return this.pending;
+  }
+
+  async bindPending(hostId: string): Promise<HostScopedIdentity> {
+    const pending = this.pending;
+    if (!pending) {
+      const existing = this.hosts.get(hostId);
+      if (existing) return existing;
+    }
+    const next = pending ?? await this.createPending();
+    const bound = { ...next, hostId };
+    this.hosts.set(hostId, bound);
+    this.pending = null;
+    return bound;
+  }
+
+  async listHostIds(): Promise<string[]> {
+    return [...this.hosts.keys()];
+  }
+
+  async checkHostKey(hostId: string, fingerprint: string): Promise<void> {
+    const identity = await this.hostIdentity(hostId);
+    if (identity.hostKeyFingerprint === undefined) {
+      const pinned = { ...identity, hostKeyFingerprint: fingerprint };
+      this.hosts.set(hostId, pinned);
+      await this.persist(pinned);
+      return;
+    }
+    if (identity.hostKeyFingerprint !== fingerprint) throw new HostKeyChangedError(hostId);
+  }
+
+  protected async persist(_identity: HostScopedIdentity): Promise<void> {
+    // Memory is the store.
+  }
+
+  async clearHost(hostId: string): Promise<void> {
+    this.hosts.delete(hostId);
+  }
+
+  async clearAll(): Promise<void> {
+    this.hosts.clear();
+    this.pending = null;
+    this.installationId = generateCanonicalId();
+  }
+
+  async signForHost(hostId: string, bytes: Uint8Array): Promise<string> {
+    const identity = await this.hostIdentity(hostId);
+    return signBytes(identity.privateKey, bytes);
+  }
+
+  protected hydrate(identity: HostScopedIdentity): void {
+    this.hosts.set(identity.hostId, identity);
+  }
+}
+
+const INSTALL_KEY = 'gian.remote.browser_installation_id';
+
+export class LocalStorageBrowserIdentityStore extends MemoryBrowserIdentityStore {
+  constructor(private readonly serverOrigin?: string) { super(); }
+
+  private installationKey(): string {
+    return this.serverOrigin ? `${INSTALL_KEY}:${encodeURIComponent(this.serverOrigin)}` : INSTALL_KEY;
+  }
+
+  override async browserInstallationId(): Promise<string> {
+    try {
+      const key = this.installationKey();
+      const existing = globalThis.localStorage?.getItem(key);
+      if (existing) return existing;
+      const created = await super.browserInstallationId();
+      globalThis.localStorage?.setItem(key, created);
+      return created;
+    } catch {
+      return super.browserInstallationId();
+    }
+  }
+
+  override async hostIdentity(hostId: string): Promise<HostScopedIdentity> {
+    try {
+      return await super.hostIdentity(hostId);
+    } catch {
+      // A storage failure propagates as a plain (retryable) error; only a
+      // successful read that finds nothing means the key is gone.
+      const stored = await idbGetIdentity(hostId, this.serverOrigin);
+      if (!stored) throw new MissingHostKeyError(hostId);
+      this.hydrate(stored);
+      return stored;
+    }
+  }
+
+  override async bindPending(hostId: string): Promise<HostScopedIdentity> {
+    const bound = await super.bindPending(hostId);
+    await idbPutIdentity(bound, this.serverOrigin);
+    return bound;
+  }
+
+  protected override async persist(identity: HostScopedIdentity): Promise<void> {
+    await idbPutIdentity(identity, this.serverOrigin);
+  }
+
+  override async listHostIds(): Promise<string[]> {
+    const memory = await super.listHostIds();
+    const stored = await idbListHostIds(this.serverOrigin);
+    return [...new Set([...memory, ...stored])];
+  }
+
+  override async clearHost(hostId: string): Promise<void> {
+    await super.clearHost(hostId);
+    await idbClearIdentity(hostId, this.serverOrigin);
+  }
+
+  override async clearAll(): Promise<void> {
+    await super.clearAll();
+    await idbClearIdentity(undefined, this.serverOrigin);
+    try {
+      globalThis.localStorage?.removeItem(this.installationKey());
+    } catch {
+      // ignore
+    }
+  }
+}
+
+const IDB_NAME = 'gian-remote-identity';
+const IDB_STORE = 'host-keys';
+
+function idbAvailable(): boolean {
+  return typeof indexedDB !== 'undefined';
+}
+
+function openIdentityDb(serverOrigin?: string): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const name = serverOrigin ? `${IDB_NAME}:${encodeURIComponent(serverOrigin)}` : IDB_NAME;
+    const request = indexedDB.open(name, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(IDB_STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function idbPutIdentity(identity: HostScopedIdentity, serverOrigin?: string): Promise<void> {
+  if (!idbAvailable()) return;
+  try {
+    const db = await openIdentityDb(serverOrigin);
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(identity, identity.hostId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {
+    // Memory remains the live store.
+  }
+}
+
+/** null = the store answered and holds no key. Throws when storage itself
+ *  fails, so a flaky IndexedDB never reads as a lost pairing. */
+async function idbGetIdentity(hostId: string, serverOrigin?: string): Promise<HostScopedIdentity | null> {
+  if (!idbAvailable()) return null;
+  const db = await openIdentityDb(serverOrigin);
+  try {
+    return await new Promise<HostScopedIdentity | null>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const request = tx.objectStore(IDB_STORE).get(hostId);
+      request.onsuccess = () => resolve((request.result as HostScopedIdentity | undefined) ?? null);
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function idbListHostIds(serverOrigin?: string): Promise<string[]> {
+  if (!idbAvailable()) return [];
+  try {
+    const db = await openIdentityDb(serverOrigin);
+    const keys = await new Promise<string[]>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const request = tx.objectStore(IDB_STORE).getAllKeys();
+      request.onsuccess = () => resolve((request.result as IDBValidKey[]).map(String));
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return keys;
+  } catch {
+    return [];
+  }
+}
+
+async function idbClearIdentity(hostId?: string, serverOrigin?: string): Promise<void> {
+  if (!idbAvailable()) return;
+  try {
+    const db = await openIdentityDb(serverOrigin);
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      if (hostId) tx.objectStore(IDB_STORE).delete(hostId);
+      else tx.objectStore(IDB_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {
+    // ignore
+  }
+}
+
+export function createBrowserIdentityStore(serverOrigin?: string): BrowserIdentityStore {
+  return typeof localStorage === 'undefined'
+    ? new MemoryBrowserIdentityStore()
+    : new LocalStorageBrowserIdentityStore(serverOrigin);
+}

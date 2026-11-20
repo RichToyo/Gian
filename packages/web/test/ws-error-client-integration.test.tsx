@@ -1,0 +1,1375 @@
+import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type SetStateAction,
+} from 'react';
+import type { ClientToServerMessage, Session } from '@gian/shared';
+import { describe, expect, it, vi } from 'vitest';
+import { loadSessions, uploadAttachment } from '../src/api.js';
+import { useAppSocket } from '../src/controllers/use-app-socket.js';
+import { reloadFailedSessionMetadata } from '../src/controllers/session-failure-reload.js';
+import { __resetFeedback, getSnapshot as feedbackSnapshot } from '../src/feedback.js';
+import { LocaleProvider } from '../src/i18n/index.js';
+import { createOperationDispatcher, type OperationDispatcher } from '../src/operations/dispatcher.js';
+import { dispatchHeadFork } from '../src/components/ForkControls.js';
+import { pendingForkNavigation } from '../src/presentation/fork-navigation.js';
+import '../src/operations/session.js';
+import '../src/operations/sidechat.js';
+import {
+  createMessageEchoSink,
+  dispatchMessageSend,
+  wireMessageEchoSink,
+} from '../src/operations/message.js';
+import { createOperationStore, type OperationStore } from '../src/operations/store.js';
+import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
+import { UserMessage } from '../src/transcript/items.js';
+import type { PlanLifecycleState } from '../src/transcript/apply.js';
+import type { TranscriptItem } from '../src/types.js';
+import { GianWs } from '../src/ws.js';
+import { sessionContractFixture, stateSyncFixture } from './fixtures/ws-contract.js';
+import { getMockWebSockets } from './setup.js';
+import type { PendingFirstMessageValue } from '../src/pending-first-message.js';
+
+vi.mock('../src/api.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
+  return {
+    ...actual,
+    loadWorkspaces: vi.fn(async () => []),
+    loadSessions: vi.fn(async () => []),
+    loadTasks: vi.fn(async () => []),
+    loadWorkingTrees: vi.fn(async () => []),
+    uploadAttachment: vi.fn(),
+  };
+});
+
+function ignoreState<T>(_next: SetStateAction<T>): void {}
+
+interface HarnessProps {
+  ws: GianWs;
+  store: OperationStore;
+  ops: OperationDispatcher;
+  initialSessions?: Session[];
+  initialActiveSessionId?: string;
+  pendingFirstMessage?: PendingFirstMessageValue;
+  initialItemsBySession?: Record<string, TranscriptItem[]>;
+  initialPlanStateBySession?: Record<string, PlanLifecycleState>;
+}
+
+function ClientReducerHarness({
+  ws,
+  store,
+  ops,
+  initialSessions = [],
+  initialActiveSessionId = 'session-wire',
+  pendingFirstMessage = null,
+  initialItemsBySession = {},
+  initialPlanStateBySession = {},
+}: HarnessProps) {
+  const [authed, setAuthed] = useState(false);
+  const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>(initialItemsBySession);
+  const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
+  const [planStateBySession, setPlanStateBySession] = useState<
+    Record<string, PlanLifecycleState>
+  >(initialPlanStateBySession);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(initialActiveSessionId);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
+  const sessionsRef = useRef<Session[]>(initialSessions);
+  const itemsBySessionRef = useRef<Record<string, TranscriptItem[]>>(initialItemsBySession);
+  itemsBySessionRef.current = itemsBySession;
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  const pendingFirstMessageRef = useRef<PendingFirstMessageValue>(pendingFirstMessage);
+  const setSessionsRef = (next: SetStateAction<Session[]>) => {
+    sessionsRef.current = typeof next === 'function' ? next(sessionsRef.current) : next;
+  };
+
+  useEffect(() => {
+    wireMessageEchoSink(createMessageEchoSink(setItemsBySession, setPendingBySession));
+    return () => wireMessageEchoSink(null);
+  }, []);
+
+  useAppSocket({
+    authStatus: 'authenticated',
+    ws,
+    sessionsRef,
+    itemsBySessionRef,
+    activeSessionIdRef,
+    pendingFirstMessageRef,
+    setWsState: ignoreState,
+    setWsAttempt: ignoreState,
+    setAuthed,
+    setWorkspaces: ignoreState,
+    setSessions: setSessionsRef,
+    setSideChats: ignoreState,
+    sideChatsRef: { current: [] },
+    setItemsBySidechat: ignoreState,
+    setPendingBySidechat: ignoreState,
+    setTasks: ignoreState,
+    setSystemConfig: ignoreState,
+    setRunner: ignoreState,
+    setActiveSessionId,
+    setActiveTaskId,
+    setActiveSubtaskId,
+    setItemsBySession,
+    setPendingBySession,
+    setQueueBySession: ignoreState,
+    setPlanStateBySession,
+    markSessionHistoryLive: () => {},
+    operationStore: store,
+    ops,
+  });
+
+  return (
+    <OperationStoreProvider store={store}>
+      <OperationDispatcherProvider dispatcher={ops}>
+        <LocaleProvider locale="en">
+          <div data-testid="rendered-messages">
+            {Object.entries(itemsBySession).flatMap(([sessionId, items]) =>
+              items.map((item, index) => item.kind === 'user'
+                ? <UserMessage key={`${sessionId}:${item.id}:${index}`} item={item} />
+                : null))}
+          </div>
+          <pre data-testid="snapshot">
+            {JSON.stringify({
+              authed,
+              activeSessionId,
+              activeTaskId,
+              activeSubtaskId,
+              pendingFirstMessage: pendingFirstMessageRef.current,
+              itemsBySession,
+              pendingBySession,
+              planStateBySession,
+            })}
+          </pre>
+        </LocaleProvider>
+      </OperationDispatcherProvider>
+    </OperationStoreProvider>
+  );
+}
+
+interface Snapshot {
+  authed: boolean;
+  activeSessionId: string | null;
+  pendingFirstMessage: PendingFirstMessageValue;
+  itemsBySession: Record<string, Array<{
+    kind?: TranscriptItem['kind'];
+    id?: string;
+    turn?: number;
+    sendRunId?: string;
+    sendCanonical?: boolean;
+    sendRetry?: { sessionId: string; text: string };
+    pending?: boolean;
+    failed?: boolean;
+  }>>;
+  pendingBySession: Record<string, boolean>;
+  planStateBySession: Record<string, PlanLifecycleState>;
+}
+
+function snapshot(): Snapshot {
+  return JSON.parse(screen.getByTestId('snapshot').textContent ?? '{}') as Snapshot;
+}
+
+describe('WS-003: Host dispatch failure through the real Web client chain', () => {
+  it('selects a created subtask and its Task together with the composer Session', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => { socket.fakeOpen(); await Promise.resolve(); await Promise.resolve(); });
+      const session = sessionContractFixture({ id: 'subtask-b', type: 'subtask', task_id: 'task-b' });
+      act(() => socket.fakeMessage({ type: 'session:created', origin: 'task-create', session }));
+      expect(snapshot()).toMatchObject({ activeSessionId: 'subtask-b', activeTaskId: 'task-b', activeSubtaskId: 'subtask-b' });
+    } finally { view.unmount(); ops.dispose(); ws.disconnect(); }
+  });
+
+  it('opens the locally requested Fork when its canonical session:created arrives', async () => {
+    const parent = sessionContractFixture();
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[parent]}
+        initialActiveSessionId={parent.id}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [parent] }));
+      act(() => { dispatchHeadFork(ops.dispatch, parent.id); });
+      const fork = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'session:fork');
+      expect(fork).toMatchObject({
+        type: 'session:fork',
+        source_session_id: parent.id,
+        session_id: expect.any(String),
+        anchor: { type: 'head' },
+      });
+      if (!fork || fork.type !== 'session:fork' || !fork.session_id) throw new Error('missing fork target');
+      const child: Session = {
+        ...parent,
+        id: fork.session_id,
+        name: `Fork 1: ${parent.name}`,
+        origin: {
+          kind: 'fork', session_id: parent.id, turn_id: 'turn-1', source_turn_id: 'provider-turn-1',
+        },
+      };
+
+      act(() => socket.fakeMessage({
+        type: 'session:created',
+        session: child,
+        origin: 'session-fork',
+      }));
+      await waitFor(() => expect(snapshot().activeSessionId).toBe(child.id));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      sessionStorage.clear();
+    }
+  });
+
+  it('recovers local Fork navigation from state_sync without switching for unrelated Fork broadcasts', async () => {
+    const parent = sessionContractFixture();
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[parent]}
+        initialActiveSessionId={parent.id}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [parent] }));
+      act(() => { dispatchHeadFork(ops.dispatch, parent.id); });
+      const fork = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'session:fork');
+      if (!fork || fork.type !== 'session:fork' || !fork.session_id) throw new Error('missing fork target');
+      expect(pendingForkNavigation()?.sessionId).toBe(fork.session_id);
+      const child: Session = {
+        ...parent,
+        id: fork.session_id,
+        name: `Fork 1: ${parent.name}`,
+        origin: {
+          kind: 'fork', session_id: parent.id, turn_id: 'turn-1', source_turn_id: 'provider-turn-1',
+        },
+      };
+
+      const unrelated: Session = {
+        ...parent,
+        id: 'fork-created-in-another-window',
+        name: `Fork 2: ${parent.name}`,
+        origin: {
+          kind: 'fork', session_id: parent.id, turn_id: 'turn-1', source_turn_id: 'provider-turn-1',
+        },
+      };
+      act(() => socket.fakeMessage({
+        type: 'session:created',
+        session: unrelated,
+        origin: 'session-fork',
+      }));
+      expect(snapshot().activeSessionId).toBe(parent.id);
+      expect(pendingForkNavigation()?.sessionId).toBe(child.id);
+
+      await act(async () => {
+        socket.fakeMessage({ ...stateSyncFixture(), sessions: [child, parent] });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(pendingForkNavigation()).toBeNull();
+      await waitFor(() => expect(snapshot().activeSessionId).toBe(child.id));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      sessionStorage.clear();
+    }
+  });
+
+  it('leaves correlated Side Chat create errors to the owning operation surface', async () => {
+    __resetFeedback();
+    vi.mocked(loadSessions).mockResolvedValue([]);
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+
+      let runId = '';
+      act(() => {
+        runId = ops.dispatch('sidechat.create', { parentSessionId: 'session-wire' }).id;
+      });
+      const request = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'sidechat:create') as { request_id: string };
+
+      act(() => socket.fakeMessage({
+        type: 'error',
+        request_id: request.request_id,
+        request_type: 'sidechat:create',
+        code: 'SESSION_BUSY',
+        message: 'race lost',
+      }));
+      expect(feedbackSnapshot().toasts).toHaveLength(0);
+
+      act(() => socket.fakeMessage({
+        type: 'operation:result',
+        request_id: request.request_id,
+        request_type: 'sidechat:create',
+        ok: false,
+        error: { code: 'SESSION_BUSY', message: 'race lost' },
+      }));
+      expect(store.getRun(runId)?.phase).toBe('failed');
+      expect(feedbackSnapshot().toasts).toHaveLength(0);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      __resetFeedback();
+    }
+  });
+
+  it('reloads canonical metadata, rolls back the overlay, and exposes the Host error', async () => {
+    __resetFeedback();
+    vi.mocked(loadSessions).mockResolvedValue([]);
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    let canonical = sessionContractFixture({ id: 'session-wire', name: 'Before' });
+    const reloaded = { ...canonical, name: 'Canonical after rejection' };
+    const ops = createOperationDispatcher({
+      store,
+      transport: ws,
+      readCanonicalField: (_entityKey, field) => canonical[field as keyof Session],
+      onFailed: run => {
+        void reloadFailedSessionMetadata(run, sessions => {
+          canonical = sessions[0] ?? canonical;
+        });
+      },
+    });
+    const view = render(
+      <ClientReducerHarness ws={ws} store={store} ops={ops} initialSessions={[canonical]} />,
+    );
+
+    try {
+      await vi.waitFor(() => expect(loadSessions).toHaveBeenCalled());
+      vi.mocked(loadSessions).mockClear();
+      vi.mocked(loadSessions).mockResolvedValue([reloaded]);
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [canonical] }));
+
+      let runId = '';
+      act(() => {
+        runId = ops.dispatch('session.rename', { sessionId: 'session-wire', name: 'Optimistic' }).id;
+      });
+      expect(store.getEntityOverlays('session:session-wire')[0]?.value).toBe('Optimistic');
+      const request = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'session:rename') as { request_id: string };
+
+      act(() => socket.fakeMessage({
+        type: 'error',
+        session_id: 'session-wire',
+        request_id: request.request_id,
+        request_type: 'session:rename',
+        code: 'SESSION_RENAME_FAILED',
+        message: 'rename rejected by Host',
+      }));
+      act(() => socket.fakeMessage({
+        type: 'operation:result',
+        request_id: request.request_id,
+        request_type: 'session:rename',
+        ok: false,
+        error: { code: 'SESSION_RENAME_FAILED', message: 'rename rejected by Host' },
+      }));
+
+      await vi.waitFor(() => expect(canonical.name).toBe('Canonical after rejection'));
+      expect(loadSessions).toHaveBeenCalledTimes(1);
+      expect(store.getRun(runId)?.phase).toBe('failed');
+      expect(store.getEntityOverlays('session:session-wire')).toHaveLength(0);
+      expect(feedbackSnapshot().toasts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'error', message: 'rename rejected by Host' }),
+      ]));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      __resetFeedback();
+    }
+  });
+
+  it('reconciles stale pending state from authoritative state_sync session status', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const running = sessionContractFixture({
+      id: 'session-wire', status: 'running', executor: 'codex',
+    });
+    const done = { ...running, status: 'done' as const };
+    const view = render(
+      <ClientReducerHarness ws={ws} store={store} ops={ops} initialSessions={[done]} />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [running] }));
+      expect(snapshot().pendingBySession['session-wire']).toBe(true);
+
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [done] }));
+      expect(snapshot().pendingBySession['session-wire']).toBe(false);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('keeps a genuine optimistic send pending across a terminal state_sync snapshot', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const done = sessionContractFixture({
+      id: 'session-wire', status: 'done', executor: 'codex',
+    });
+    const optimistic: TranscriptItem = {
+      kind: 'user', id: 'optimistic:session-wire:1', text: 'queued offline',
+      exec: 'codex', ts: 1, turn: 0, pending: true,
+    };
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[done]}
+        initialItemsBySession={{ 'session-wire': [optimistic] }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [done] }));
+
+      expect(snapshot().pendingBySession['session-wire']).toBe(true);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('closes the latest in-memory turn once when only a terminal session update arrives', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const session = sessionContractFixture({
+      id: 'session-wire', status: 'running', executor: 'kimi',
+    });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[session]}
+        initialItemsBySession={{
+          'session-wire': [
+            {
+              kind: 'reasoning', id: 'shared-turn-id', variant: 'full',
+              text: 'still visible', ts: 1_000, turn: 7,
+            },
+          ],
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [session] }));
+
+      const terminalUpdate = {
+        type: 'session:updated' as const,
+        session: {
+          id: 'session-wire', status: 'done' as const,
+          updated_at: '2026-08-09T02:12:25.000Z',
+        },
+      };
+      act(() => socket.fakeMessage(terminalUpdate));
+      expect(snapshot().pendingBySession['session-wire']).toBe(false);
+      expect(snapshot().itemsBySession['session-wire']?.filter(item => item.kind === 'turn-end'))
+        .toMatchObject([{ turn: 7 }]);
+
+      // A duplicate session update and a late real event converge on the same
+      // turn boundary instead of creating multiple TurnSum triggers.
+      act(() => socket.fakeMessage(terminalUpdate));
+      act(() => socket.fakeMessage({
+        type: 'event',
+        session_id: 'session-wire',
+        turn: 7,
+        call_id: 'provider-turn-complete',
+        event: 'turn_completed',
+        ts: Date.parse('2026-08-09T02:12:25.000Z'),
+        data: {},
+      }));
+      expect(snapshot().itemsBySession['session-wire']?.filter(item => item.kind === 'turn-end'))
+        .toMatchObject([{ id: 'provider-turn-complete', turn: 7 }]);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('uses same-task state_sync status when a terminal update immediately follows reconnect', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const done = sessionContractFixture({ id: 'session-wire', status: 'done', executor: 'kimi' });
+    const running = { ...done, status: 'running' as const };
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[done]}
+        initialItemsBySession={{
+          'session-wire': [{
+            kind: 'reasoning', id: 'r7', variant: 'full', text: 'live', ts: 700, turn: 7,
+          }],
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => {
+        socket.fakeMessage({ ...stateSyncFixture(), sessions: [running] });
+        socket.fakeMessage({
+          type: 'session:updated',
+          session: { id: running.id, status: 'done', updated_at: '2026-08-09T02:12:25.000Z' },
+        });
+      });
+
+      expect(snapshot().itemsBySession['session-wire']?.filter(item => item.kind === 'turn-end'))
+        .toMatchObject([{ turn: 7 }]);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('finalizes an active plan from session lifecycle without reassigning its turn', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const running = sessionContractFixture({
+      id: 'session-wire', status: 'running', executor: 'kimi',
+    });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[running]}
+        initialItemsBySession={{
+          'session-wire': [{
+            kind: 'assistant', id: 'a7', text: 'finished', exec: 'kimi', ts: 700, turn: 7,
+          }],
+        }}
+        initialPlanStateBySession={{
+          'session-wire': {
+            text: '- [x] inspect\n- [x] test', completed: false, status: 'active', turn: 5,
+          },
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [running] }));
+      act(() => socket.fakeMessage({
+        type: 'session:updated',
+        session: { id: running.id, status: 'done', updated_at: '2026-08-09T02:12:25.000Z' },
+      }));
+
+      expect(snapshot().planStateBySession['session-wire']).toMatchObject({
+        completed: true,
+        status: 'completed',
+        turn: 5,
+      });
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('skips native adoption in both delivery orders but lets a known ordinary create consume', async () => {
+    const wsFirstAdopted = sessionContractFixture({
+      id: 'session-adopted-ws-first', name: 'Adopted before HTTP',
+    });
+    const httpFirstAdopted = sessionContractFixture({
+      id: 'session-adopted-http-first', name: 'Adopted over HTTP',
+    });
+    const nextCreated = sessionContractFixture({ id: 'session-next-create', name: 'Next create' });
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialActiveSessionId="session-user-selected"
+        pendingFirstMessage="first message for the next create"
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({
+        ...stateSyncFixture(),
+        sessions: [httpFirstAdopted, nextCreated],
+      }));
+
+      // WS-first: the adopted id is not in sessionsRef yet.
+      act(() => socket.fakeMessage({
+        type: 'session:created', session: wsFirstAdopted, origin: 'native-adopt',
+      }));
+      expect(snapshot()).toMatchObject({
+        activeSessionId: 'session-user-selected',
+        pendingFirstMessage: 'first message for the next create',
+      });
+
+      // HTTP-first: the adopted id is already canonical.
+      act(() => socket.fakeMessage({
+        type: 'session:created', session: httpFirstAdopted, origin: 'native-adopt',
+      }));
+      expect(snapshot()).toMatchObject({
+        activeSessionId: 'session-user-selected',
+        pendingFirstMessage: 'first message for the next create',
+      });
+      expect(socket.parsedSent<ClientToServerMessage>()
+        .filter(frame => frame.type === 'message:send')).toHaveLength(0);
+
+      // An ordinary create stays backward compatible when origin is absent,
+      // and must consume its pending first message even though state_sync has
+      // already made the session known.
+      act(() => socket.fakeMessage({ type: 'session:created', session: nextCreated }));
+      expect(snapshot()).toMatchObject({
+        activeSessionId: nextCreated.id,
+        pendingFirstMessage: null,
+      });
+      await waitFor(() => expect(socket.parsedSent<ClientToServerMessage>().some(frame => (
+        frame.type === 'message:send' && frame.session_id === nextCreated.id
+      ))).toBe(true));
+      const sent = socket.parsedSent<ClientToServerMessage>();
+      const subscribeIndex = sent.findIndex(frame => (
+        frame.type === 'events:subscribe' && frame.session_id === nextCreated.id
+      ));
+      const firstMessageIndex = sent.findIndex(frame => (
+        frame.type === 'message:send' && frame.session_id === nextCreated.id
+      ));
+      expect(subscribeIndex).toBeGreaterThanOrEqual(0);
+      expect(firstMessageIndex).toBeGreaterThan(subscribeIndex);
+      expect(sent).toContainEqual(expect.objectContaining({
+        type: 'message:send',
+        session_id: nextCreated.id,
+        text: 'first message for the next create',
+      }));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('uploads a new-session screenshot before sending the attachment-only first turn', async () => {
+    const created = sessionContractFixture({ id: 'session-with-screenshot' });
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      path: '/tmp/gian/attachments/session-with-screenshot/captured.png',
+      name: 'captured.png',
+      mime: 'image/png',
+      size: 4,
+    });
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        pendingFirstMessage={{
+          scope: { kind: 'workspace', id: 'workspace-contract' },
+          text: '',
+          attachments: [{
+            id: 'capture-1',
+            name: 'captured.png',
+            mime: 'image/png',
+            size: 4,
+            blob: new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }),
+          }],
+          contextItems: [{
+            type: 'pastedText',
+            id: 'first-paste',
+            text: 'first context',
+            lineCount: 1,
+            byteSize: 13,
+          }],
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+      act(() => socket.fakeMessage({
+        type: 'session:created',
+        session: created,
+        origin: 'interactive-create',
+      }));
+
+      await waitFor(() => expect(uploadAttachment).toHaveBeenCalledWith(
+        created.id,
+        expect.objectContaining({ type: 'image/png', size: 4 }),
+        'captured.png',
+      ));
+      await waitFor(() => expect(socket.parsedSent<ClientToServerMessage>())
+        .toContainEqual(expect.objectContaining({
+          type: 'message:send',
+          session_id: created.id,
+          text: '',
+          items: [expect.objectContaining({
+            type: 'localImage',
+            path: '/tmp/gian/attachments/session-with-screenshot/captured.png',
+          })],
+          context_items: [expect.objectContaining({
+            type: 'pastedText',
+            text: 'first context',
+          })],
+        })));
+      expect(snapshot().pendingFirstMessage).toBeNull();
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('enables translation before dispatching a remote Session first message', async () => {
+    const created = sessionContractFixture({ id: 'remote-created', remote_execution: {
+      environment_id: 'remote-a', environment_name: 'Build Mac', host_id: 'host-a',
+      remote_session_id: 'remote-native', repository_id: 'remote-repo', repository_name: 'Repo',
+    } });
+    let finishPatch!: (response: Response) => void;
+    const patch = new Promise<Response>(resolve => { finishPatch = resolve; });
+    let finishTranslation!: (response: Response) => void;
+    const translated = new Promise<Response>(resolve => { finishTranslation = resolve; });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url === '/api/schedule-confirmations?status=pending') {
+        return new Response(JSON.stringify({ confirmations: [] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/requests')) return translated;
+      if (url.endsWith('/translation/state')) return patch;
+      throw new Error(`Unexpected request in translation-first-message test: ${url}`);
+    });
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops}
+      pendingFirstMessage={{
+        scope: { kind: 'workspace', id: 'remote-repo', environmentId: 'remote-a' },
+        text: 'first remote message', autoTranslate: true, attachments: [],
+      }} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => { socket.fakeOpen(); await Promise.resolve(); await Promise.resolve(); });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+      act(() => socket.fakeMessage({ type: 'session:created', session: created, origin: 'interactive-create' }));
+
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+        `/api/sessions/${created.id}/translation/state`,
+        expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ enabled: true }) }),
+      ));
+      // 2026-10-09: the pending bubble goes up BEFORE the translation
+      // round-trip (the same progressive feedback composer sends get), and
+      // the later dispatch adopts it — never a duplicate bubble.
+      await waitFor(() => {
+        const echoItems = snapshot().itemsBySession[created.id] ?? [];
+        expect(echoItems).toHaveLength(1);
+        expect(echoItems[0]).toMatchObject({ kind: 'user', pending: true });
+      });
+      expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
+      await act(async () => {
+        finishPatch(new Response(JSON.stringify({ enabled: true }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }));
+        await patch;
+      });
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+        `/api/sessions/${created.id}/translation/requests`,
+        expect.objectContaining({ method: 'POST', body: expect.stringContaining('first remote message') }),
+      ));
+      expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
+      await act(async () => {
+        finishTranslation(new Response(JSON.stringify({
+          id: 'first-translation', sessionId: created.id,
+          sourceText: 'first remote message', text: 'translated first message',
+          targetLanguage: 'en', agentId: 'agent', model: 'luna', purpose: 'send',
+        }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }));
+        await translated;
+      });
+      await waitFor(() => expect(socket.parsedSent<ClientToServerMessage>()).toContainEqual(
+        expect.objectContaining({ type: 'message:send', session_id: created.id,
+          text: 'first remote message', translation_id: 'first-translation' }),
+      ));
+      // The dispatch adopted the pre-translation echo in place.
+      await waitFor(() => {
+        const items = snapshot().itemsBySession[created.id] ?? [];
+        expect(items).toHaveLength(1);
+        expect(items[0]?.sendRunId).toBeTruthy();
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('does not send a remote first message when translation setup fails', async () => {
+    const created = sessionContractFixture({ id: 'remote-translation-failed', remote_execution: {
+      environment_id: 'remote-a', environment_name: 'Build Mac', host_id: 'host-a',
+      remote_session_id: 'remote-native', repository_id: 'remote-repo', repository_name: 'Repo',
+    } });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Translation settings unavailable' }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops}
+      pendingFirstMessage={{
+        scope: { kind: 'workspace', id: 'remote-repo', environmentId: 'remote-a' },
+        text: 'keep the original', autoTranslate: true, attachments: [],
+      }} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => { socket.fakeOpen(); await Promise.resolve(); await Promise.resolve(); });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+      act(() => socket.fakeMessage({ type: 'session:created', session: created, origin: 'interactive-create' }));
+      await waitFor(() => expect(feedbackSnapshot().toasts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'error', message: expect.stringContaining('The first message was not sent.') }),
+      ])));
+      expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
+    } finally {
+      fetchSpy.mockRestore();
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+      __resetFeedback();
+    }
+  });
+
+  it('error clears session pending and correlated operation:result marks that send echo failed', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(socket.parsedSent<{ type: string }>().map(frame => frame.type)).toEqual(['auth']);
+
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      expect(snapshot().authed).toBe(true);
+      // events:subscribe is held until the authoritative snapshot is reduced.
+      expect(socket.parsedSent<{ type: string }>().map(frame => frame.type)).toEqual(['auth']);
+      act(() => socket.fakeMessage(stateSyncFixture()));
+      expect(socket.parsedSent<{ type: string }>().map(frame => frame.type)).toEqual([
+        'auth', 'events:subscribe',
+      ]);
+
+      let runId = '';
+      act(() => {
+        runId = dispatchMessageSend(ops.dispatch, {
+          sessionId: 'session-wire',
+          text: 'please fail precisely',
+          exec: 'codex',
+        }).id;
+      });
+      expect(snapshot().pendingBySession['session-wire']).toBe(true);
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        sendRunId: runId,
+        pending: true,
+      });
+
+      const sendFrame = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'message:send');
+      const requestId = (sendFrame as { request_id?: string } | undefined)?.request_id;
+      expect(requestId).toBeTruthy();
+
+      // Real Host ordering: it publishes running + canonical user_message
+      // before awaiting executor startTurn. Correlation/retry metadata must
+      // survive this swap until the following operation result settles.
+      act(() => socket.fakeMessage({
+        type: 'session:updated',
+        session: { id: 'session-wire', status: 'running' },
+      }));
+      act(() => socket.fakeMessage({
+        type: 'event',
+        session_id: 'session-wire',
+        turn: 1,
+        call_id: 'canonical-user-failed',
+        event: 'user_message',
+        ts: Date.now(),
+        data: { text: 'please fail precisely' },
+      }));
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-user-failed',
+        sendRunId: runId,
+        sendRetry: { sessionId: 'session-wire', text: 'please fail precisely' },
+        pending: true,
+        sendCanonical: true,
+      });
+
+      // This is the first frame emitted by the real Host catch path. The
+      // actual useAppSocket reducer clears the session spinner immediately;
+      // correlated echo selection remains the dispatcher's responsibility.
+      act(() => socket.fakeMessage({
+        type: 'error',
+        session_id: 'session-wire',
+        request_id: requestId,
+        request_type: 'message:send',
+        // Executors may surface a more specific code. request_type, not one
+        // hard-coded fallback code, identifies this as a send failure.
+        code: 'AUTH_REQUIRED',
+        message: 'executor authentication required',
+      }));
+      expect(snapshot().pendingBySession['session-wire']).toBe(false);
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-user-failed',
+        sendRunId: runId,
+      });
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.failed).toBeUndefined();
+
+      // The immediately-following correlated result traverses GianWs → the
+      // real operation dispatcher → the product message rollback/sink.
+      act(() => socket.fakeMessage({
+        type: 'operation:result',
+        request_id: requestId,
+        request_type: 'message:send',
+        ok: false,
+        error: { code: 'AUTH_REQUIRED', message: 'executor authentication required' },
+      }));
+      expect(store.getRun(runId)?.phase).toBe('failed');
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-user-failed',
+        sendRunId: runId,
+        pending: false,
+        failed: true,
+        sendRetry: { sessionId: 'session-wire', text: 'please fail precisely' },
+      });
+      expect(snapshot().pendingBySession['session-wire']).toBe(false);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('clears transient correlation after canonical user_message is confirmed', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+
+      let runId = '';
+      act(() => {
+        runId = dispatchMessageSend(ops.dispatch, {
+          sessionId: 'session-wire',
+          text: 'confirm and release metadata',
+          exec: 'claude',
+        }).id;
+      });
+      const sendFrame = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'message:send');
+      const requestId = (sendFrame as { request_id?: string } | undefined)?.request_id;
+      expect(requestId).toBeTruthy();
+
+      act(() => socket.fakeMessage({
+        type: 'session:updated',
+        session: { id: 'session-wire', status: 'running' },
+      }));
+      act(() => socket.fakeMessage({
+        type: 'event',
+        session_id: 'session-wire',
+        turn: 1,
+        call_id: 'canonical-user-success',
+        event: 'user_message',
+        ts: Date.now(),
+        data: { text: 'confirm and release metadata' },
+      }));
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-user-success',
+        sendRunId: runId,
+        pending: true,
+        sendCanonical: true,
+      });
+
+      act(() => socket.fakeMessage({
+        type: 'operation:result',
+        request_id: requestId,
+        request_type: 'message:send',
+        ok: true,
+      }));
+      expect(store.getRun(runId)?.phase).toBe('confirmed');
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-user-success',
+      });
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.sendRunId).toBeUndefined();
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.sendRetry).toBeUndefined();
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.sendCanonical).toBeUndefined();
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.pending).toBeUndefined();
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.failed).toBeUndefined();
+    } finally {
+      view.unmount();
+      ops.dispose();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('fails a known-unsent offline message immediately and never replays its one-shot bypass', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      let runId = '';
+      act(() => {
+        runId = dispatchMessageSend(ops.dispatch, {
+          sessionId: 'session-wire',
+          text: 'do not silently lose this turn',
+          exec: 'claude',
+          oneShotBypass: true,
+        }).id;
+      });
+
+      await act(async () => { await Promise.resolve(); });
+      expect(store.getRun(runId)?.phase).toBe('failed');
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        sendRunId: runId,
+        pending: false,
+        failed: true,
+      });
+      expect(snapshot().pendingBySession['session-wire']).toBe(false);
+
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+
+      const frames = socket.parsedSent<ClientToServerMessage>();
+      expect(frames.map(frame => frame.type)).toEqual(['auth', 'events:subscribe']);
+      expect(frames.some(frame => frame.type === 'message:send')).toBe(false);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('correlates identical concurrent sends FIFO and settles their canonical bubbles independently', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+
+      let firstRunId = '';
+      let secondRunId = '';
+      act(() => {
+        firstRunId = dispatchMessageSend(ops.dispatch, {
+          sessionId: 'session-wire', text: 'same visible text', exec: 'claude',
+        }).id;
+        secondRunId = dispatchMessageSend(ops.dispatch, {
+          sessionId: 'session-wire', text: 'same visible text', exec: 'claude',
+        }).id;
+      });
+      const initial = snapshot().itemsBySession['session-wire']!;
+      expect(initial).toHaveLength(2);
+      expect(initial[0]?.id).not.toBe(initial[1]?.id);
+      expect(initial.map(item => item.sendRunId)).toEqual([firstRunId, secondRunId]);
+
+      const sends = socket.parsedSent<ClientToServerMessage>()
+        .filter(frame => frame.type === 'message:send');
+      const firstRequestId = (sends[0] as { request_id?: string }).request_id!;
+      const secondRequestId = (sends[1] as { request_id?: string }).request_id!;
+      expect(firstRequestId).toBeTruthy();
+      expect(secondRequestId).toBeTruthy();
+
+      act(() => {
+        socket.fakeMessage({
+          type: 'event', session_id: 'session-wire', turn: 1,
+          call_id: 'canonical-first', event: 'user_message', ts: Date.now(),
+          data: { text: 'same visible text' },
+        });
+        socket.fakeMessage({
+          type: 'event', session_id: 'session-wire', turn: 2,
+          call_id: 'canonical-second', event: 'user_message', ts: Date.now() + 1,
+          data: { text: 'same visible text' },
+        });
+      });
+      expect(snapshot().itemsBySession['session-wire']).toEqual([
+        expect.objectContaining({
+          id: 'canonical-first', sendRunId: firstRunId, pending: true, sendCanonical: true,
+        }),
+        expect.objectContaining({
+          id: 'canonical-second', sendRunId: secondRunId, pending: true, sendCanonical: true,
+        }),
+      ]);
+
+      act(() => socket.fakeMessage({
+        type: 'operation:result', request_id: firstRequestId,
+        request_type: 'message:send', ok: true,
+      }));
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({ id: 'canonical-first' });
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.sendRunId).toBeUndefined();
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.pending).toBeUndefined();
+      expect(snapshot().itemsBySession['session-wire']?.[1]).toMatchObject({
+        id: 'canonical-second', sendRunId: secondRunId, pending: true,
+      });
+
+      act(() => socket.fakeMessage({
+        type: 'operation:result', request_id: secondRequestId,
+        request_type: 'message:send', ok: false,
+        error: { code: 'MESSAGE_SEND_FAILED', message: 'second send rejected' },
+      }));
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-first',
+      });
+      expect(snapshot().itemsBySession['session-wire']?.[0]?.failed).toBeUndefined();
+      expect(snapshot().itemsBySession['session-wire']?.[1]).toMatchObject({
+        id: 'canonical-second', sendRunId: secondRunId, pending: false, failed: true,
+        sendRetry: { sessionId: 'session-wire', text: 'same visible text' },
+      });
+    } finally {
+      view.unmount();
+      ops.dispose();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('keeps a canonical send visibly unknown when its result times out', async () => {
+    vi.useFakeTimers();
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+
+      let runId = '';
+      act(() => {
+        runId = dispatchMessageSend(ops.dispatch, {
+          sessionId: 'session-wire', text: 'timeout after canonical', exec: 'codex',
+        }).id;
+      });
+      act(() => socket.fakeMessage({
+        type: 'event', session_id: 'session-wire', turn: 1,
+        call_id: 'canonical-timeout', event: 'user_message', ts: Date.now(),
+        data: { text: 'timeout after canonical' },
+      }));
+
+      act(() => vi.advanceTimersByTime(10_001));
+      expect(store.getRun(runId)?.phase).toBe('timed-out');
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-timeout', sendRunId: runId, pending: true, sendCanonical: true,
+        sendRetry: { sessionId: 'session-wire', text: 'timeout after canonical' },
+      });
+      expect(screen.getByText('may not have been sent')).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a canonical send visibly unknown when its socket disconnects before result', async () => {
+    vi.useFakeTimers();
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+
+      let runId = '';
+      act(() => {
+        runId = dispatchMessageSend(ops.dispatch, {
+          sessionId: 'session-wire', text: 'disconnect after canonical', exec: 'claude',
+        }).id;
+      });
+      act(() => socket.fakeMessage({
+        type: 'event', session_id: 'session-wire', turn: 1,
+        call_id: 'canonical-disconnect', event: 'user_message', ts: Date.now(),
+        data: { text: 'disconnect after canonical' },
+      }));
+      act(() => socket.close(1006, 'ack lost'));
+
+      expect(store.getRun(runId)?.phase).toBe('timed-out');
+      expect(snapshot().itemsBySession['session-wire']?.[0]).toMatchObject({
+        id: 'canonical-disconnect', sendRunId: runId, pending: true, sendCanonical: true,
+      });
+      expect(screen.getByText('may not have been sent')).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+      vi.useRealTimers();
+    }
+  });
+});

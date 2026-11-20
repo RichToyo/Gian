@@ -1,0 +1,333 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { OFFICIAL_APP_REPOSITORY, officialCatalogSourcePolicy } from '@gian/shared';
+import {
+  GitHubReleaseMetadataBroker,
+  resolveGitHubReleaseBrokerSocketPath,
+} from '../src/github-request-broker.js';
+
+interface BrokerResponse {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+
+function requestBroker(options: {
+  socketPath: string;
+  path?: string;
+  method?: string;
+  body?: unknown;
+}): Promise<BrokerResponse> {
+  const body = options.body === undefined
+    ? Buffer.alloc(0)
+    : Buffer.from(JSON.stringify(options.body));
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      socketPath: options.socketPath,
+      path: options.path ?? '/v1/release-metadata',
+      method: options.method ?? 'POST',
+      headers: body.length > 0
+        ? {
+            'content-type': 'application/json',
+            'content-length': String(body.length),
+          }
+        : undefined,
+    }, response => {
+      const chunks: Buffer[] = [];
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      response.on('end', () => {
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+    });
+    request.once('error', reject);
+    if (body.length > 0) request.write(body);
+    request.end();
+  });
+}
+
+test('release broker accepts structured list and tag requests over its Unix socket', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-github-broker-'));
+  const socketPath = join(directory, 'broker.sock');
+  const token = 'github-token-sentinel';
+  const calls: Array<{ repository: string; tag?: string }> = [];
+  const broker = new GitHubReleaseMetadataBroker({
+    socketPath,
+    allowedRepository: 'RichLogic/Gian',
+    async fetchReleaseMetadata(request) {
+      calls.push(request);
+      return Response.json(
+        request.tag
+          ? { tag_name: request.tag }
+          : [{ tag_name: 'proxy-codex-v0.4.2' }],
+        { headers: { 'x-upstream-authorization': `Bearer ${token}` } },
+      );
+    },
+  });
+
+  try {
+    await broker.start();
+    const list = await requestBroker({
+      socketPath,
+      body: { repository: 'RichLogic/Gian', operation: 'list' },
+    });
+    const tag = await requestBroker({
+      socketPath,
+      body: {
+        repository: 'RichLogic/Gian',
+        operation: 'tag',
+        tag: 'proxy-codex-v0.4.2',
+      },
+    });
+
+    assert.equal(list.status, 200);
+    assert.deepEqual(JSON.parse(list.body), [{ tag_name: 'proxy-codex-v0.4.2' }]);
+    assert.equal(tag.status, 200);
+    assert.deepEqual(JSON.parse(tag.body), { tag_name: 'proxy-codex-v0.4.2' });
+    assert.deepEqual(calls, [
+      { repository: 'RichLogic/Gian' },
+      { repository: 'RichLogic/Gian', tag: 'proxy-codex-v0.4.2' },
+    ]);
+    for (const response of [list, tag]) {
+      assert.equal(response.headers['content-type'], 'application/json; charset=utf-8');
+      assert.equal(response.headers['x-upstream-authorization'], undefined);
+      assert.equal(JSON.stringify(response).includes(token), false);
+    }
+  } finally {
+    await broker.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('release broker rejects other repositories, paths, and methods without calling GitHub', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-github-broker-'));
+  const socketPath = join(directory, 'broker.sock');
+  let fetches = 0;
+  const broker = new GitHubReleaseMetadataBroker({
+    socketPath,
+    allowedRepository: 'RichLogic/Gian',
+    async fetchReleaseMetadata() {
+      fetches += 1;
+      return Response.json({ ok: true });
+    },
+  });
+
+  try {
+    await broker.start();
+    const otherRepository = await requestBroker({
+      socketPath,
+      body: { repository: 'someone-else/private', operation: 'list' },
+    });
+    const otherPath = await requestBroker({
+      socketPath,
+      path: '/v1/arbitrary-github-request',
+      body: { repository: 'RichLogic/Gian', operation: 'list' },
+    });
+    const get = await requestBroker({
+      socketPath,
+      method: 'GET',
+    });
+    const unsafeTag = await requestBroker({
+      socketPath,
+      body: {
+        repository: 'RichLogic/Gian',
+        operation: 'tag',
+        tag: 'bad\ntag',
+      },
+    });
+
+    assert.deepEqual(
+      [otherRepository.status, otherPath.status, get.status, unsafeTag.status],
+      [400, 404, 404, 400],
+    );
+    assert.deepEqual(JSON.parse(otherRepository.body), { error: 'invalid_request' });
+    assert.deepEqual(JSON.parse(otherPath.body), { error: 'not_found' });
+    assert.deepEqual(JSON.parse(get.body), { error: 'not_found' });
+    assert.deepEqual(JSON.parse(unsafeTag.body), { error: 'invalid_request' });
+    assert.equal(fetches, 0);
+  } finally {
+    await broker.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('release broker returns a fixed error without exposing credential-bearing failures', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-github-broker-'));
+  const socketPath = join(directory, 'broker.sock');
+  const token = 'github-token-sentinel';
+  const broker = new GitHubReleaseMetadataBroker({
+    socketPath,
+    allowedRepository: 'RichLogic/Gian',
+    async fetchReleaseMetadata() {
+      throw new Error(`upstream rejected Bearer ${token}`);
+    },
+  });
+
+  try {
+    await broker.start();
+    const response = await requestBroker({
+      socketPath,
+      body: { repository: 'RichLogic/Gian', operation: 'list' },
+    });
+
+    assert.equal(response.status, 502);
+    assert.deepEqual(JSON.parse(response.body), { error: 'github_request_failed' });
+    assert.equal(JSON.stringify(response).includes(token), false);
+  } finally {
+    await broker.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('release broker accepts a structured latest-Catalog lookup and rejects other catalog repos', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-github-broker-catalog-'));
+  const socketPath = join(directory, 'broker.sock');
+  const token = 'github-token-sentinel';
+  const calls: Array<{ operation?: string; repository: string }> = [];
+  const broker = new GitHubReleaseMetadataBroker({
+    socketPath,
+    allowedRepository: 'RichLogic/Gian',
+    allowedCatalogRepository: 'RichLogic/Gian-Proxy-Catalog',
+    async fetchReleaseMetadata(request) {
+      calls.push({ operation: request.operation, repository: request.repository });
+      return Response.json(
+        { tag: 'catalog-v1.2.0', sequence: 2, assets: [{ name: 'catalog-v1.json', size: 12 }] },
+        { headers: { etag: '"seq-2"', 'x-upstream-authorization': `Bearer ${token}` } },
+      );
+    },
+  });
+
+  try {
+    await broker.start();
+    const latest = await requestBroker({
+      socketPath,
+      body: { repository: 'RichLogic/Gian-Proxy-Catalog', operation: 'latest-catalog' },
+    });
+    const otherRepo = await requestBroker({
+      socketPath,
+      body: { repository: 'RichLogic/Gian', operation: 'latest-catalog' },
+    });
+    assert.equal(latest.status, 200);
+    assert.equal(latest.headers.etag, '"seq-2"');
+    assert.deepEqual(JSON.parse(latest.body), {
+      tag: 'catalog-v1.2.0',
+      sequence: 2,
+      assets: [{ name: 'catalog-v1.json', size: 12 }],
+    });
+    assert.equal(otherRepo.status, 400);
+    assert.equal(JSON.stringify(latest).includes(token), false);
+    const releaseAsset = await requestBroker({
+      socketPath,
+      body: {
+        repository: 'RichLogic/Gian',
+        operation: 'release-asset',
+        tag: 'proxy-fixture-v0.1.0',
+        asset: 'gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz',
+      },
+    });
+    const catalogAssetOnArtifactRepo = await requestBroker({
+      socketPath,
+      body: {
+        repository: 'RichLogic/Gian-Proxy-Catalog',
+        operation: 'release-asset',
+        tag: 'proxy-fixture-v0.1.0',
+        asset: 'gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz',
+      },
+    });
+    assert.equal(releaseAsset.status, 200);
+    assert.equal(catalogAssetOnArtifactRepo.status, 400);
+    assert.deepEqual(calls, [
+      { operation: 'latest-catalog', repository: 'RichLogic/Gian-Proxy-Catalog' },
+      { operation: 'release-asset', repository: 'RichLogic/Gian' },
+    ]);
+  } finally {
+    await broker.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('release broker socket path is deterministic and short', () => {
+  const first = resolveGitHubReleaseBrokerSocketPath('/Users/test/.gian');
+  const second = resolveGitHubReleaseBrokerSocketPath('/Users/test/.gian');
+  const other = resolveGitHubReleaseBrokerSocketPath('/Users/test/.gian-dev');
+
+  assert.equal(first, second);
+  assert.notEqual(first, other);
+  assert.match(first, /gian-github-[a-f0-9]{24}\.sock$/);
+  assert.ok(Buffer.byteLength(first) < 104);
+});
+
+test('packaged App update feed defaults to RichToyo/Gian', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    build: { publish: Array<{ provider?: string; owner?: string; repo?: string }> };
+  };
+  assert.equal(manifest.build.publish.length, 1);
+  assert.equal(manifest.build.publish[0]?.provider, 'github');
+  assert.equal(manifest.build.publish[0]?.owner, 'RichToyo');
+  assert.equal(manifest.build.publish[0]?.repo, 'Gian');
+  assert.equal(OFFICIAL_APP_REPOSITORY, 'RichToyo/Gian');
+});
+
+test('official broker separates App releases from the Proxy/Catalog source and retains legacy artifacts', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-github-proxy-source-'));
+  const socketPath = join(directory, 'broker.sock');
+  const policy = officialCatalogSourcePolicy();
+  assert.equal(policy.repository, 'RichToyo/Gian-Proxies');
+  const calls: Array<{ repository: string; operation?: string }> = [];
+  const broker = new GitHubReleaseMetadataBroker({
+    socketPath,
+    allowedRepository: OFFICIAL_APP_REPOSITORY,
+    allowedCatalogRepository: policy.repository,
+    allowedArtifactRepositories: policy.artifactRepositories,
+    async fetchReleaseMetadata(request) {
+      calls.push(request);
+      return Response.json({ ok: true });
+    },
+  });
+  t.after(async () => { await broker.close(); await rm(directory, { recursive: true, force: true }); });
+  await broker.start();
+  for (const repository of ['RichToyo/Gian-Proxies', 'RichToyo/Gian', 'RichLogic/Gian-Proxies', 'RichLogic/Gian']) {
+    for (const body of [
+      { repository, operation: 'list' },
+      { repository, operation: 'tag', tag: 'proxy-codex-v0.3.1' },
+      { repository, operation: 'release-asset', tag: 'proxy-codex-v0.3.1', asset: 'gian-proxy-codex-0.3.1-darwin-arm64.tar.gz' },
+    ]) assert.equal((await requestBroker({ socketPath, body })).status, 200);
+  }
+  assert.equal((await requestBroker({ socketPath, body: {
+    repository: 'RichToyo/Gian-Proxies', operation: 'latest-catalog',
+  } })).status, 200);
+  assert.equal((await requestBroker({ socketPath, body: {
+    repository: 'RichToyo/Gian-Proxies', operation: 'catalog-asset', tag: 'catalog-v1.7.0', asset: 'catalog-v1.json',
+  } })).status, 200);
+  const acceptedCalls = calls.length;
+  for (const repository of [
+    'RichToyo/Gian',
+    'RichLogic/Gian-Proxies',
+    'RichLogic/Gian',
+    'RichLogic/Gian-Proxy-Catalog',
+    'someone-else/Gian-Proxies',
+    'untrusted/Gian-Proxies',
+  ]) {
+    assert.equal((await requestBroker({ socketPath, body: { repository, operation: 'latest-catalog' } })).status, 400);
+    assert.equal((await requestBroker({ socketPath, body: {
+      repository, operation: 'catalog-asset', tag: 'catalog-v1.7.0', asset: 'catalog-v1.json',
+    } })).status, 400);
+  }
+  for (const repository of ['RichLogic/Gian-Proxy-Catalog', 'someone-else/Gian-Proxies', 'untrusted/Gian-Proxies']) {
+    assert.equal((await requestBroker({ socketPath, body: {
+      repository, operation: 'release-asset', tag: 'proxy-codex-v0.3.1', asset: 'proxy.tar.gz',
+    } })).status, 400);
+  }
+  assert.equal((await requestBroker({ socketPath, body: {
+    repository: 'RichToyo/Gian-Proxies', operation: 'catalog-asset', tag: 'proxy-codex-v0.3.1', asset: 'catalog-v1.json',
+  } })).status, 400);
+  assert.equal(calls.length, acceptedCalls);
+});

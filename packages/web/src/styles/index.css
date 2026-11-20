@@ -1,0 +1,87 @@
+@import url('./tokens.css');
+@import url('./shell.css');
+@import url('./components.css');
+@import url('./coding.css');
+/* Transcript / markdown / tool-row / interaction-card / context-card styles
+   live in @gian/chat-ui; loaded here so the V2 overrides below keep their
+   cascade position over it. */
+@import url('@gian/chat-ui/styles.css');
+@import url('./session.css');
+/* Phase 1+ — V2 shell + inner overrides; loaded LAST so V2 rules win. */
+@import url('./gian-v2.css');
+@import url('./shell-v2.css');
+/* Persistent primary navigation from the approved 2026-08-31 sidebar. */
+@import url('./sidebar-navigation.css');
+/* Settings v3 — left-nav scrollspy + stacked cards; loaded after V2 +
+   legacy session.css so it overrides the ee- / open-cat- rules there. */
+@import url('./settings-v3.css');
+/* Settings › Remote — enrollment / pairing / devices / audit. */
+@import url('./settings-remote.css');
+/* Tasks mode visuals (PRD-v3) — loaded after V2 so Tasks-specific rules win. */
+@import url('./tasks-v3.css');
+/* Workspaces v3 — Inspector list + Workbench detail tab; loaded after V2 so
+   the .ws-* list + .ws-detail-tab overrides win. */
+@import url('./workspaces-v3.css');
+/* Chat-owned detail (Plan, Agent, transcript), separate from dock rails. */
+@import url('./chat-context-panel.css');
+/* Trace view (timeline + turn-grouped event list) — same token set as the
+   transcript rows in @gian/chat-ui. */
+@import url('./trace.css');
+/* Agents page (WP4): My Agents + Proxy Catalog master/detail. */
+@import url('./agents-page.css');
+@import url('./browser.css');
+@import url('./onboarding.css');
+/* Timer / Schedules (Issue #51) — after tasks-v3 so timer rules win on the
+   shared .view/.sidebar/.main-head shells. */
+@import url('./timer.css');
+/* Custom — read-only Customization Inventory page (Issue #50). */
+@import url('./custom.css');
+/* Inbox panel + topbar badge (Issue #53, 0.6.7). */
+@import url('./inbox.css');
+/* Conversation find bar + highlights (Issue #168, 0.6.7). */
+@import url('./conversation-find.css');
+/* Drag-reorder indicators (sidebar lists + settings rows); loaded last — the
+   rules carry no layout properties, only the insertion-line shadow. */
+@import url('./dnd.css');
+
+* {
+  box-sizing: border-box;
+}
+
+/* ── Scrollbars ───────────────────────────────────────────────────────────
+   macOS's default scrollbars flip between a thin overlay and a thick classic
+   state (driven by the system "Show scroll bars" setting + active-scroll), so
+   they appear to "randomly get fat". Pin a stable, thin, styled scrollbar on
+   every scroll area so the width never changes — only the thumb tint reacts to
+   hover. The `border + padding-box` trick keeps the visible thumb ~6px inside
+   a fixed 10px track. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(from var(--text) l c h / 0.28) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: oklch(from var(--text) l c h / 0.24);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: oklch(from var(--text) l c h / 0.40);
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--text);
+  background: var(--bg-frame);
+}

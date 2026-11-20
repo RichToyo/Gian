@@ -1,0 +1,381 @@
+import type { ProxyNotification } from '@gian/shared';
+import type {
+  AgentSpawnData,
+  ApprovalRequestedData,
+  ApprovalResolvedData,
+  DisplayEvent,
+} from '@gian/shared';
+import { parseUnifiedDiffSummary } from './unified-diff.js';
+
+/**
+ * Project a raw codex-proxy notification into 0..N UI display records.
+ *
+ * Mapping coverage:
+ *   output.text.delta       → assistant_text  (delta:true)
+ *   output.reasoning.delta  → reasoning       (kind: 'summary' | 'full')
+ *   output.plan.delta       → plan_update     (delta:true)
+ *   output.plan.final       → plan_update     (delta:false)
+ *   output.command.delta    → command_execution (stdoutDelta stream)
+ *   diff.updated            → file_change     (unified diff parsed)
+ *   codex.agent             → agent_spawn     (native subagent lifecycle)
+ *   approval.requested      → approval_requested
+ *   approval.resolved       → approval_resolved
+ *   turn.started            → (no transcript event — only flips pending UI state
+ *                              via the WS broadcast layer)
+ *   turn.completed          → turn_completed
+ *   turn.failed             → session_error
+ *   runtime.error           → session_error
+ *   token_usage.updated     → (session stats side channel, no chat display)
+ *   debug                   → (discard)
+ *
+ * Generic tool items remain executor-native. Subagents are the exception:
+ * Codex exposes explicit collabAgentToolCall / subAgentActivity variants, so
+ * the proxy projects those into the page's persistent agent-run view.
+ */
+export function projectCodexNotification(
+  raw: ProxyNotification,
+  sessionId: string,
+  turn: number,
+  cwd?: string,
+): DisplayEvent[] {
+  const data = (raw.params.data ?? {}) as Record<string, unknown>;
+
+  switch (raw.method) {
+    case 'output.text.delta': {
+      const itemId = String(data.itemId ?? crypto.randomUUID());
+      const text = String(data.delta ?? data.text ?? '');
+      if (!text) return [];
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: itemId,
+          ts: Date.now(),
+          type: 'message',
+          data: { text, delta: true, itemId },
+        },
+      ];
+    }
+
+    case 'output.reasoning.delta': {
+      const itemId = String(data.itemId ?? crypto.randomUUID());
+      const text = String(data.delta ?? data.text ?? '');
+      if (!text) return [];
+      const kind = data.kind === 'summary' ? 'summary' : 'full';
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: itemId,
+          ts: Date.now(),
+          type: 'activity.reasoning',
+          data: { text, delta: true, itemId, kind },
+        },
+      ];
+    }
+
+    case 'output.plan.delta': {
+      const itemId = String(data.itemId ?? 'plan');
+      const text = String(data.delta ?? '');
+      if (!text) return [];
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: itemId,
+          ts: Date.now(),
+          type: 'plan',
+          data: { text, delta: true },
+        },
+      ];
+    }
+
+    case 'output.plan.final': {
+      const text = String(data.text ?? '');
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: 'plan',
+          ts: Date.now(),
+          type: 'plan',
+          data: { text, delta: false },
+        },
+      ];
+    }
+
+    case 'output.command.delta': {
+      const itemId = String(data.itemId ?? crypto.randomUUID());
+      const stdoutDelta = String(data.delta ?? data.stdout ?? '');
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: itemId,
+          ts: Date.now(),
+          type: 'activity.command',
+          data: {
+            command: String(data.command ?? ''),
+            cwd: data.cwd != null ? String(data.cwd) : undefined,
+            status: 'running',
+            stdoutDelta,
+            itemId,
+          },
+        },
+      ];
+    }
+
+    case 'diff.updated': {
+      // codex wraps the diff under data.params.diff or data.diff
+      const inner = (data.params ?? data) as Record<string, unknown>;
+      const diffText = String(inner.diff ?? inner.unified ?? '');
+      if (!diffText.trim()) return [];
+      const files = parseUnifiedDiffSummary(diffText);
+      if (files.length === 0) return [];
+      // turn/diff/updated is a full snapshot. Some Codex versions omit an
+      // itemId, so deriving the identity from the turn keeps one card (and
+      // one persisted snapshot) instead of inventing a new event each time.
+      const diffId = String(
+        (raw.params as Record<string, unknown>).itemId
+        ?? data.itemId
+        ?? raw.params.turnId
+        ?? `codex-diff:${turn}`,
+      );
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: diffId,
+          ts: Date.now(),
+          type: 'activity.file-change',
+          // `files` paths are relative to the codex process cwd; record it so
+          // last-turn attribution does not guess the viewed tree (sessions
+          // are not tree-stable).
+          data: { files, diff: diffText, ...(cwd ? { cwd } : {}) },
+        },
+      ];
+    }
+
+    case 'codex.agent': {
+      if (!Array.isArray(data.updates)) return [];
+      return data.updates.flatMap(value => {
+        if (!value || typeof value !== 'object') return [];
+        const update = value as Record<string, unknown>;
+        const agentId = typeof update.agentId === 'string' ? update.agentId : '';
+        if (!agentId) return [];
+        const payload: AgentSpawnData = {
+          agentId,
+          description: typeof update.description === 'string' ? update.description : '',
+          status: update.status === 'done' || update.status === 'error'
+            ? update.status
+            : 'running',
+          agentType: typeof update.agentType === 'string' ? update.agentType : undefined,
+          model: typeof update.model === 'string' ? update.model : undefined,
+          output: typeof update.output === 'string' ? update.output : undefined,
+        };
+        return [{
+          session_id: sessionId,
+          turn,
+          call_id: agentId,
+          ts: Date.now(),
+          type: 'agent' as const,
+          data: payload,
+        }];
+      });
+    }
+
+    case 'approval.requested': {
+      const approvalId = String(data.approvalId ?? crypto.randomUUID());
+      const method = String(data.method ?? '');
+      const payload = (data.payload ?? {}) as Record<string, unknown>;
+      const permissionsKind = typeof data.permissionsKind === 'string'
+        ? data.permissionsKind as 'network' | 'file' | 'mixed' | 'other'
+        : undefined;
+      // Prefer the proxy's explicit `reason` (added 2026-05-17); fall back to
+      // `description` for older proxy builds and finally to the legacy `risk`
+      // field which used to carry the prose. Empty string is a real signal
+      // (proxy had nothing to say) — don't synthesize boilerplate here.
+      const description = typeof data.reason === 'string' && data.reason
+        ? data.reason
+        : typeof data.description === 'string' && data.description
+          ? data.description
+          : typeof data.risk === 'string' && data.risk
+            ? data.risk
+            : '';
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: approvalId,
+          ts: Date.now(),
+          type: 'interaction.approval',
+          data: {
+            approvalId,
+            category: mapCodexMethodToCategory(method, permissionsKind),
+            // Prefer the proxy's explicit `severity` over the legacy `risk`
+            // field (which carried prose, not severity).
+            risk: mapCodexRisk(data.severity ?? data.risk),
+            title: String(data.title ?? 'Review request'),
+            description,
+            subject: extractCodexSubject(payload),
+            scopeOptions: mapScopeOptions(data.scopeOptions),
+          } satisfies ApprovalRequestedData,
+        },
+      ];
+    }
+
+    case 'approval.resolved': {
+      const approvalId = String(data.approvalId ?? '');
+      if (!approvalId) return [];
+      // codex uses data.decision: 'accept'|'decline', data.scope: 'once'|'session'
+      const decision = mapCodexDecision(String(data.decision ?? ''), String(data.scope ?? ''));
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: approvalId,
+          ts: Date.now(),
+          type: 'interaction.resolved',
+          data: {
+            approvalId,
+            decision,
+            auto: Boolean(data.auto ?? false),
+          } satisfies ApprovalResolvedData,
+        },
+      ];
+    }
+
+    case 'turn.completed': {
+      const summary = (data.summary ?? {}) as Record<string, unknown>;
+      const turnId = String(raw.params.turnId ?? summary.turnId ?? turn);
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: turnId,
+          ts: Date.now(),
+          type: 'state.turn-completed',
+          data: {
+            turnId,
+            summary: summary.assistantText != null ? String(summary.assistantText) : undefined,
+          },
+        },
+      ];
+    }
+
+    case 'turn.failed': {
+      const msg = String(data.error ?? data.message ?? 'turn failed');
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: crypto.randomUUID(),
+          ts: Date.now(),
+          type: 'state.error',
+          data: {
+            message: msg,
+            retryable: isRetryable(msg),
+          },
+        },
+      ];
+    }
+
+    case 'runtime.error': {
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: crypto.randomUUID(),
+          ts: Date.now(),
+          type: 'state.error',
+          data: {
+            message: String(data.message ?? 'runtime error'),
+            retryable: false,
+            code: data.code != null ? String(data.code) : undefined,
+          },
+        },
+      ];
+    }
+
+    case 'turn.started': {
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: 'turn-start',
+          ts: Date.now(),
+          type: 'state.turn-started',
+          data: { turnId: String((raw.params as { turnId?: unknown }).turnId ?? '') },
+        },
+      ];
+    }
+
+    // Intentionally has no chat display:
+    case 'token_usage.updated': // M2 session stats layer
+    case 'debug':               // discard
+    default:
+      return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function mapCodexMethodToCategory(
+  method: string,
+  permissionsKind?: 'network' | 'file' | 'mixed' | 'other',
+): 'command' | 'network' | 'file_write_outside_ws' | 'other' {
+  if (method === 'shell' || method === 'exec' || method.includes('command')) return 'command';
+  if (method === 'network' || method.includes('http') || method.includes('fetch')) return 'network';
+  // Permissions requests carry permissionsKind from the proxy. Route
+  // network-only grants to `network` and file-only to `file_write_outside_ws`
+  // so the UI shows the right card; mixed/other stay generic. Without this
+  // the old fallthrough mapped every permissions request to `other`.
+  if (method === 'item/permissions/requestApproval' || method.includes('permission')) {
+    if (permissionsKind === 'network') return 'network';
+    if (permissionsKind === 'file') return 'file_write_outside_ws';
+    return 'other';
+  }
+  if (method === 'write' || method.includes('file')) return 'file_write_outside_ws';
+  return 'other';
+}
+
+function mapCodexRisk(v: unknown): 'low' | 'medium' | 'high' {
+  const s = String(v ?? '').toLowerCase();
+  if (s === 'high' || s.includes('danger')) return 'high';
+  if (s === 'low') return 'low';
+  return 'medium';
+}
+
+function extractCodexSubject(payload: Record<string, unknown>): string | undefined {
+  const v = payload.command ?? payload.cmd ?? payload.path ?? payload.url;
+  return v != null ? String(v) : undefined;
+}
+
+function mapScopeOptions(v: unknown): ('once' | 'session')[] {
+  if (!Array.isArray(v)) return ['once', 'session'];
+  return (v as unknown[])
+    .map(s => String(s))
+    .filter((s): s is 'once' | 'session' => s === 'once' || s === 'session');
+}
+
+function mapCodexDecision(
+  decision: string,
+  scope: string,
+): 'allow_once' | 'allow_session' | 'decline' {
+  if (decision === 'decline' || decision === 'declined' || decision === 'deny') return 'decline';
+  if (scope === 'session') return 'allow_session';
+  return 'allow_once';
+}
+
+function isRetryable(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('timeout') ||
+    lower.includes('rate limit') ||
+    lower.includes('network') ||
+    lower.includes('econnreset') ||
+    lower.includes('socket')
+  );
+}

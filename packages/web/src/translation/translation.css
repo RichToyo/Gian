@@ -1,0 +1,15 @@
+/* Web-only translation surfaces: the Settings selectors and the selection
+   translation popover. Every conversation-translation rule (chip, blocks,
+   globe toggle, send row, dots) lives in @gian/chat-ui styles now, imported
+   from styles/index.css. */
+.translation-settings select { width: 100%; min-width: 0; max-width: 100%; }
+.translation-settings input { width: 100%; min-width: 0; }
+.translation-key-controls { display: grid; gap: 8px; min-width: 0; }
+.translation-key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.translation-popover { position: fixed; z-index: 1000; width: min(360px, calc(100vw - 24px)); max-height: min(60vh, 480px); overflow: auto; transform: translateX(-50%); padding: 12px; border: 1px solid var(--hairline); border-radius: 6px; background: var(--surface); box-shadow: 0 8px 30px #0002; }
+.translation-popover .translation-block { margin-top: 0; }
+.translation-close { float: right; width: 28px; height: 28px; border: 0; background: transparent; color: var(--muted); font-size: 20px; cursor: pointer; }
+.transcript-selection-actions { max-width: calc(100vw - 24px); flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .translation-close { min-width: 36px; min-height: 36px; }
+}

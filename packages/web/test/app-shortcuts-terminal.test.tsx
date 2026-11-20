@@ -1,0 +1,127 @@
+import { act, renderHook } from '@testing-library/react';
+import type { Session } from '@gian/shared';
+import type { Dispatch, RefObject, SetStateAction } from 'react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useAppShortcuts } from '../src/controllers/use-app-shortcuts.js';
+import type { OperationDispatcher } from '../src/operations/dispatcher.js';
+import { sessionContractFixture } from './fixtures/ws-contract.js';
+
+vi.mock('../src/components/composer/capabilities.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/components/composer/capabilities.js')>(),
+  peekSteerCached: () => true,
+}));
+
+function renderShortcuts(
+  session: Session,
+  disabled = false,
+  setPaletteOpen = vi.fn() as Dispatch<SetStateAction<boolean>>,
+) {
+  const dispatch = vi.fn();
+  const sessionsRef = { current: [session] } as RefObject<Session[]>;
+  const ops = {
+    dispatch,
+    dispose: vi.fn(),
+    store: {},
+  } as unknown as OperationDispatcher;
+  renderHook(() => useAppShortcuts({
+    authenticated: true,
+    mode: 'sessions',
+    activeSessionId: session.id,
+    activeTaskId: null,
+    activeSubtaskId: null,
+    sessionsRef,
+    ops,
+    paletteOpen: false,
+    disabled,
+    setPaletteOpen,
+  }));
+
+  return dispatch;
+}
+
+function pressQueueShortcut(modifier: 'metaKey' | 'ctrlKey'): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Enter',
+    [modifier]: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  act(() => {
+    document.dispatchEvent(event);
+  });
+  return event;
+}
+
+describe('global queue.sendNow shortcut terminal guard', () => {
+  it('ignores global shortcuts while a modal owns keyboard focus', () => {
+    const session = sessionContractFixture({ id: 'modal-open' });
+    const setPaletteOpen = vi.fn() as Dispatch<SetStateAction<boolean>>;
+    const dispatch = renderShortcuts(session, true, setPaletteOpen);
+
+    for (const init of [
+      { key: 'Enter', metaKey: true },
+      { key: 'j', metaKey: true },
+      { key: 'k', metaKey: true },
+      { key: 'k', metaKey: true, shiftKey: true },
+    ]) {
+      act(() => document.dispatchEvent(new KeyboardEvent('keydown', {
+        ...init,
+        bubbles: true,
+        cancelable: true,
+      })));
+    }
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(setPaletteOpen).not.toHaveBeenCalled();
+  });
+
+  for (const modifier of ['metaKey', 'ctrlKey'] as const) {
+    it(`dispatches ${modifier === 'metaKey' ? 'Cmd' : 'Ctrl'}+Enter for an open Codex session`, () => {
+      const session = sessionContractFixture({ id: `open-${modifier}` });
+      const dispatch = renderShortcuts(session);
+
+      const event = pressQueueShortcut(modifier);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(dispatch).toHaveBeenCalledWith('queue.sendNow', { sessionId: session.id });
+    });
+  }
+
+  for (const modifier of ['metaKey', 'ctrlKey'] as const) {
+    it(`ignores ${modifier === 'metaKey' ? 'Cmd' : 'Ctrl'}+Enter when the session is completed`, () => {
+      const session = sessionContractFixture({
+        id: `completed-${modifier}`,
+        completed_at: '2026-08-08T01:00:00.000Z',
+        worktree_outcome: null,
+      });
+      const dispatch = renderShortcuts(session);
+
+      const event = pressQueueShortcut(modifier);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+  }
+
+  // ADR-0080: a finalized worktree outcome is legacy metadata — the session
+  // behaves like any other open session, including the queue.sendNow shortcut.
+  for (const outcome of ['merged', 'discarded'] as const) {
+    for (const modifier of ['metaKey', 'ctrlKey'] as const) {
+      it(`dispatches ${modifier === 'metaKey' ? 'Cmd' : 'Ctrl'}+Enter when the session is ${outcome}`, () => {
+        const session = sessionContractFixture({
+          id: `${outcome}-${modifier}`,
+          completed_at: null,
+          worktree_outcome: outcome,
+        });
+        const dispatch = renderShortcuts(session);
+
+        const event = pressQueueShortcut(modifier);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(dispatch).toHaveBeenCalledWith('queue.sendNow', { sessionId: session.id });
+      });
+    }
+  }
+});

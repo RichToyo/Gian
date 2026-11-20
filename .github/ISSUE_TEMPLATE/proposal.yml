@@ -1,0 +1,49 @@
+name: Proposal
+description: Discuss a product direction or a decision before implementation
+title: "[Proposal] "
+labels:
+  - proposal
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why does this need discussion now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Decision
+      description: Define this discussion as one question that can be answered.
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options
+      description: List the known options and the main tradeoffs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: recommendation
+    attributes:
+      label: Current recommendation
+      description: If you already have a preference, state the recommended option and why.
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Users, modules, data, compatibility, or release plans that this touches.
+
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Which questions must be answered before this Proposal closes or becomes a Feature?
+    validations:
+      required: true

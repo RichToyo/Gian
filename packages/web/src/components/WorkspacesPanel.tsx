@@ -1,0 +1,200 @@
+import { useEffect, useState } from 'react';
+import type { Session, SystemConfig, Workspace } from '@gian/shared';
+import { loadSessions } from '../api.js';
+import { useT } from '../i18n/index.js';
+import { useOperationDispatch } from '../operations/use-operations.js';
+import type { GianWs } from '../ws.js';
+import { SpaceDetail, ClaudeMdInspector } from '../views/SpacesView.js';
+
+// Icon paths copied verbatim from design/gian-design-v2/js/data.jsx (`I`), so
+// the Inspector list matches the prototype's WorkspacesInspector exactly.
+const I = {
+  plus: 'M12 5v14 M5 12h14',
+  arrowUp: 'M12 19V5 M5 12l7-7 7 7',
+  arrowDown: 'M12 5v14 M19 12l-7 7-7-7',
+};
+
+function Icon({ d, size = 14, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+         strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
+      <path d={d} />
+    </svg>
+  );
+}
+
+// ─── Workspaces Inspector (right rail, zone 4) ───────────────────────────────
+// Mirrors design/gian-design-v2/js/views.jsx → WorkspacesInspector: a flat list
+// of workspaces with per-row up/down buttons. NO leading icon, NO open-dot, NO
+// session count. Clicking a row opens that workspace's detail as a Workbench
+// tab (zone 3) via onOpenWorkspace.
+//
+// Unlike the prototype (where order is local-only and resets on reload), this
+// is wired to the real persistence layer THROUGH THE OPERATION LAYER
+// (Phase 3a): reordering dispatches `workspace.reorder` (whole-list order
+// overlay → POST /api/workspaces/reorder). The host does not broadcast
+// reorders; the definition's reconcile patches + refetches canonical state on
+// success. The list itself reflects `workspace.sort_order` (already sorted by
+// the host).
+export function WorkspacesInspector({
+  workspaces,
+  selectedWsId,
+  openWsIds,
+  onOpenWorkspace,
+  onNewWorkspace,
+}: {
+  workspaces: Workspace[];
+  /** The workspace whose detail tab is currently active in the Workbench. */
+  selectedWsId: string | null;
+  /** Ids of workspaces that currently have an open detail tab. */
+  openWsIds: Set<string>;
+  onOpenWorkspace: (wsId: string) => void;
+  /** Surface the create-workspace flow (Spaces mode hosts the full form). */
+  onNewWorkspace: () => void;
+}) {
+  const t = useT();
+  const dispatch = useOperationDispatch();
+  // The synthetic root workspace is a container, not a real project — never
+  // list it. Reordering still round-trips the FULL id list (positions of the
+  // two swapped visible rows), so the hidden root keeps its slot.
+  const rows = workspaces.filter(w => w.name !== '__gian_root__');
+
+  function move(idx: number, dir: -1 | 1) {
+    const j = idx + dir;
+    if (j < 0 || j >= rows.length) return;
+    const ids = workspaces.map(w => w.id);
+    const a = ids.indexOf(rows[idx]!.id);
+    const b = ids.indexOf(rows[j]!.id);
+    const tmp = ids[a]!;
+    ids[a] = ids[b]!;
+    ids[b] = tmp;
+    dispatch('workspace.reorder', { ids });
+  }
+
+  return (
+    <aside className="inspector" data-testid="workspaces-inspector">
+      <div className="insp-head">
+        <span className="label">{t('topbar.mode.workspaces')}</span>
+        <button
+          className="iconbtn"
+          data-testid="workspaces-new"
+          title={t('spaces.new')}
+          aria-label={t('spaces.new')}
+          onClick={onNewWorkspace}
+        >
+          <Icon d={I.plus} />
+        </button>
+      </div>
+      <div className="insp-scroll">
+        <div className="ws-list">
+          {rows.map((w, idx) => {
+            const open = openWsIds.has(w.id);
+            const active = w.id === selectedWsId && open;
+            return (
+              <div
+                key={w.id}
+                className={`ws-item ${active ? 'active' : ''}`}
+                data-testid={`ws-item-${w.id}`}
+              >
+                <button className="ws-item-main" onClick={() => onOpenWorkspace(w.id)}>
+                  <span className="ws-item-body">
+                    <span className="ws-item-name">{w.name}</span>
+                    <span className="ws-item-path mono">{w.path}</span>
+                  </span>
+                </button>
+                <span className="ws-item-actions">
+                  <button
+                    className="ws-act"
+                    title={t('spaces.moveup.title')}
+                    aria-label={t('spaces.moveup.title')}
+                    disabled={idx === 0}
+                    onClick={() => void move(idx, -1)}
+                  >
+                    <Icon d={I.arrowUp} size={14} />
+                  </button>
+                  <button
+                    className="ws-act"
+                    title={t('spaces.movedown.title')}
+                    aria-label={t('spaces.movedown.title')}
+                    disabled={idx === rows.length - 1}
+                    onClick={() => void move(idx, 1)}
+                  >
+                    <Icon d={I.arrowDown} size={14} />
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+          {rows.length === 0 && (
+            <p className="spaces-empty">{t('spaces.empty')}</p>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+// ─── Workspace detail rendered inside a Workbench tab (zone 3) ────────────────
+// Mirrors design/gian-design-v2/js/views.jsx → WorkspaceDetailBody, which reuses
+// the existing Spaces detail bodies under a compact tab header. We reuse the real
+// app's SpaceDetail (Overview / Git / Native panes + all their API wiring)
+// verbatim — only the surrounding chrome differs (it lives in a Sheet tab, not
+// the Spaces split view). CLAUDE.md editing surfaces as an inline drawer, same
+// as in Spaces mode.
+export function WorkspaceDetailBody({
+  workspace,
+  ws,
+  systemConfig,
+  onChange,
+  onSessionAdopted,
+  focusTreeId,
+  focusNonce,
+  focusVisible,
+}: {
+  workspace: Workspace | null;
+  ws: GianWs;
+  systemConfig: SystemConfig | null;
+  onChange: () => void;
+  onSessionAdopted: (session: Session) => void;
+  /** Search deep link: exact working-tree inventory id for the Git pane. */
+  focusTreeId?: string | null;
+  focusNonce?: number;
+  /** False while the sheet that hosts this detail is hidden. */
+  focusVisible?: boolean;
+}) {
+  void systemConfig;
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [claudeMdOpen, setClaudeMdOpen] = useState(false);
+
+  useEffect(() => {
+    void loadSessions().then(setSessions);
+  }, [workspace?.id]);
+
+  // Drawer content belongs to the active workspace — close it when the tab's
+  // workspace changes.
+  useEffect(() => { setClaudeMdOpen(false); }, [workspace?.id]);
+
+  return (
+    <div className={`ws-detail-tab${claudeMdOpen ? ' has-inspector' : ''}`}>
+      <SpaceDetail
+        workspace={workspace}
+        allSessions={sessions}
+        ws={ws}
+        onChange={onChange}
+        onSessionAdopted={onSessionAdopted}
+        onDeleted={onChange}
+        onOpenClaudeMd={() => setClaudeMdOpen(true)}
+        focusTreeId={focusTreeId}
+        focusNonce={focusNonce}
+        focusVisible={focusVisible}
+      />
+      {claudeMdOpen && workspace && (
+        <ClaudeMdInspector
+          workspaceId={workspace.id}
+          workspaceName={workspace.name}
+          onClose={() => setClaudeMdOpen(false)}
+        />
+      )}
+    </div>
+  );
+}

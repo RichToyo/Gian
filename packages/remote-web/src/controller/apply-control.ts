@@ -1,0 +1,560 @@
+import { transcriptItemIdentity } from '@gian/chat-ui';
+import type {
+  AgentSpawnItem,
+  AutoNoticeItem,
+  CommandItem,
+  MsgItem,
+  TranscriptItem,
+} from '@gian/chat-ui';
+import type {
+  CanonicalEvent,
+  RemoteInteraction,
+  RemoteSession,
+  RemoteStatePatch,
+  RemoteStateSnapshot,
+  RemoteTask,
+  RemoteTranscriptItem,
+  StatePatch,
+} from '@gian/remote-protocol';
+import type { Executor } from '@gian/shared';
+import type { RemoteHostEntry, RemoteUiState, TranscriptState } from './types.js';
+
+function isActiveTurnTerminal(session: RemoteSession | undefined, item: TranscriptItem): boolean {
+  const active = session?.active_turn;
+  // Host transcript ids may be remoteStableUuid projections of raw turn ids.
+  // The per-Session turn number is preserved on both DTOs.
+  return active !== undefined && (item.kind === 'turn-end' || item.kind === 'error')
+    && item.turn === active.turn_number;
+}
+
+/** Only Host-confirmed active work is live. Transcript delivery alone (for
+ * example a user echo or late history row) cannot start another turn. */
+export function sessionIsWorking(
+  state: RemoteUiState,
+  session: RemoteSession | undefined,
+  items: TranscriptItem[],
+): boolean {
+  const active = session?.active_turn;
+  return state.connection.kind === 'online'
+    && session?.status === 'running'
+    && active !== undefined
+    && !items.some(item => isActiveTurnTerminal(session, item))
+    && !items.some(item => item.kind === 'approval' && item.status === 'pending'
+      && item.turn === active.turn_number)
+    && !state.interactions.some(interaction => {
+      const phase = state.interactionPhases[interaction.id] ?? 'pending';
+      return interaction.session_id === session.id && (phase === 'pending' || phase === 'responding');
+    });
+}
+
+function syncTranscriptActivity(state: RemoteUiState, sessionIds?: Set<string>): RemoteUiState {
+  const viewedId = state.view.kind === 'chat' ? state.view.sessionId : undefined;
+  const transcripts = viewedId && !state.transcripts[viewedId]
+    && (!sessionIds || sessionIds.has(viewedId))
+    && state.sessions.some(session => session.id === viewedId)
+    ? beginTranscriptLoad(state, viewedId, 'initial').transcripts
+    : state.transcripts;
+  return {
+    ...state,
+    transcripts: Object.fromEntries(Object.entries(transcripts).map(([sessionId, transcript]) => [
+      sessionId,
+      sessionIds && !sessionIds.has(sessionId) ? transcript : {
+        ...transcript,
+        streaming: !transcript.historyError && sessionIsWorking(
+          state, state.sessions.find(session => session.id === sessionId), transcript.items,
+        ),
+      },
+    ])),
+  };
+}
+
+/** Sessions opened from the directory survive snapshots and patches that do
+ *  not carry them (a chat outside an open Task is never in the snapshot). */
+function pinnedIds(state: RemoteUiState, hostId = state.currentHostId): Set<string> {
+  // Pins of another Host (e.g. the one shown before pairing this one) never
+  // carry over.
+  return new Set(state.directory && state.directory.hostId === hostId ? state.directory.pinned : []);
+}
+
+export function applySnapshotToState(
+  state: RemoteUiState,
+  snapshot: RemoteStateSnapshot,
+): RemoteUiState {
+  const first = snapshot.sessions[0];
+  const snapshotIds = new Set(snapshot.sessions.map((session) => session.id));
+  const pinned = pinnedIds(state, snapshot.host.id);
+  const keptSessions = state.sessions.filter(session => pinned.has(session.id) && !snapshotIds.has(session.id));
+  const sessions = [...snapshot.sessions, ...keptSessions];
+  const keptIds = new Set(keptSessions.map(session => session.id));
+  const sessionIds = new Set(sessions.map((session) => session.id));
+  const currentView = state.view;
+  const keepChat = currentView.kind === 'chat' && sessionIds.has(currentView.sessionId);
+  return syncTranscriptActivity({
+    ...state,
+    auth: { kind: 'authenticated' },
+    connection: { kind: 'online' },
+    hosts: mergeSnapshotHost(state.hosts, snapshot),
+    currentHostId: snapshot.host.id,
+    // Accept legacy Host locale fields without changing first-party UI language.
+    locale: 'en',
+    workspaces: snapshot.workspaces,
+    tasks: snapshot.tasks,
+    sessions,
+    interactions: [
+      ...snapshot.interactions,
+      ...state.interactions.filter(interaction => keptIds.has(interaction.session_id)),
+    ],
+    transcripts: Object.fromEntries(
+      Object.entries(state.transcripts).filter(([sessionId]) => sessionIds.has(sessionId)),
+    ),
+    drafts: Object.fromEntries(
+      Object.entries(state.drafts).filter(([sessionId]) => sessionIds.has(sessionId)),
+    ),
+    translations: Object.fromEntries(
+      Object.entries(state.translations).filter(([sessionId]) => sessionIds.has(sessionId)),
+    ),
+    ...(state.fileViewer && !sessionIds.has(state.fileViewer.handle.sessionId)
+      ? { fileViewer: null, fileDownload: { status: 'idle' as const } }
+      : {}),
+    capabilities: snapshot.capabilities,
+    catalogRevision: snapshot.catalog_revision,
+    catalogInvalidated: state.catalog?.catalog_revision !== snapshot.catalog_revision,
+    snapshotReceivedAt: Date.now(),
+    view: keepChat
+      ? state.view
+      : first
+        ? { kind: 'chat', sessionId: first.id }
+        : { kind: 'empty' },
+  });
+}
+
+export function applyCanonicalEvent(state: RemoteUiState, message: CanonicalEvent): RemoteUiState {
+  const event = message.event;
+  if (event.kind === 'session.updated') {
+    return syncTranscriptActivity({
+      ...state,
+      sessions: upsertById(state.sessions, event.session),
+    }, new Set([event.session.id]));
+  }
+  if (event.kind === 'interaction.updated') {
+    return syncTranscriptActivity({
+      ...state, interactions: upsertById(state.interactions, event.interaction),
+    }, new Set([event.interaction.session_id]));
+  }
+  if (event.kind === 'transcript.item') {
+    const session = state.sessions.find((entry) => entry.id === event.session_id);
+    return syncTranscriptActivity({
+      ...state,
+      transcripts: {
+        ...state.transcripts,
+        [event.session_id]: upsertTranscript(
+          state.transcripts[event.session_id],
+          event.item,
+          executorForSession(session),
+        ),
+      },
+    }, new Set([event.session_id]));
+  }
+  return state;
+}
+
+export function applyStatePatch(state: RemoteUiState, message: StatePatch): RemoteUiState {
+  return mergeRemotePatch(state, message.patch);
+}
+
+export function mergeRemotePatch(state: RemoteUiState, patch: RemoteStatePatch): RemoteUiState {
+  let next = { ...state };
+  if (patch.workspaces) {
+    next = {
+      ...next,
+      workspaces: upsertRemove(next.workspaces, patch.workspaces.upsert, patch.workspaces.remove_ids),
+    };
+  }
+  if (patch.tasks) {
+    next = {
+      ...next,
+      tasks: upsertRemove(next.tasks, patch.tasks.upsert, patch.tasks.remove_ids),
+    };
+  }
+  if (patch.sessions) {
+    // A pinned directory chat leaving the Doing snapshot is still open here.
+    const pinned = pinnedIds(next);
+    const sessions = upsertRemove(next.sessions, patch.sessions.upsert,
+      patch.sessions.remove_ids.filter(id => !pinned.has(id)));
+    const sessionIds = new Set(sessions.map((session) => session.id));
+    const transcripts = Object.fromEntries(
+      Object.entries(next.transcripts).filter(([sessionId]) => sessionIds.has(sessionId)),
+    );
+    const drafts = Object.fromEntries(
+      Object.entries(next.drafts).filter(([sessionId]) => sessionIds.has(sessionId)),
+    );
+    const translations = Object.fromEntries(
+      Object.entries(next.translations).filter(([sessionId]) => sessionIds.has(sessionId)),
+    );
+    const currentRemoved = next.view.kind === 'chat' && !sessionIds.has(next.view.sessionId);
+    next = {
+      ...next,
+      sessions,
+      transcripts,
+      drafts,
+      translations,
+      interactions: next.interactions.filter((interaction) => sessionIds.has(interaction.session_id)),
+      ...(next.fileViewer && !sessionIds.has(next.fileViewer.handle.sessionId)
+        ? { fileViewer: null, fileDownload: { status: 'idle' as const } }
+        : {}),
+      ...(currentRemoved
+        ? { view: sessions[0] ? { kind: 'chat' as const, sessionId: sessions[0].id } : { kind: 'empty' as const } }
+        : {}),
+    };
+  }
+  if (patch.interactions) {
+    next = {
+      ...next,
+      interactions: upsertRemove(next.interactions, patch.interactions.upsert, patch.interactions.remove_ids),
+    };
+  }
+  if (patch.queues) {
+    next = {
+      ...next,
+      sessions: next.sessions.map((session) => {
+        const queue = patch.queues?.find((entry) => entry.session_id === session.id);
+        return queue
+          ? { ...session, queue: { revision: queue.queue_revision, entries: queue.entries } }
+          : session;
+      }),
+    };
+  }
+  if (patch.capabilities) {
+    next = { ...next, capabilities: patch.capabilities };
+  }
+  if (patch.catalog_invalidated) {
+    next = {
+      ...next,
+      catalogInvalidated: true,
+      catalogRevision: patch.catalog_invalidated.catalog_revision,
+    };
+  }
+  return syncTranscriptActivity(next, new Set([
+    ...(patch.sessions?.upsert.map(session => session.id) ?? []),
+    ...(patch.interactions?.upsert.map(interaction => interaction.session_id) ?? []),
+    ...state.interactions.filter(interaction => patch.interactions?.remove_ids.includes(interaction.id))
+      .map(interaction => interaction.session_id),
+  ]));
+}
+
+export function applyTranscriptPage(
+  state: RemoteUiState,
+  sessionId: string,
+  items: RemoteTranscriptItem[],
+  exec: Executor,
+  hasOlder: boolean,
+  cursor?: string,
+  prepend = false,
+): RemoteUiState {
+  const mapped = items.reduce<TranscriptItem[]>(
+    (current, item) => applyRemoteTranscriptItem(current, item, exec),
+    [],
+  );
+  const previous = state.transcripts[sessionId];
+  const session = state.sessions.find(entry => entry.id === sessionId);
+  // A page requested before turn-end must not erase the completed live turn
+  // (including its final reply) while Session status is still catching up.
+  const pagePredatesTerminal = previous?.items.some(item => isActiveTurnTerminal(session, item))
+    && !mapped.some(item => isActiveTurnTerminal(session, item));
+  const combined = prepend
+    ? [...mapped, ...(previous?.items ?? [])]
+    : [...mapped, ...(pagePredatesTerminal
+      ? (previous?.items ?? []).filter(item => item.turn === session?.active_turn?.turn_number)
+      : [])];
+  const unique = combined.reduce<TranscriptItem[]>(
+    (current, item) => upsertDisplayItem(current, item),
+    [],
+  );
+  return {
+    ...state,
+    transcripts: {
+      ...state.transcripts,
+      [sessionId]: {
+        items: unique,
+        hydrated: true,
+        streaming: sessionIsWorking(state, session, unique),
+        hasOlder,
+        loadingOlder: false,
+        ...(cursor ? { cursor } : {}),
+        historyError: null,
+      },
+    },
+  };
+}
+
+export function beginTranscriptLoad(
+  state: RemoteUiState,
+  sessionId: string,
+  operation: 'initial' | 'older',
+): RemoteUiState {
+  const previous = state.transcripts[sessionId];
+  return {
+    ...state,
+    transcripts: {
+      ...state.transcripts,
+      [sessionId]: {
+        items: previous?.items ?? [],
+        hydrated: operation === 'older' ? (previous?.hydrated ?? false) : false,
+        streaming: operation === 'older' && (previous?.streaming ?? false),
+        hasOlder: previous?.hasOlder ?? false,
+        loadingOlder: operation === 'older',
+        ...(previous?.cursor ? { cursor: previous.cursor } : {}),
+        historyError: null,
+      },
+    },
+  };
+}
+
+export function failTranscriptLoad(
+  state: RemoteUiState,
+  sessionId: string,
+  operation: 'initial' | 'older',
+): RemoteUiState {
+  const previous = state.transcripts[sessionId];
+  return {
+    ...state,
+    transcripts: {
+      ...state.transcripts,
+      [sessionId]: {
+        items: previous?.items ?? [],
+        hydrated: previous?.hydrated ?? false,
+        streaming: false,
+        hasOlder: previous?.hasOlder ?? false,
+        loadingOlder: false,
+        ...(previous?.cursor ? { cursor: previous.cursor } : {}),
+        historyError: { status: null, operation },
+      },
+    },
+  };
+}
+
+export function applyRemoteTranscriptItem(
+  items: TranscriptItem[],
+  item: RemoteTranscriptItem,
+  exec: Executor,
+): TranscriptItem[] {
+  if (item.kind === 'user') {
+    return upsertDisplayItem(items, {
+      kind: 'user', id: item.id, text: item.text, exec, ts: item.ts, turn: item.turn,
+      ...(item.attachments?.length ? {
+        attachments: item.attachments.map(attachment => ({
+          name: attachment.name,
+          mime: attachment.mime,
+          url: attachment.reference ?? attachment.id,
+          size: attachment.size,
+        })),
+      } : {}),
+      // Identity-first echo adoption: the wire delivery_id, never text
+      // equality, links the canonical user message to a gated send.
+      ...(item.delivery_id ? { deliveryId: item.delivery_id } : {}),
+      // Minimal display shape only — the wire DTO never carries the full
+      // Host TranslationRecord (Agent/model stay on the Host). A
+      // descriptor-only summary (no inline text) pages its complete text
+      // through translation.result_text before rendering.
+      ...(item.translation ? {
+        translation: {
+          id: item.translation.id,
+          targetLanguage: item.translation.target_language,
+          textSha256: item.translation.text_sha256,
+          ...(item.translation.text !== undefined ? { text: item.translation.text } : {}),
+        },
+      } : {}),
+    });
+  }
+  if (item.kind === 'assistant') {
+    const next: MsgItem = {
+      kind: 'assistant', id: item.id, text: item.text, exec, ts: item.ts, turn: item.turn,
+    };
+    const identity = transcriptItemIdentity(next);
+    const index = items.findIndex((entry) => transcriptItemIdentity(entry) === identity);
+    if (index < 0) return [...items, next];
+    const previous = items[index];
+    if (!previous || previous.kind !== 'assistant') return upsertDisplayItem(items, next);
+    return replaceAt(items, index, {
+      ...previous,
+      text: item.delta ? previous.text + item.text : item.text,
+      ts: Math.min(previous.ts, item.ts),
+    });
+  }
+  if (item.kind === 'command') {
+    const previous = findDisplayItem<CommandItem>(items, item, 'command');
+    return upsertDisplayItem(items, {
+      kind: 'command',
+      id: item.id,
+      command: previous?.command ?? 'Command',
+      status: item.status,
+      ...(item.exit_code !== undefined ? { exitCode: item.exit_code } : {}),
+      stdout: previous?.stdout ?? '',
+      ts: previous?.ts ?? item.ts,
+      turn: item.turn,
+    });
+  }
+  if (item.kind === 'file-change') {
+    return upsertDisplayItem(items, {
+      kind: 'tool', id: item.id, name: 'Files changed',
+      summary: `${item.file_count} ${item.file_count === 1 ? 'file' : 'files'}`,
+      status: 'success', ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'file-read') {
+    return upsertDisplayItem(items, {
+      kind: 'file-read', id: item.id, path: 'File', ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'file-search') {
+    return upsertDisplayItem(items, {
+      kind: 'file-search', id: item.id, pattern: 'Files', searchKind: item.search_kind,
+      ...(item.match_count !== undefined ? { matchCount: item.match_count } : {}),
+      ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'web-search') {
+    return upsertDisplayItem(items, {
+      kind: 'web-search', id: item.id, query: 'Web search',
+      ...(item.result_count !== undefined ? { resultCount: item.result_count } : {}),
+      ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'tool') {
+    return upsertDisplayItem(items, {
+      kind: 'tool', id: item.id, name: item.name, summary: '', status: item.status,
+      ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'agent') {
+    const previous = findDisplayItem<AgentSpawnItem>(items, item, 'agent-spawn');
+    return upsertDisplayItem(items, {
+      kind: 'agent-spawn', id: item.id, provider: exec,
+      description: item.agent_type ?? 'Sub-agent', status: item.status,
+      ...(item.agent_type ? { agentType: item.agent_type } : {}),
+      ...(item.model ? { model: item.model } : {}),
+      ...(item.background !== undefined ? { background: item.background } : {}),
+      startedAt: previous?.startedAt ?? item.started_at,
+      updatedAt: item.ts,
+      ...(item.completed_at !== undefined ? { completedAt: item.completed_at } : {}),
+      ts: previous?.ts ?? item.ts,
+      turn: item.turn,
+    });
+  }
+  if (item.kind === 'notice') {
+    const notice: AutoNoticeItem = {
+      kind: 'auto-notice', id: item.id, variant: 'notice', severity: item.severity,
+      title: item.code, consecutive: 0, total: 0,
+      ts: item.ts, turn: item.turn,
+    };
+    return upsertDisplayItem(items, notice);
+  }
+  if (item.kind === 'classifier-denied') {
+    return upsertDisplayItem(items, {
+      kind: 'auto-notice', id: item.id, variant: 'classifier-denied',
+      action: 'Restricted action', reason: 'Blocked by policy',
+      consecutive: item.consecutive, total: item.total, ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'circuit-breaker') {
+    return upsertDisplayItem(items, {
+      kind: 'auto-notice', id: item.id, variant: 'circuit-breaker', trigger: item.trigger,
+      consecutive: item.consecutive, total: item.total, ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'turn-end') {
+    return upsertDisplayItem(items, {
+      kind: 'turn-end', id: item.id, text: '', outcome: item.outcome,
+      turn_id: item.turn_id,
+      ...(item.source_turn_id ? { source_turn_id: item.source_turn_id } : {}),
+      ts: item.ts, turn: item.turn,
+    });
+  }
+  if (item.kind === 'error') {
+    return upsertDisplayItem(items, {
+      kind: 'error', id: item.id, text: 'The agent stopped with an error.',
+      ts: item.ts, turn: item.turn,
+    });
+  }
+  return items;
+}
+
+function upsertTranscript(
+  current: TranscriptState | undefined,
+  item: RemoteTranscriptItem,
+  exec: Executor,
+): TranscriptState {
+  const nextItems = applyRemoteTranscriptItem(current?.items ?? [], item, exec);
+  return {
+    items: nextItems,
+    hydrated: true,
+    streaming: false,
+    hasOlder: current?.hasOlder ?? false,
+    loadingOlder: false,
+    ...(current?.cursor ? { cursor: current.cursor } : {}),
+    historyError: null,
+  };
+}
+
+function upsertDisplayItem(items: TranscriptItem[], item: TranscriptItem): TranscriptItem[] {
+  const identity = transcriptItemIdentity(item);
+  const index = items.findIndex((entry) => transcriptItemIdentity(entry) === identity);
+  return index < 0 ? [...items, item] : replaceAt(items, index, item);
+}
+
+function replaceAt<T>(items: T[], index: number, item: T): T[] {
+  return [...items.slice(0, index), item, ...items.slice(index + 1)];
+}
+
+function findDisplayItem<T extends TranscriptItem>(
+  items: TranscriptItem[],
+  remote: RemoteTranscriptItem,
+  kind: T['kind'],
+): T | undefined {
+  return items.find((entry) => entry.turn === remote.turn && entry.id === remote.id && entry.kind === kind) as T | undefined;
+}
+
+function executorForSession(session: RemoteSession | undefined): Executor {
+  return session?.agent.proxy || 'claude';
+}
+
+function mergeSnapshotHost(
+  hosts: RemoteHostEntry[],
+  snapshot: RemoteStateSnapshot,
+): RemoteHostEntry[] {
+  const previous = hosts.find((host) => host.id === snapshot.host.id);
+  const entry: RemoteHostEntry = {
+    id: snapshot.host.id,
+    name: snapshot.host.name,
+    online: true,
+    sessionCount: snapshot.sessions.length,
+    ...(previous?.lastSeenAt != null ? { lastSeenAt: previous.lastSeenAt } : {}),
+    ...(previous?.latencyMs != null ? { latencyMs: previous.latencyMs } : {}),
+  };
+  const index = hosts.findIndex((host) => host.id === entry.id);
+  if (index === -1) return [...hosts, entry];
+  return [...hosts.slice(0, index), entry, ...hosts.slice(index + 1)];
+}
+
+function upsertById<T extends { id: string }>(list: T[], item: T): T[] {
+  const index = list.findIndex((entry) => entry.id === item.id);
+  if (index === -1) return [...list, item];
+  return [...list.slice(0, index), item, ...list.slice(index + 1)];
+}
+
+function upsertRemove<T extends { id: string }>(
+  list: T[],
+  upsert: T[] | undefined,
+  removeIds: string[] | undefined,
+): T[] {
+  const removed = new Set(removeIds ?? []);
+  const next = list.filter((item) => !removed.has(item.id));
+  for (const item of upsert ?? []) {
+    const index = next.findIndex((entry) => entry.id === item.id);
+    if (index === -1) next.push(item);
+    else next[index] = item;
+  }
+  return next;
+}
+
+export type { RemoteInteraction, RemoteSession, RemoteTask };

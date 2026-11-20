@@ -1,0 +1,33 @@
+name: Question
+description: Ask a development or product question that should be retained
+title: "[Question] "
+labels:
+  - question
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State the specific question that needs an answer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include the code path, behavior, or product context needed to understand the question.
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempts
+    attributes:
+      label: What is already known
+      description: List material already checked, attempts already made, or possibilities already ruled out.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Action after an answer
+      description: Say whether the answer may become a Feature, Bug, Proposal, ADR, or documentation update.

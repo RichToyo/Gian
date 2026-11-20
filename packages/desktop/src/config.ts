@@ -1,0 +1,145 @@
+import { join } from 'node:path';
+
+export const PROD_HOST_URL = 'http://127.0.0.1:8990';
+export const DEV_HOST_URL = 'http://127.0.0.1:8992';
+export const DEV_WEB_URL = 'http://127.0.0.1:5192';
+export const DEV_PACKAGE_HOST_URL = 'http://127.0.0.1:8991';
+export type DesktopBuildChannel = 'stable' | 'dev' | 'source';
+
+export interface DesktopTargets {
+  hostUrl: string;
+  healthUrl: string;
+  webUrl: string;
+  manageHost: boolean;
+}
+
+export interface DesktopWindowChrome {
+  titleBarStyle?: 'hiddenInset';
+  titleBarOverlay?: true;
+  trafficLightPosition?: { x: number; y: number };
+}
+
+export interface DesktopApplicationIdentity {
+  name: 'Gian' | 'GianDev';
+  userDataPath: string | null;
+  variant: 'production' | 'development';
+}
+
+export interface ResolveDesktopTargetsOptions {
+  isPackaged: boolean;
+  channel?: DesktopBuildChannel;
+  platform: NodeJS.Platform;
+  env?: Readonly<Record<string, string | undefined>>;
+}
+
+function normalizeHttpOrigin(value: string, label: string): string {
+  const parsed = new URL(value);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${label} must use http or https`);
+  }
+  if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
+    throw new Error(`${label} must be an origin without a path, query, or fragment`);
+  }
+  return parsed.origin;
+}
+
+export function resolveDesktopTargets({
+  isPackaged,
+  channel,
+  platform,
+  env = process.env,
+}: ResolveDesktopTargetsOptions): DesktopTargets {
+  if (channel === 'dev' && env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] !== '1') env = {};
+  const defaultHostUrl = channel === 'dev' ? DEV_PACKAGE_HOST_URL : isPackaged ? PROD_HOST_URL : DEV_HOST_URL;
+  const hostUrl = normalizeHttpOrigin(
+    env['GIAN_DESKTOP_HOST_URL'] ?? defaultHostUrl,
+    'GIAN_DESKTOP_HOST_URL',
+  );
+  const webUrl = normalizeHttpOrigin(
+    env['GIAN_DESKTOP_WEB_URL'] ?? (isPackaged ? hostUrl : DEV_WEB_URL),
+    'GIAN_DESKTOP_WEB_URL',
+  );
+  const managementDisabled = env['GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT'] === '1';
+  // The packaged-app harness must exercise the real bundled Host without
+  // touching production 8990. Keep this override loopback-only and explicit.
+  const smokeManagesCustomHost = (
+    env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1'
+    && new URL(hostUrl).hostname === '127.0.0.1'
+  );
+
+  return {
+    hostUrl,
+    healthUrl: `${hostUrl}/health`,
+    webUrl,
+    manageHost:
+      isPackaged &&
+      platform === 'darwin' &&
+      (hostUrl === PROD_HOST_URL || (channel === 'dev' && hostUrl === DEV_PACKAGE_HOST_URL) || smokeManagesCustomHost) &&
+      !managementDisabled,
+  };
+}
+
+export function isTrustedDesktopUrl(
+  candidate: string,
+  targets: Pick<DesktopTargets, 'hostUrl' | 'webUrl'>,
+): boolean {
+  try {
+    const origin = new URL(candidate).origin;
+    return origin === targets.hostUrl || origin === targets.webUrl;
+  } catch {
+    return false;
+  }
+}
+
+export function desktopRequestBoundaryUrls(hostUrl: string): string[] {
+  const websocketUrl = new URL(hostUrl);
+  websocketUrl.protocol = websocketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  return [`${hostUrl}/*`, `${websocketUrl.origin}/*`];
+}
+
+export function isSafeExternalUrl(candidate: string): boolean {
+  try {
+    const protocol = new URL(candidate).protocol;
+    return protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:';
+  } catch {
+    return false;
+  }
+}
+
+export function resolveDesktopWindowChrome(
+  platform: NodeJS.Platform,
+): DesktopWindowChrome {
+  if (platform !== 'darwin') return {};
+  return {
+    titleBarStyle: 'hiddenInset',
+    titleBarOverlay: true,
+    /* Center the lights on the cozy topbar's middle (~21px): default inset
+       centers them at ~17.75px while the 42px row's content centers at 21,
+       which read as "lights floating high" next to Air. 15 + half a 14px
+       button ≈ 22. */
+    trafficLightPosition: { x: 15, y: 15 },
+  };
+}
+
+export function resolveDesktopApplicationIdentity(
+  isPackaged: boolean,
+  appDataPath: string,
+  env: Readonly<Record<string, string | undefined>> = {},
+  channel?: DesktopBuildChannel,
+): DesktopApplicationIdentity {
+  const userDataOverride = env['GIAN_DESKTOP_USER_DATA_DIR']?.trim() || null;
+  return isPackaged && channel !== 'dev'
+    ? { name: 'Gian', userDataPath: userDataOverride, variant: 'production' }
+    : {
+        name: 'GianDev',
+        userDataPath: userDataOverride ?? join(appDataPath, 'GianDev'),
+        variant: 'development',
+      };
+}
+
+export function resolveDesktopDisplayName(
+  identity: DesktopApplicationIdentity,
+  env: Readonly<Record<string, string | undefined>> = {},
+): string {
+  return env['GIAN_DESKTOP_LABEL']?.trim() || identity.name;
+}

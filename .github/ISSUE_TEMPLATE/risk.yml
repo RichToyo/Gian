@@ -1,0 +1,77 @@
+name: Risk
+description: Track an open product, security, compatibility, data, or release risk
+title: "[Risk] "
+labels:
+  - risk
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include secrets, credentials, private user data, production payloads, or sensitive logs.
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Risk scenario
+      description: Describe what can go wrong, and under which conditions. Do not write only the solution.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: likelihood
+    attributes:
+      label: Likelihood
+      options:
+        - low
+        - medium
+        - high
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - low
+        - medium
+        - high
+        - critical
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Signals and evidence
+      description: Explain how to tell the risk is happening. Link only redacted evidence.
+
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: Mitigation
+      description: State the prevention, detection, recovery, and rollback boundaries.
+    validations:
+      required: true
+
+  - type: textarea
+    id: done
+    attributes:
+      label: Close or accept when
+      description: Define when this can be marked mitigated, accepted, or no longer applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Related requirements, ADRs, code, tests, Issues, or PRs.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed sensitive data and searched existing Risk and Bug Issues.
+          required: true

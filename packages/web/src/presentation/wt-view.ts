@@ -1,0 +1,84 @@
+// Per-session persistence for the view-level working-tree override (the
+// breadcrumb branch/worktree picker). The picker used to keep the choice in
+// component state only, so a reload silently fell back to the workspace's
+// primary checkout ("it reverts to main after a while", 2026-08-06). The
+// override is view-only — execution cwd, terminal cwd, and file-mention stay
+// bound to the session's own worktree — so localStorage is the right home.
+
+const KEY_PREFIX = 'gian.wt.view.';
+
+/** The picker identifies a checkout by its worktree directory, never by the
+ *  branch checked out inside it. `label` remains the fallback for unusual
+ *  roots whose path has no final component. */
+export function worktreeDisplayName(tree: { path: string; label: string }): string {
+  const path = tree.path.replace(/[\\/]+$/, '');
+  const name = path.split(/[\\/]/).pop();
+  return name || tree.label;
+}
+
+/** The wtId the user (or worktree auto-detect) last picked for this session,
+ *  or null. Never throws — storage can be disabled. */
+export function readWtViewOverride(sessionId: string): string | null {
+  try {
+    return localStorage.getItem(KEY_PREFIX + sessionId);
+  } catch {
+    return null;
+  }
+}
+
+export function writeWtViewOverride(sessionId: string, wtId: string): void {
+  try {
+    localStorage.setItem(KEY_PREFIX + sessionId, wtId);
+  } catch { /* storage disabled */ }
+}
+
+// Worktree request bookkeeping: direct detections store the path; trusted Tool
+// requests store path+revision so an explicit repeat can reopen the view.
+// Persisting the marker prevents reload from overwriting a newer manual pick.
+const AUTO_KEY_PREFIX = 'gian.wt.auto.';
+
+export function readWtAutoApplied(sessionId: string): string | null {
+  try {
+    return localStorage.getItem(AUTO_KEY_PREFIX + sessionId);
+  } catch {
+    return null;
+  }
+}
+
+export function writeWtAutoApplied(sessionId: string, marker: string): void {
+  try {
+    localStorage.setItem(AUTO_KEY_PREFIX + sessionId, marker);
+  } catch { /* storage disabled */ }
+}
+
+export function decideWorktreeViewRequest(input: {
+  source: 'agent' | 'gian_tool' | null | undefined;
+  status: 'new' | 'running' | 'pending' | 'error' | 'done';
+  processed: boolean;
+}): 'ignore' | 'wait' | 'open' | 'prompt' {
+  if (input.processed) return 'ignore';
+  if (input.source === 'gian_tool') return 'open';
+  if (input.status === 'running' || input.status === 'pending') return 'wait';
+  return 'prompt';
+}
+
+/** Resolve which tree a session's views should show, in priority order:
+ *  the in-memory pick for the active session, then the persisted override
+ *  (only if that tree still exists — worktrees get deleted), then the
+ *  session's own default. Pure so the precedence is unit-testable. */
+export function resolveViewedTreeId(opts: {
+  sessionId: string;
+  inMemory: { sessionId: string; wtId: string } | null;
+  stored: string | null;
+  trees: ReadonlyArray<{ id: string }>;
+  defaultId: string | null;
+}): string | null {
+  const inMemory = opts.inMemory;
+  if (inMemory
+    && inMemory.sessionId === opts.sessionId
+    && opts.trees.some(tree => tree.id === inMemory.wtId)) {
+    return inMemory.wtId;
+  }
+  if (opts.stored && opts.trees.some(t => t.id === opts.stored)) return opts.stored;
+  return opts.defaultId;
+}

@@ -1,0 +1,461 @@
+import { describe, expect, it } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { generateCanonicalId } from '@gian/remote-protocol';
+import { renderApp } from './render-app.js';
+import { sampleCapabilities, sampleSessions, sampleTasks, sampleTranscript } from '../src/controller/fixture.js';
+import { sampleInteraction } from '../src/scenarios.js';
+
+describe('chat + composer (B5)', () => {
+  it('renders the transcript through @gian/chat-ui (msg/trow classes)', () => {
+    renderApp({ scenario: {}, viewport: 'wide' });
+    expect(document.querySelector('.transcript .msg.user')).not.toBeNull();
+    expect(document.querySelector('.transcript .trow')).not.toBeNull();
+  });
+
+  it('opens a historical attachment with its opaque file handle', async () => {
+    const user = userEvent.setup();
+    const attachmentId = generateCanonicalId();
+    const transcript = sampleTranscript().map((item) => item.kind === 'user'
+      ? {
+          ...item,
+          attachments: [{
+            name: 'screen.png',
+            mime: 'image/png',
+            url: attachmentId,
+            size: 128,
+          }],
+        }
+      : item);
+    const { controller } = renderApp({
+      scenario: { hostData: { 'host-home': {
+        capabilities: sampleCapabilities(),
+        tasks: sampleTasks(),
+        sessions: sampleSessions(),
+        transcripts: { 's-1': transcript },
+      } } },
+      viewport: 'wide',
+    });
+    controller.autoResolveFile = false;
+
+    await user.click(screen.getByRole('button', { name: /screen\.png/ }));
+    expect(controller.state.fileViewer).toEqual({
+      status: 'loading',
+      handle: { id: attachmentId, sessionId: 's-1', label: 'screen.png' },
+    });
+  });
+
+  it('narrow layouts collapse the config controls into the proxy icon (2026-09-15 framework sync)', async () => {
+    const user = userEvent.setup();
+    renderApp({ scenario: {}, viewport: 'narrow' });
+    // Icon-only trigger: no model text, opens the combined sheet at its root.
+    const picker = screen.getByRole('button', { name: 'Model / Thinking / Fast' });
+    expect(picker).not.toHaveTextContent(/gpt-5\.3-codex/);
+    // The audit chip stays but drops its label.
+    expect(screen.getByTestId('rw-approval-chip')).not.toHaveTextContent(/Ask/);
+
+    await user.click(picker);
+    const menu = screen.getByRole('menu', { name: 'Model / Thinking / Fast' });
+    expect(Array.from(menu.querySelectorAll('[data-config-row]')).map((row) => (
+      row.getAttribute('data-config-row')
+    ))).toEqual(['model', 'thinking', 'fast']);
+    expect(within(menu).getByRole('menuitem', { name: /Model.*GPT-5\.3 Codex/ })).toBeInTheDocument();
+    expect(within(menu).getByRole('menuitem', { name: /Thinking.*Medium/ })).toBeInTheDocument();
+    expect(within(menu).getByRole('switch', { name: 'Fast' })).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('keeps the narrow context ring beside the model icon before the action group', () => {
+    renderApp({ scenario: {}, viewport: 'narrow' });
+    const bar = document.querySelector('.composer-bar');
+    expect(bar).not.toBeNull();
+    const children = Array.from(bar!.children);
+    expect(children[0]).toHaveClass('composer-model', 'icon-only');
+    expect(children[1]).toHaveClass('rw-context-usage');
+    expect(children[2]).toHaveClass('spacer');
+    expect(children[3]).toHaveClass('rw-approval');
+    expect(children[4]).toHaveClass('composer-attach');
+    expect(children[5]).toHaveClass('composer-act', 'primary');
+  });
+
+  it('opens the model list directly from the wide model chip and dispatches the selection', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+
+    await user.click(screen.getByRole('button', { name: /gpt-5\.3-codex/ }));
+    // Deep-linked straight into the model page — no root-row hop.
+    expect(screen.getByRole('menuitemradio', { name: /GPT-5\.3 Codex/ })).toHaveAttribute('aria-checked', 'true');
+    await user.click(screen.getByRole('menuitemradio', { name: /GPT-5\.2 Codex/ }));
+    expect(controller.test.pendingCommandIds()).toHaveLength(1);
+  });
+
+  it('dispatches thinking and fast changes from their wide-bar chips and waits for canonical settlement', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide', locale: 'en' });
+
+    await user.click(screen.getByTestId('rw-thinking-chip'));
+    await user.click(screen.getByRole('menuitemradio', { name: 'High' }));
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.thinking).toBe('medium');
+    controller.test.resolveAll();
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.thinking).toBe('high');
+
+    const fast = screen.getByTestId('rw-fast-chip');
+    expect(fast).toHaveAttribute('aria-pressed', 'false');
+    await user.click(fast);
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.service_tier).toBeNull();
+    controller.test.resolveAll();
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.service_tier).toBe('fast');
+    expect(screen.getByTestId('rw-fast-chip')).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(screen.getByTestId('rw-fast-chip'));
+    controller.test.resolveAll();
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.service_tier).toBeNull();
+  });
+
+  it('audit chip lists the proxy modes and settles approval_mode (2026-09-15 audit-mode sync)', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide', locale: 'en' });
+    const chip = screen.getByTestId('rw-approval-chip');
+    expect(chip).toHaveTextContent('Ask for approval');
+
+    await user.click(chip);
+    const menu = screen.getByRole('menu', { name: 'Approval mode' });
+    expect(within(menu).getByRole('menuitemradio', { name: 'Ask for approval' }))
+      .toHaveAttribute('aria-checked', 'true');
+    await user.click(within(menu).getByRole('menuitemradio', { name: 'Full access' }));
+    // The chip keeps the previous label until the canonical settle arrives.
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.approval_mode)
+      .not.toBe('full-access');
+    controller.test.resolveAll();
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.approval_mode)
+      .toBe('full-access');
+    expect(screen.getByTestId('rw-approval-chip')).toHaveTextContent('Full access');
+  });
+
+  it('shows an explicit loading state before a Session history page arrives', () => {
+    renderApp({
+      scenario: { hostData: { 'host-home': {
+        capabilities: sampleCapabilities(),
+        tasks: sampleTasks(),
+        sessions: sampleSessions(),
+        transcripts: {},
+      } } },
+      viewport: 'wide',
+    });
+
+    expect(screen.getByRole('status')).toHaveTextContent('Loading message history…');
+    expect(screen.queryByText('say hi to start the conversation')).toBeNull();
+  });
+
+  it('active turn: the merged primary button is Stop while the input is empty', () => {
+    renderApp({ scenario: {}, viewport: 'wide' });
+    const stop = screen.getByRole('button', { name: /Stop/ });
+    expect(stop.className).toContain('danger');
+  });
+
+  it('active turn + text: primary becomes Send and the send queues by default', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    const before = controller.state.sessions.find((s) => s.id === 's-1')!.queue.entries.length;
+    const activeTurn = controller.state.sessions.find((s) => s.id === 's-1')!.active_turn;
+    const input = screen.getByRole('textbox');
+    await user.type(input, 'add a timeout guard in the hook');
+    const send = screen.getByRole('button', { name: /^Queue message \(the Agent is working\)$/ });
+    await user.click(send);
+    expect(controller.test.pendingCommandIds()).toHaveLength(1);
+    controller.test.resolveAll();
+    const after = controller.state.sessions.find((s) => s.id === 's-1')!.queue.entries;
+    expect(after.length).toBe(before + 1);
+    expect(after[after.length - 1]!.text).toBe('add a timeout guard in the hook');
+    expect(controller.state.sessions.find((s) => s.id === 's-1')!.active_turn).toEqual(activeTurn);
+    expect(screen.getAllByText('Working…')).toHaveLength(1);
+    // draft cleared on acceptance
+    expect(controller.state.drafts['s-1']?.text ?? '').toBe('');
+  });
+
+  it('idle session: Send starts a turn (no queue append)', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    controller.actions.selectSession('s-2'); // visible Doing session, no active turn
+    expect(screen.queryByText('Working…')).toBeNull();
+    await user.type(screen.getByRole('textbox'), 'draft a checklist for me');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    // A locally pending send is not proof that the model has started.
+    expect(screen.queryByText('Working…')).toBeNull();
+    controller.test.resolveAll();
+    const session = controller.state.sessions.find((s) => s.id === 's-2')!;
+    expect(session.status).toBe('running');
+    expect(session.active_turn).toBeTruthy();
+    expect(session.queue.entries).toHaveLength(0);
+    expect(screen.getByText('Working…')).toBeInTheDocument();
+    expect(document.querySelector('[data-testid="turn-work"]')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /Stop/ }));
+    controller.test.resolveAll();
+    expect(screen.queryByText('Working…')).toBeNull();
+  });
+
+  it.each(['error', 'unknown'] as const)('an idle send with %s outcome never invents active work', async outcome => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    controller.actions.selectSession('s-2');
+    controller.test.scriptSend(outcome);
+    await user.type(screen.getByRole('textbox'), 'not yet confirmed');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    controller.test.resolveAll();
+    expect(controller.state.sessions.find(session => session.id === 's-2')?.active_turn).toBeUndefined();
+    expect(screen.queryByText('Working…')).toBeNull();
+  });
+
+  it('pending/responding approval hides Working; a resolved trailing approval does not hide active work', async () => {
+    const user = userEvent.setup();
+    const interaction = sampleInteraction({ session_id: 's-1' });
+    const { controller } = renderApp({ scenario: { hostData: { 'host-home': {
+      capabilities: sampleCapabilities(), tasks: sampleTasks(), sessions: sampleSessions(),
+      transcripts: { 's-1': [] }, transcriptsStreaming: { 's-1': true }, interactions: [interaction],
+    } } } });
+    expect(screen.queryByText('Working…')).toBeNull();
+    await user.click(screen.getByRole('button', { name: interaction.presentation.actions[0]!.label }));
+    expect(screen.queryByText('Working…')).toBeNull();
+    controller.test.resolveAll();
+    expect(screen.getByText('Working…')).toBeInTheDocument();
+  });
+
+  it.each([
+    { kind: 'browser_offline' as const },
+    { kind: 'host_offline' as const, lastSeenAt: 0 },
+    { kind: 'relay_reconnecting' as const, attempt: 1 },
+    { kind: 'resyncing' as const, synced: 0, total: 1 },
+  ])('$kind never displays Working from a cached running transcript', connection => {
+    renderApp({ scenario: { connection } });
+    expect(screen.queryByText('Working…')).toBeNull();
+    expect(document.querySelector('[data-state="working"]')).toBeNull();
+  });
+
+  it('Stop ends the active turn on canonical success', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    await user.click(screen.getByRole('button', { name: /Stop/ }));
+    expect(controller.test.pendingCommandIds()).toHaveLength(1);
+    controller.test.resolveAll();
+    expect(controller.state.sessions.find((s) => s.id === 's-1')!.active_turn).toBeUndefined();
+  });
+
+  it('offline keeps the draft editable but disables every mutation', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({
+      scenario: { connection: { kind: 'host_offline', lastSeenAt: Date.now() } },
+      viewport: 'wide',
+    });
+    // Empty input + running turn → the merged button is Stop, disabled offline.
+    expect(screen.getByRole('button', { name: /Stop/ })).toBeDisabled();
+    const input = screen.getByRole('textbox');
+    await user.type(input, 'keep this draft');
+    expect(controller.state.drafts['s-1']!.text).toBe('keep this draft');
+    // With text the merged button becomes Send, still disabled offline.
+    expect(screen.getByRole('button', { name: /^Queue message \(the Agent is working\)$/ })).toBeDisabled();
+    // The configuration menu remains inspectable and closable while its
+    // mutation controls stay disabled.
+    const picker = screen.getByRole('button', { name: /gpt-5\.3-codex/ });
+    expect(picker).toBeEnabled();
+    expect(screen.getByTestId('rw-fast-chip')).toBeDisabled();
+    expect(screen.getByTestId('rw-approval-chip')).toBeDisabled();
+    await user.click(picker);
+    expect(screen.getByRole('menu', { name: 'Model / Thinking / Fast' })).toBeInTheDocument();
+    await user.click(picker);
+    expect(screen.queryByRole('menu', { name: 'Model / Thinking / Fast' })).toBeNull();
+    // a crafted direct action call is refused too
+    controller.actions.sendDraft('s-1');
+    expect(controller.test.pendingCommandIds()).toHaveLength(0);
+  });
+
+  it('attachment/context/document chips can be added and removed in any mode', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    await user.click(screen.getByRole('button', { name: 'Attach' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Attachment' }));
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    await user.upload(fileInput as HTMLInputElement, new File(['x'], 'attachment.png', { type: 'image/png' }));
+    await user.click(screen.getByRole('button', { name: 'Attach' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Context item' }));
+    await user.click(screen.getByRole('button', { name: 'Attach' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Document' }));
+    await waitFor(() => expect(controller.state.drafts['s-1']?.attachments).toHaveLength(1));
+    const draft = controller.state.drafts['s-1']!;
+    expect(draft.attachments).toHaveLength(1);
+    expect(draft.contextItems).toHaveLength(1);
+    expect(draft.document).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Remove attachment.png' }));
+    expect(controller.state.drafts['s-1']!.attachments).toHaveLength(0);
+  });
+
+  it('picks several files at once and attaches each in order', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    await user.click(screen.getByRole('button', { name: 'Attach' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Attachment' }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input.multiple).toBe(true);
+    await user.upload(input, [new File(['a'], 'one.txt', { type: 'text/plain' }), new File(['b'], 'two.txt', { type: 'text/plain' })]);
+    await waitFor(() => expect(controller.state.drafts['s-1']?.attachments.map(item => item.name)).toEqual(['one.txt', 'two.txt']));
+  });
+
+  it('a pasted image attaches; pasted text stays text', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    const box = screen.getByRole('textbox');
+    await user.click(box);
+    await user.paste({ files: [new File(['png'], 'pasted.png', { type: 'image/png' })] } as unknown as DataTransfer);
+    await waitFor(() => expect(controller.state.drafts['s-1']?.attachments.map(item => item.name)).toEqual(['pasted.png']));
+    await user.paste('plain words');
+    expect(controller.state.drafts['s-1']?.text).toBe('plain words');
+  });
+
+  it('shows uploads in progress, holds Send until they finish, and explains a failed one', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({
+      scenario: {
+        view: { kind: 'chat', sessionId: 's-3' },
+        hostData: { 'host-home': {
+          capabilities: sampleCapabilities(), tasks: sampleTasks(), sessions: sampleSessions(),
+          uploads: { 's-3': [
+            { id: 'u1', name: 'video.mov', size: 10, status: 'uploading' },
+            { id: 'u2', name: 'huge.zip', size: 30, status: 'failed', error: 'FILE_TOO_LARGE' },
+          ] },
+        } },
+      },
+      viewport: 'wide',
+    });
+    expect(screen.getByRole('status', { name: 'Uploading video.mov' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('huge.zip');
+    expect(screen.getByRole('alert')).toHaveTextContent('Too large (20 MB max)');
+    await user.type(screen.getByRole('textbox'), 'see attached');
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Remove huge.zip' }));
+    expect(controller.state.uploads?.['s-3']?.map(upload => upload.id)).toEqual(['u1']);
+  });
+
+  it('shows an image attachment as a preview once it has been fetched', async () => {
+    const attachmentId = generateCanonicalId();
+    const transcript = sampleTranscript().map((item) => item.kind === 'user'
+      ? { ...item, attachments: [{ name: 'screen.png', mime: 'image/png', url: attachmentId, size: 128 }] }
+      : item);
+    const { controller } = renderApp({
+      scenario: { hostData: { 'host-home': {
+        capabilities: sampleCapabilities(), tasks: sampleTasks(), sessions: sampleSessions(),
+        transcripts: { 's-1': transcript },
+        thumbnails: { [attachmentId]: 'data:image/png;base64,iVBORw0KGgo=' },
+      } } },
+      viewport: 'wide',
+    });
+    const image = await screen.findByRole('img', { name: 'screen.png' });
+    expect(image).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
+    controller.autoResolveFile = false;
+    await userEvent.setup().click(image);
+    expect(controller.state.fileViewer?.handle).toEqual({ id: attachmentId, sessionId: 's-1', label: 'screen.png' });
+  });
+
+  it('image attachment chips read image<N> by draft position; files keep their names', async () => {
+    const user = userEvent.setup();
+    renderApp({ scenario: {}, viewport: 'wide' });
+    const attach = async (file: File) => {
+      await user.click(screen.getByRole('button', { name: 'Attach' }));
+      await user.click(screen.getByRole('menuitem', { name: 'Attachment' }));
+      await user.upload(document.querySelector('input[type="file"]') as HTMLInputElement, file);
+    };
+    await attach(new File(['x'], 'shot.png', { type: 'image/png' }));
+    await attach(new File(['x'], 'notes.txt', { type: 'text/plain' }));
+
+    await waitFor(() => {
+      expect(document.querySelectorAll('.composer-chip[data-kind="attachment"]')).toHaveLength(2);
+    });
+    const chips = document.querySelectorAll('.composer-chip[data-kind="attachment"]');
+    // N = 1-based position among the draft's attachments — the same
+    // numbering the main composer applies to image chips at send time.
+    expect(chips[0]).toHaveTextContent('image1');
+    expect(chips[1]).toHaveTextContent('notes.txt');
+  });
+
+  it('production capabilities hide context and document entries that would fail on Host', async () => {
+    const user = userEvent.setup();
+    const caps = {
+      ...sampleCapabilities(),
+      'composer.context': { state: 'unsupported' },
+      'composer.document': { state: 'unsupported' },
+    };
+    renderApp({
+      scenario: { hostData: { 'host-home': {
+        capabilities: caps,
+        tasks: sampleTasks(),
+        sessions: sampleSessions(),
+        transcripts: { 's-1': sampleTranscript() },
+      } } },
+      viewport: 'wide',
+    });
+    await user.click(screen.getByRole('button', { name: 'Attach' }));
+    expect(screen.getByRole('menuitem', { name: 'Attachment' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Context item' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Document' })).toBeNull();
+  });
+
+  it('capability unsupported hides the attach entry; denied send disables Send', () => {
+    const caps = sampleCapabilities();
+    caps['attachment.upload'] = { state: 'unsupported' };
+    (caps as Record<string, { state: string }>)['composer.context'] = { state: 'unsupported' };
+    (caps as Record<string, { state: string }>)['composer.document'] = { state: 'unsupported' };
+    caps['session.send'] = { state: 'denied', reason: 'grant missing' };
+    renderApp({
+      scenario: { hostData: { 'host-home': {
+        capabilities: caps,
+        tasks: sampleTasks(),
+        sessions: sampleSessions(),
+        transcripts: { 's-1': sampleTranscript() },
+      } } },
+      viewport: 'wide',
+    });
+    expect(screen.queryByRole('button', { name: 'Attach' })).toBeNull();
+    // session.stop remains supported → the merged button (Stop here) stays enabled
+    expect(screen.getByRole('button', { name: /Stop/ })).toBeEnabled();
+  });
+
+  it('denied session.send disables Send even with text', async () => {
+    const user = userEvent.setup();
+    const caps = sampleCapabilities();
+    caps['session.send'] = { state: 'denied', reason: 'grant missing' };
+    caps['session.stop'] = { state: 'supported' };
+    const { controller } = renderApp({
+      scenario: { hostData: { 'host-home': {
+        capabilities: caps,
+        tasks: sampleTasks(),
+        sessions: sampleSessions(),
+        transcripts: { 's-1': sampleTranscript() },
+      } } },
+      viewport: 'wide',
+    });
+    await user.type(screen.getByRole('textbox'), 'hello');
+    const send = screen.getByRole('button', { name: /^Queue message \(the Agent is working\)$/ });
+    expect(send).toBeDisabled();
+    controller.actions.sendDraft('s-1');
+    expect(controller.test.pendingCommandIds()).toHaveLength(0);
+  });
+
+  it('stale transcript never presents streaming affordances', () => {
+    renderApp({
+      scenario: { connection: { kind: 'relay_reconnecting', attempt: 2 } },
+      viewport: 'wide',
+    });
+    expect(document.querySelector('.rw-chat-root.rw-stale')).not.toBeNull();
+  });
+
+  it('unknown outcome shows unconfirmed with refresh — no blind retry', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
+    await user.type(screen.getByRole('textbox'), 'probe unknown');
+    controller.test.scriptSend('unknown');
+    await user.click(screen.getByRole('button', { name: /^Queue message \(the Agent is working\)$/ }));
+    controller.test.resolveAll();
+    expect(screen.getByText(/Couldn't confirm/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Retry/i })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Check status' }));
+    expect(screen.queryByText(/Couldn't confirm/)).toBeNull();
+  });
+});

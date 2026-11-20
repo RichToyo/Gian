@@ -1,0 +1,15 @@
+name: Deploy Remote (retired)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  local-deployment-required:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Hosted deployment is disabled
+        run: |
+          echo 'Remote deployment is now an explicit local download/upload step.'
+          echo 'Use scripts/deploy-ssh.mjs from a current source checkout; see README.md.'
+          echo 'This workflow performs no SSH, registry pull or service operation.'
+          exit 1

@@ -1,0 +1,59 @@
+name: Feature
+description: Propose a scoped user-facing capability or improvement
+title: "[Feature] "
+labels:
+  - feature
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Describe the user, the situation, and the obstacle before the implementation.
+      placeholder: Who hit which problem, and in what situation?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected outcome
+      description: What should the user be able to do when this is done?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: If you already have an approach, describe the main interaction or behavior.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Describe the completion criteria as verifiable outcomes.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: Out of scope
+      description: State what this request does not solve, so the scope does not drift.
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Related Issues, designs, logs, or external material.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing Issues and did not find a duplicate request.
+          required: true

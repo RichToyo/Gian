@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import { proxyReleaseNotes } from './capture-proxy-release-evidence.mjs';
+import { scanPublicEntries } from './public-english.mjs';
+
+test('capture authors English RichToyo release notes without rewriting historical evidence', () => {
+  const source = readFileSync(new URL('./capture-proxy-release-evidence.mjs', import.meta.url));
+  const scanned = scanPublicEntries([{ path: 'scripts/capture-proxy-release-evidence.mjs', bytes: source }], new Map());
+  assert.equal(scanned.ok, true, JSON.stringify(scanned.violations));
+  assert.equal(source.includes('history-copy'), false);
+  assert.match(source.toString(), /const repository = 'RichToyo\/Gian-Proxies'/);
+  assert.match(source.toString(), /assert.equal\(certificate.repository, repository\)/);
+  assert.match(proxyReleaseNotes.claude.text, /first-party account quota/);
+  assert.match(proxyReleaseNotes.codex.text, /ChatGPT subscription quota/);
+  for (const provider of ['claude', 'codex', 'dsh', 'grok', 'antigravity']) {
+    assert.match(proxyReleaseNotes[provider].text, /Proxy Protocol SDK 1\.0\.4/);
+  }
+  for (const provider of ['claude', 'codex', 'dsh', 'kimi', 'grok', 'antigravity']) {
+    assert.match(proxyReleaseNotes[provider].text, /acceptance are not claimed/);
+  }
+  assert.match(proxyReleaseNotes.kimi.text, /owned native background work/);
+  assert.match(proxyReleaseNotes.zcode.text, /without altering original upstream source or notices/);
+  assert.match(proxyReleaseNotes.codex.text, /0\.167\.0/);
+  assert.match(proxyReleaseNotes.claude.text, /2\.1\.322/);
+  assert.match(proxyReleaseNotes.dsh.text, /0\.2\.2-rc\.1/);
+  assert.match(proxyReleaseNotes.kimi.text, /2\.3\.3/);
+  assert.match(proxyReleaseNotes.grok.text, /1\.0\.77/);
+  assert.match(proxyReleaseNotes.zcode.text, /0\.17\.0/);
+  assert.match(proxyReleaseNotes.antigravity.text, /1\.4\.5/);
+  for (const note of Object.values(proxyReleaseNotes)) {
+    assert.equal(typeof note.text, 'string');
+    assert.equal(Object.hasOwn(note, 'zh'), false);
+    assert.equal(Object.hasOwn(note, 'en'), false);
+  }
+});

@@ -1,0 +1,582 @@
+// Coverage for the session-routing helpers in
+// packages/web/src/session-routing.ts.
+
+import { describe, expect, it } from 'vitest';
+import type { EventEnvelope, Session } from '@gian/shared';
+import type { ApprovalItem } from '../src/types.js';
+import { applyEnvelope } from '../src/transcript/apply.js';
+import {
+  buildRailSections,
+  applySessionUpdate,
+  isTurnRunning,
+  orderByIds,
+  planCreatedSessionFirstMessage,
+  sortSessionsForRail,
+  sortWorkspacesForRail,
+} from '../src/session-routing.js';
+
+function session(overrides: Partial<Session> = {}): Session {
+  return {
+    id: 'session-1',
+    name: 'Task session',
+    type: 'subtask',
+    task_id: 'task-1',
+    workspace_id: 'workspace-1',
+    executor: 'codex',
+    model: null,
+    approval_mode: 'ask',
+    executor_config: { schemaVersion: 1, values: {} },
+    native_config_options: [],
+    thinking_effort: null,
+    service_tier: null,
+    active_channel: 'web',
+    status: 'done',
+    archived: 0,
+    pinned_at: null,
+    unread: 0,
+    worktree_path: null,
+    branch: null,
+    base_branch: null,
+    worktree_outcome: null,
+    native_session_id: null,
+    summary: null,
+    completed_at: null,
+    created_at: '2026-08-04T00:00:00.000Z',
+    updated_at: '2026-08-04T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+describe('session:updated active-list reconciliation', () => {
+  it('applies an asynchronously generated title to the canonical session row', () => {
+    const unnamed = session({ name: null });
+    expect(applySessionUpdate([unnamed], {
+      id: unnamed.id,
+      name: 'Generated Session Title',
+    })[0]?.name).toBe('Generated Session Title');
+  });
+
+  it('removes an archived session', () => {
+    expect(applySessionUpdate([session()], { id: 'session-1', archived: 1 })).toEqual([]);
+  });
+
+  it('reinserts a restored full Session without changing completed_at', () => {
+    const restored = session({
+      archived: 0,
+      completed_at: '2026-08-03T00:00:00.000Z',
+    });
+    expect(applySessionUpdate([], restored)).toEqual([restored]);
+  });
+
+  it('does not invent a missing row from a partial unarchive payload', () => {
+    expect(applySessionUpdate([], { id: 'session-1', archived: 0 })).toEqual([]);
+  });
+});
+
+describe('isTurnRunning', () => {
+  it('true while a turn runs', () => {
+    expect(isTurnRunning('running', false)).toBe(true);
+  });
+  it('true when the pending flag is set (structured in-flight)', () => {
+    expect(isTurnRunning('done', true)).toBe(true);
+  });
+  it('false when idle / done / merely locked-out', () => {
+    expect(isTurnRunning('done', false)).toBe(false);
+    expect(isTurnRunning('new', false)).toBe(false);
+  });
+});
+
+describe('planCreatedSessionFirstMessage: first message stays on structured message:send', () => {
+  it('routes first-turn text to structured message:send with an optimistic echo', () => {
+    expect(planCreatedSessionFirstMessage('  hello  ')).toEqual({
+      structuredText: 'hello',
+      seedOptimisticEcho: true,
+    });
+  });
+
+  it('does not seed an echo when there is no pending message', () => {
+    expect(planCreatedSessionFirstMessage('   ')).toEqual({
+      structuredText: null,
+      seedOptimisticEcho: false,
+    });
+  });
+
+  it('keeps Codex on structured message:send with an optimistic echo', () => {
+    expect(planCreatedSessionFirstMessage('  implement it  ')).toEqual({
+      structuredText: 'implement it',
+      seedOptimisticEcho: true,
+    });
+  });
+});
+
+describe('approval_resolved reducer behavior for question cards', () => {
+  function pendingQuestion(): ApprovalItem {
+    return {
+      kind: 'approval',
+      id: 'env-q-1',
+      approvalId: 'toolu_question_1',
+      title: 'Pick dinner',
+      reason: '',
+      cmd: '',
+      risk: 'low',
+      status: 'pending',
+      category: 'question',
+      scopeOptions: ['once'],
+      questions: [{
+        question: 'Pick dinner',
+        header: 'DINNER',
+        options: [
+          { label: 'Rice' },
+          { label: 'Noodles' },
+        ],
+      }],
+      ts: Date.UTC(2026, 5, 1, 0, 0, 0),
+      turn: 1,
+    };
+  }
+
+  function resolveEnvelope(
+    approvalId: string,
+    decision: 'allow_once' | 'decline' | 'keep_planning',
+    answers?: Record<string, string | string[]>,
+  ): EventEnvelope {
+    return {
+      session_id: 'sess-1',
+      turn: 0,
+      call_id: approvalId,
+      event: 'approval_resolved',
+      ts: Date.UTC(2026, 5, 1, 0, 0, 5),
+      data: { approvalId, decision, auto: false, ...(answers ? { answers } : {}) },
+    };
+  }
+
+  it('an approval_resolved transitions a pending question to approved-once', () => {
+    const items = applyEnvelope([pendingQuestion()], resolveEnvelope('toolu_question_1', 'allow_once'), 'claude');
+    const after = items[0] as ApprovalItem;
+    expect(after.status).toBe('approved-once');
+  });
+
+  it('a decline resolve flips the card to declined', () => {
+    const items = applyEnvelope([pendingQuestion()], resolveEnvelope('toolu_question_1', 'decline'), 'claude');
+    const after = items[0] as ApprovalItem;
+    expect(after.status).toBe('declined');
+  });
+
+  it('keep_planning keeps the Claude plan in revision-requested state', () => {
+    const items = applyEnvelope(
+      [pendingQuestion()],
+      resolveEnvelope('toolu_question_1', 'keep_planning'),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('declined');
+  });
+
+  it('a resolve is idempotent against later watcher duplicates', () => {
+    // After the resolve, the JSONL watcher may still emit an
+    // approval_requested for the same approvalId once claude writes the tool
+    // record. apply.ts dedupes by approvalId and keeps the *resolved* state.
+    let items = applyEnvelope([pendingQuestion()], resolveEnvelope('toolu_question_1', 'allow_once'), 'claude');
+    const dupRequested: EventEnvelope = {
+      session_id: 'sess-1',
+      turn: 0,
+      call_id: 'toolu_question_1',
+      event: 'approval_requested',
+      ts: Date.UTC(2026, 5, 1, 0, 0, 6),
+      data: {
+        approvalId: 'toolu_question_1',
+        category: 'question',
+        risk: 'low',
+        title: 'Pick dinner',
+        scopeOptions: ['once'],
+        questions: [{ question: 'Pick dinner', options: [{ label: 'Rice' }] }],
+      },
+    };
+    items = applyEnvelope(items, dupRequested, 'claude');
+    const after = items[0] as ApprovalItem;
+    // status must not regress to pending
+    expect(after.status).toBe('approved-once');
+    // and we should still have exactly one card, not two
+    expect(items.filter(i => i.kind === 'approval').length).toBe(1);
+  });
+
+  it('stores the picked answer on the resolved item as answeredWith', () => {
+    const items = applyEnvelope(
+      [pendingQuestion()],
+      resolveEnvelope('toolu_question_1', 'allow_once', { 'Pick dinner': 'Rice' }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).answeredWith).toBe('Rice');
+  });
+
+  it('flattens multi-question / multi-select answers into one answeredWith line', () => {
+    const items = applyEnvelope(
+      [pendingQuestion()],
+      resolveEnvelope('toolu_question_1', 'allow_once', {
+        'Pick dinner': 'Rice',
+        'Add sides': ['Soup', 'Salad'],
+      }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).answeredWith).toBe('Rice · Soup, Salad');
+  });
+
+  it('a later answer-less resolve does not blank an existing answeredWith', () => {
+    let items = applyEnvelope(
+      [pendingQuestion()],
+      resolveEnvelope('toolu_question_1', 'allow_once', { 'Pick dinner': 'Rice' }),
+      'claude',
+    );
+    items = applyEnvelope(items, resolveEnvelope('toolu_question_1', 'allow_once'), 'claude');
+    expect((items[0] as ApprovalItem).answeredWith).toBe('Rice');
+  });
+
+  it('a late auto:true decline does NOT overwrite an already-answered question', () => {
+    // The reducer must ignore auto-resolves once the card is no longer
+    // pending, so the answer + status survive.
+    const answered = applyEnvelope(
+      [pendingQuestion()],
+      resolveEnvelope('toolu_question_1', 'allow_once', { 'Pick dinner': 'Rice' }),
+      'claude',
+    );
+    expect((answered[0] as ApprovalItem).status).toBe('approved-once');
+
+    const autoDecline: EventEnvelope = {
+      session_id: 'sess-1',
+      turn: 0,
+      call_id: 'toolu_question_1',
+      event: 'approval_resolved',
+      ts: Date.UTC(2026, 5, 1, 0, 0, 9),
+      data: { approvalId: 'toolu_question_1', decision: 'decline', auto: true },
+    };
+    const after = applyEnvelope(answered, autoDecline, 'claude');
+    expect((after[0] as ApprovalItem).status).toBe('approved-once');
+    expect((after[0] as ApprovalItem).answeredWith).toBe('Rice');
+  });
+});
+
+describe('approval_resolved reducer behavior for native option outcomes', () => {
+  // Antigravity/ACP: the resolved event carries an opaque nativeOptionId plus
+  // (on the buggy path) no decision at all. The web must derive the outcome
+  // from the native option kind, and an unresolvable outcome must NEVER be
+  // reported as an allow.
+  function pendingNative(): ApprovalItem {
+    return {
+      kind: 'approval',
+      id: 'env-n-1',
+      approvalId: 'perm-1',
+      title: 'Run command',
+      reason: '',
+      cmd: 'make build',
+      risk: 'medium',
+      status: 'pending',
+      nativeOptions: [
+        { optionId: 'opt-allow', label: 'Allow', kind: 'allow_once' },
+        { optionId: 'opt-deny', label: 'Deny', kind: 'reject_once' },
+      ],
+      ts: Date.UTC(2026, 5, 1, 0, 0, 0),
+      turn: 1,
+    };
+  }
+
+  function nativeResolve(
+    nativeOptionId: string,
+    extra: Record<string, unknown> = {},
+  ): EventEnvelope {
+    return {
+      session_id: 'sess-1',
+      turn: 0,
+      call_id: 'perm-1',
+      event: 'approval_resolved',
+      ts: Date.UTC(2026, 5, 1, 0, 0, 5),
+      data: { approvalId: 'perm-1', nativeOptionId, auto: false, ...extra },
+    };
+  }
+
+  it('a reject-kind native option resolves to declined even without a decision', () => {
+    const items = applyEnvelope([pendingNative()], nativeResolve('opt-deny'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('declined');
+  });
+
+  it('an allow_once native option resolves to approved-once', () => {
+    const items = applyEnvelope([pendingNative()], nativeResolve('opt-allow'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('approved-once');
+  });
+
+  it('an unknown native option with no decision is neutral, never allowed', () => {
+    // The reported bug: rejecting showed "Allowed once" because an unmatched
+    // nativeOptionId plus an empty decision fell through to the old
+    // approved-once default.
+    const items = applyEnvelope([pendingNative()], nativeResolve('opaque-unmapped-id'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('unknown reject-prefixed kinds remain neutral live and on history replay', () => {
+    const card: ApprovalItem = {
+      ...pendingNative(),
+      nativeOptions: [{ optionId: 'opaque-action', label: 'Choose', kind: 'reject_future' }],
+    };
+    const resolved = nativeResolve('opaque-action', { decision: 'resolved' });
+    let items = applyEnvelope([card], resolved, 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+    items = applyEnvelope(items, resolved, 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+    expect((items[0] as ApprovalItem).nativeOptionId).toBe('opaque-action');
+  });
+
+  it('an empty resolve (no option id, no decision) is neutral, never allowed', () => {
+    const items = applyEnvelope([pendingNative()], {
+      session_id: 'sess-1',
+      turn: 0,
+      call_id: 'perm-1',
+      event: 'approval_resolved',
+      ts: Date.UTC(2026, 5, 1, 0, 0, 5),
+      data: { approvalId: 'perm-1', auto: false },
+    }, 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('a neutral resolve stays neutral on reload replay (idempotent, no allow upgrade)', () => {
+    let items = applyEnvelope([pendingNative()], nativeResolve('opaque-unmapped-id'), 'claude');
+    items = applyEnvelope(items, nativeResolve('opaque-unmapped-id'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('an explicit decline decision survives an unmappable native option id', () => {
+    // The safe direction is kept: the legacy projection only invented ALLOWS
+    // (outcome submitted → allow_once), never declines.
+    const items = applyEnvelope(
+      [pendingNative()],
+      nativeResolve('opaque-unmapped-id', { decision: 'decline' }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('declined');
+  });
+
+  it('legacy Antigravity shape: opaque id + projected allow_once is neutral, not allowed', () => {
+    // The reported bug: permission.requested carried no permissionOptionKinds,
+    // so the card's nativeOptions repeat the OPAQUE ids as kinds, and the old
+    // Host projection stamped decision=allow_once for any submitted outcome —
+    // including a rejection. The web must not trust that fallback: without a
+    // verifiable native kind the outcome is neutral. Live event…
+    const legacyCard: ApprovalItem = {
+      ...pendingNative(),
+      nativeOptions: [
+        { optionId: 'opaque-allow', label: 'Allow', kind: 'opaque-allow' },
+        { optionId: 'opaque-deny', label: 'Deny', kind: 'opaque-deny' },
+      ],
+    };
+    const items = applyEnvelope(
+      [legacyCard],
+      nativeResolve('opaque-deny', { decision: 'allow_once' }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('legacy Antigravity shape stays neutral on history replay (idempotent)', () => {
+    let items = applyEnvelope(
+      [pendingNative()],
+      nativeResolve('opaque-deny', { decision: 'allow_once' }),
+      'claude',
+    );
+    // …and the same envelope replayed from the database on reload.
+    items = applyEnvelope(items, nativeResolve('opaque-deny', { decision: 'allow_once' }), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('a plan accept action id keeps its known decision semantics', () => {
+    // Gian's own plan-action enum is not opaque: the card itself advertises
+    // accept_with_ask/accept_with_auto, so the id is self-describing and must
+    // keep settling the plan card as accepted.
+    const items = applyEnvelope(
+      [{ ...pendingNative(), nativeOptions: undefined, category: 'exit_plan_mode' }],
+      nativeResolve('accept_with_ask', { decision: 'allow_once' }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('approved-once');
+  });
+});
+
+describe('sortSessionsForRail: pinned first, then recent activity', () => {
+  function row(pinned_at: string | null, updated_at: string) {
+    return { pinned_at, updated_at };
+  }
+
+  it('pinned sessions sort above unpinned, most-recently-pinned first', () => {
+    const a = row(null, '2026-08-01T12:00:00Z');
+    const b = row('2026-08-01T10:00:00Z', '2026-07-01T00:00:00Z');
+    const c = row('2026-08-01T11:00:00Z', '2026-06-01T00:00:00Z');
+    expect(sortSessionsForRail([a, b, c])).toEqual([c, b, a]);
+  });
+
+  it('unpinned sessions keep updated_at DESC order', () => {
+    const a = row(null, '2026-08-01T10:00:00Z');
+    const b = row(null, '2026-08-01T12:00:00Z');
+    expect(sortSessionsForRail([a, b])).toEqual([b, a]);
+  });
+
+  it('does not mutate the input array', () => {
+    const input = [row(null, '2026-08-01T10:00:00Z'), row('2026-08-01T09:00:00Z', '2026-08-01T11:00:00Z')];
+    const copy = input.slice();
+    sortSessionsForRail(input);
+    expect(input).toEqual(copy);
+  });
+});
+
+describe('sortWorkspacesForRail: pinned groups first, stable otherwise', () => {
+  it('pinned workspaces lead, arrival order preserved within each group', () => {
+    const a = { id: 'a', pinned: 0 as const };
+    const b = { id: 'b', pinned: 1 as const };
+    const c = { id: 'c', pinned: 0 as const };
+    const d = { id: 'd', pinned: 1 as const };
+    expect(sortWorkspacesForRail([a, b, c, d]).map(w => w.id)).toEqual(['b', 'd', 'a', 'c']);
+  });
+});
+
+describe('buildRailSections: Pinned section above Projects (2026-08-03)', () => {
+  function session(id: string, workspace_id: string, pinned_at: string | null = null, updated_at = '2026-08-01T00:00:00Z') {
+    return { id, workspace_id, pinned_at, updated_at };
+  }
+  const workspaces = [
+    { id: 'ws-a', pinned: 0 as const },
+    { id: 'ws-b', pinned: 1 as const },
+    { id: 'ws-c', pinned: 0 as const },
+  ];
+
+  it('pinned sessions become standalone rows and leave their workspace group', () => {
+    const sections = buildRailSections([
+      session('s1', 'ws-a'),
+      session('s2', 'ws-a', '2026-08-01T10:00:00Z'),
+      session('s3', 'ws-c'),
+    ], workspaces);
+    expect(sections.pinnedSessions.map(s => s.id)).toEqual(['s2']);
+    expect(sections.byWs.get('ws-a')!.map(s => s.id)).toEqual(['s1']);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+    expect(sections.pinnedWsIds).toEqual(['ws-b']);
+    expect(sections.hasPinned).toBe(true);
+  });
+
+  it('a pinned workspace moves its whole group into Pinned, in host order', () => {
+    const sections = buildRailSections([
+      session('s1', 'ws-b'),
+      session('s2', 'ws-a'),
+      session('s3', 'ws-c'),
+    ], workspaces);
+    expect(sections.pinnedWsIds).toEqual(['ws-b']);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+    expect(sections.pinnedSessions).toEqual([]);
+    expect(sections.hasPinned).toBe(true);
+  });
+
+  it('nothing pinned → no sections (labels stay hidden)', () => {
+    const unpinned = [
+      { id: 'ws-a', pinned: 0 as const },
+      { id: 'ws-c', pinned: 0 as const },
+    ];
+    const sections = buildRailSections([session('s1', 'ws-a')], unpinned);
+    expect(sections.hasPinned).toBe(false);
+    expect(sections.pinnedWsIds).toEqual([]);
+    expect(sections.pinnedSessions).toEqual([]);
+  });
+
+  it('every workspace gets a group, even with zero sessions (Repos rail lists every repo)', () => {
+    const sections = buildRailSections([session('s1', 'ws-a')], workspaces);
+    // ws-c has no sessions: it still lists under Projects, with no byWs entry
+    // (the sidebar renders the group header with `?? []`).
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+    expect(sections.byWs.has('ws-c')).toBe(false);
+  });
+
+  it('an empty pinned workspace appears in Pinned and flips hasPinned', () => {
+    const unpinned = [
+      { id: 'ws-a', pinned: 0 as const },
+      { id: 'ws-c', pinned: 0 as const },
+    ];
+    const sections = buildRailSections([session('s1', 'ws-a')], [
+      ...unpinned,
+      { id: 'ws-empty-pinned', pinned: 1 as const },
+    ]);
+    expect(sections.pinnedWsIds).toEqual(['ws-empty-pinned']);
+    expect(sections.byWs.has('ws-empty-pinned')).toBe(false);
+    expect(sections.hasPinned).toBe(true);
+  });
+
+  it('a pinned workspace with all sessions pinned still lists as an empty group', () => {
+    const sections = buildRailSections([
+      session('s1', 'ws-b', '2026-08-01T10:00:00Z'),
+      session('s2', 'ws-a'),
+    ], workspaces);
+    expect(sections.pinnedWsIds).toEqual(['ws-b']);
+    expect(sections.byWs.has('ws-b')).toBe(false);
+    expect(sections.pinnedSessions.map(s => s.id)).toEqual(['s1']);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+  });
+
+  it('orphan workspace ids append to Projects so their sessions stay visible', () => {
+    const sections = buildRailSections([session('s1', 'ws-zzz')], workspaces);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c', 'ws-zzz']);
+  });
+
+  it('the internal __gian_root__ workspace never gets a group', () => {
+    const withRoot = [...workspaces, { id: 'ws-root', name: '__gian_root__', pinned: 0 as const }];
+    const sections = buildRailSections([
+      session('s1', 'ws-a'),
+      session('s2', 'ws-root'),
+    ], withRoot);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+    expect(sections.pinnedWsIds).toEqual(['ws-b']);
+    expect(sections.unfiled).toEqual([]);
+  });
+
+  it('sessions without a workspace (deleted → NULL workspace_id) collect in unfiled', () => {
+    const orphan = { id: 's1', workspace_id: null, pinned_at: null, updated_at: '2026-08-01T00:00:00Z' };
+    const sections = buildRailSections([orphan, session('s2', 'ws-a')], workspaces);
+    expect(sections.unfiled.map(s => s.id)).toEqual(['s1']);
+    expect(sections.byWs.has(null as unknown as string)).toBe(false);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+  });
+});
+
+describe('sortSessionsForRail: manual drag order (migration 067)', () => {
+  function row(id: string, workspace_order: number | null, updated_at: string, pinned_at: string | null = null) {
+    return { id, pinned_at, updated_at, workspace_order };
+  }
+
+  it('manual order wins within the unpinned group; NULL (never dragged) keeps activity order above it', () => {
+    const dragged1 = row('a', 1, '2026-08-01T10:00:00Z');
+    const dragged2 = row('b', 2, '2026-08-01T12:00:00Z');
+    const fresh = row('c', null, '2026-08-02T00:00:00Z');
+    const older = row('d', null, '2026-08-01T11:00:00Z');
+    // NULL rows first (activity DESC), then the manual range by its values.
+    expect(sortSessionsForRail([dragged2, dragged1, older, fresh]).map(r => r.id))
+      .toEqual(['c', 'd', 'a', 'b']);
+  });
+
+  it('pinned sessions still sort above and ignore workspace_order', () => {
+    const pinned = row('p', 9, '2026-07-01T00:00:00Z', '2026-08-01T10:00:00Z');
+    const dragged = row('a', 1, '2026-08-01T12:00:00Z');
+    expect(sortSessionsForRail([dragged, pinned]).map(r => r.id)).toEqual(['p', 'a']);
+  });
+
+  it('rows predating the migration (no workspace_order field) keep pure activity order', () => {
+    const a = { id: 'a', pinned_at: null, updated_at: '2026-08-01T10:00:00Z' };
+    const b = { id: 'b', pinned_at: null, updated_at: '2026-08-01T12:00:00Z' };
+    expect(sortSessionsForRail([a, b]).map(r => r.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('orderByIds: whole-list drag overlay merge', () => {
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+
+  it('reorders listed ids into the overlay order', () => {
+    expect(orderByIds(rows, ['c', 'a', 'b']).map(r => r.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('unlisted rows keep their relative order at the end', () => {
+    expect(orderByIds(rows, ['b']).map(r => r.id)).toEqual(['b', 'a', 'c']);
+  });
+
+  it('unknown overlay ids are skipped', () => {
+    expect(orderByIds(rows, ['zzz', 'b', 'a', 'c']).map(r => r.id)).toEqual(['b', 'a', 'c']);
+  });
+});
