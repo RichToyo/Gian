@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichToyo/Gian-Dev",
-  "sourceCommit": "922a7c5dca419a72dc7a498c11d08623365ae1de",
+  "sourceCommit": "c587b6787013215380fed898c6e047bde5c475ec",
   "workingTree": false,
   "files": [
     {
@@ -649,7 +649,7 @@
     {
       "path": "delivery/proxies/protocol-package.json",
       "mode": 420,
-      "sha256": "5b8623256b923ddec0297cb623da85adfe5efb0b0ef87de4272374473fdcdb21"
+      "sha256": "7c01408afa5908cf6383929d573c947936d08f73ea155cc527fe14afcd3933bd"
     },
     {
       "path": "delivery/proxies/README.md",
@@ -749,7 +749,7 @@
     {
       "path": "delivery/remote/protocol-package.json",
       "mode": 420,
-      "sha256": "929c6761fcbef6760bb649f2ed858f4fc29eced9041ad143c04b2226750d9742"
+      "sha256": "4ec389b1c77819c79720dd93c58d4af8d9292017080e992a39faa0480291fc73"
     },
     {
       "path": "delivery/remote/README.md",
