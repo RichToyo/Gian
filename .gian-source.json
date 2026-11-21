@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichToyo/Gian-Dev",
-  "sourceCommit": "7115062d58def6347765568c7ba5e18ad9e5e137",
+  "sourceCommit": "89dce72b95b5f0ae5b81ba43b8cc36019431e362",
   "workingTree": false,
   "files": [
     {
@@ -11829,7 +11829,7 @@
     {
       "path": "scripts/run-affected-tests.test.mjs",
       "mode": 420,
-      "sha256": "e3e53ec3e33ce969a276f0760a12db175da117cee98d8fe17b33c927b1393686"
+      "sha256": "4d5c6bc8e8b58e1d74b98cb5f352057eac54fd6ec81dbd1fac0bd7732a2fbb26"
     },
     {
       "path": "scripts/run-codex-compat-canary.mjs",
