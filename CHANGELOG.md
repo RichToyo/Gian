@@ -7,6 +7,12 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.15] - 2026-11-21
+
+### Changed
+
+- Publish updates from the recreated public Gian repository again, so installed copies keep receiving them. App behavior is unchanged from 0.6.14; Agent Integrations such as Claude Code continue to update independently through the signed Catalog.
+
 ## [0.6.14] - 2026-11-16
 
 ### Fixed

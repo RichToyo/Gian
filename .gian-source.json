@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichToyo/Gian-Dev",
-  "sourceCommit": "b40edf0043b565bfdca7eb7b169e11c9f36cd25a",
+  "sourceCommit": "aa42b6b8b03030914ed0eb4aee03892abdc60cbb",
   "workingTree": false,
   "files": [
     {
@@ -604,7 +604,7 @@
     {
       "path": "CHANGELOG.md",
       "mode": 420,
-      "sha256": "bec05bc7026e6957a521858ebb7335ca19b92d3115d675ef78a174fa5788a683"
+      "sha256": "4046ba921a3f141fd861a92fa6e30977944aa1c64ea74354e128dd482cc89228"
     },
     {
       "path": "CONTRIBUTING.md",
@@ -854,12 +854,12 @@
     {
       "path": "package.json",
       "mode": 420,
-      "sha256": "c833f72d9194b8ad048b390014c2a3143d87f1e0a8b1a8fa6c1d3b341df8ae09"
+      "sha256": "3b111de13fbc62149c34b09e031cf32b698da140b3cb22844a18a5d34d81e96b"
     },
     {
       "path": "packages/chat-ui/package.json",
       "mode": 420,
-      "sha256": "1cc349d7896929c23926d40b7a189d942f9e2f24845b83db7b8e1cdc142891e1"
+      "sha256": "4daa7aa070f209f42a9813277a3aaac494779cc0b7b969cbfc051ee986e8784b"
     },
     {
       "path": "packages/chat-ui/src/approval-cards.tsx",
@@ -1119,7 +1119,7 @@
     {
       "path": "packages/desktop/package.json",
       "mode": 420,
-      "sha256": "ab152816681ff21fa6c4fcc22cd7c273937fcf0247d1e62cf8b21f7823333b8b"
+      "sha256": "41654ce7b07f79ac7464bc59303790f6619841822928b9df4dbaf4c5d1a93f23"
     },
     {
       "path": "packages/desktop/README.md",
@@ -1994,7 +1994,7 @@
     {
       "path": "packages/host/package.json",
       "mode": 420,
-      "sha256": "7c72f9cc2619cb3ae4fb3a2e98ee9ba295c1920c51e958744de211ccd386574a"
+      "sha256": "94f2f215afb9171abc30204937cb89291f03eb9f53f52dd9f0a28210644196ea"
     },
     {
       "path": "packages/host/scripts/fix-node-pty-permissions.cjs",
@@ -8334,7 +8334,7 @@
     {
       "path": "packages/shared/package.json",
       "mode": 420,
-      "sha256": "593a51331d9feb75c35b4b1420f634b49bf6a604a041ae5ec708191095767182"
+      "sha256": "fb2def4695c00ca2831f0260a56bde78399d26a0358aea12d79e4f0ab7125279"
     },
     {
       "path": "packages/shared/src/action.ts",
@@ -8614,7 +8614,7 @@
     {
       "path": "packages/tool-cli/package.json",
       "mode": 420,
-      "sha256": "3b25e24f37ac2045a0a2c63080ad46a833905717707a655d15c5c554566fa84d"
+      "sha256": "7f497146fe8c8d92490bc8d2f187b0adf980f2b8bed0f03a6acb17abd6d59700"
     },
     {
       "path": "packages/tool-cli/skill/gian-tool/scripts/gian-tool-mcp",
@@ -8664,7 +8664,7 @@
     {
       "path": "packages/tool-mcp/package.json",
       "mode": 420,
-      "sha256": "52e8a8ed7ec40a62ab649056cb41fce8ff2f9f4366dc010df9aed7120d6fd59a"
+      "sha256": "a0a53a931d1e9850a632b1c9e9c1e4015aeac3a530eada73a85e97ed5457fad8"
     },
     {
       "path": "packages/tool-mcp/src/adapter.ts",
@@ -8729,7 +8729,7 @@
     {
       "path": "packages/web/package.json",
       "mode": 420,
-      "sha256": "5b65085dd820a4c43cef1c3124cef854b49ad0ca2c8b89a87afcaea71fac0d32"
+      "sha256": "1e7b4c6ccccc6555138b6d651aecee0682191a9c09171c84220a245a91d6604d"
     },
     {
       "path": "packages/web/public/gian-icon.svg",
