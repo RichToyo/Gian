@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { withLocalVerification } from './local-verification.mjs';
 withLocalVerification('typecheck', env => {
-  for (const name of ['shared', 'proxy-protocol', 'proxy-catalog-contract', 'remote-protocol', 'chat-ui', 'remote-web', 'tool-cli', 'tool-mcp', null]) {
+  for (const name of ['shared', 'proxy-protocol', 'proxy-kit', 'proxy-catalog-contract', 'remote-protocol', 'chat-ui', 'remote-web', 'tool-cli', 'tool-mcp', null]) {
     const args = name === 'remote-web'
       ? ['-F', '@gian/remote-web', 'exec', 'tsc', '-b', '--force']
       : name ? ['-F', `@gian/${name}`, 'build'] : ['-r', 'typecheck'];

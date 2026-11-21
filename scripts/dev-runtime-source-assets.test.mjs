@@ -163,6 +163,6 @@ test('the Dev Antigravity coordinate follows the Manifest and publishes no asset
   assert.equal(coordinate.build.kind, 'antigravity-pair');
   assert.equal(coordinate.build.sourceSha256, antigravityRuntimeSource.sourceSha256);
   assert.equal(Object.hasOwn(coordinate.build, 'sourceUrl'), false);
-  assert.equal(coordinate.asset.sha256, 'c2623c4c56201e5c29061090ae34609f1757875ed350725ef3a15d8c1b4644b0');
-  assert.equal(coordinate.asset.size, 97756458);
+  assert.equal(coordinate.asset.sha256, '7c5e7eeac38488aa4a2f635f448a92365424bbc83ce7ab3407d435556b93f034');
+  assert.equal(coordinate.asset.size, 100235809);
 });

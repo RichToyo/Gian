@@ -3,7 +3,7 @@
   "product": "Gian",
   "repository": "RichToyo/Gian",
   "sourceRepository": "RichToyo/Gian-Dev",
-  "sourceCommit": "aa42b6b8b03030914ed0eb4aee03892abdc60cbb",
+  "sourceCommit": "7115062d58def6347765568c7ba5e18ad9e5e137",
   "workingTree": false,
   "files": [
     {
@@ -11404,7 +11404,7 @@
     {
       "path": "scripts/capture-proxy-release-evidence.test.mjs",
       "mode": 420,
-      "sha256": "adb799b692f52b26a17953fe92efa4abb40e92226a4a15ffa43d91acc740dbe3"
+      "sha256": "d0df4b0edeb9e45e46c45443d160b76e92216cfe55bcc7cbaecbfd33f8fc4d97"
     },
     {
       "path": "scripts/catalog-release.test.mjs",
@@ -11539,7 +11539,7 @@
     {
       "path": "scripts/dev-runtime-source-assets.test.mjs",
       "mode": 420,
-      "sha256": "38504845c6845560c33e408285472eef818f6f9c3da19c91068c249ff99d0d35"
+      "sha256": "5d4ccf3f371d219c756d591a4069c4610178c55c4c5f5a182c7d5ee2c08c6b96"
     },
     {
       "path": "scripts/dev-runtime.mjs",
@@ -11979,7 +11979,7 @@
     {
       "path": "scripts/run-tests.mjs",
       "mode": 420,
-      "sha256": "8f6d08b1bddccdd980a4113c069e58af8e3f5d353c329c588f9d441656f82ff8"
+      "sha256": "8ed191e1f5f74428ffa662fddcbfcb8830862c7f24dee68deb4457045c04fab9"
     },
     {
       "path": "scripts/run-tests.test.mjs",
@@ -12039,7 +12039,7 @@
     {
       "path": "scripts/typecheck.mjs",
       "mode": 420,
-      "sha256": "21aa4053b23385981cdc28e8a8476a749025471912ed9d0d9e1ae61029a88cff"
+      "sha256": "582d16b2a254919fe7de8f3cf8449d6f54398d20a0c955df7d0723550b62779a"
     },
     {
       "path": "scripts/uninstall.sh",

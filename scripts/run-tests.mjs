@@ -157,6 +157,8 @@ function executeSelected(selected, options, env) {
   if (scriptsNeedProxyProtocol(scriptPaths) || scriptsNeedProxyCatalogContract(scriptPaths)) {
     runPnpm(['--filter', '@gian/proxy-protocol', 'build'], env);
   }
+  // Proxy bundles resolve @gian/proxy-kit from its built entry.
+  if (scriptsNeedProxyProtocol(scriptPaths)) runPnpm(['--filter', '@gian/proxy-kit', 'build'], env);
   if (scriptsNeedProxyCatalogContract(scriptPaths)) {
     runPnpm(['--filter', '@gian/proxy-catalog-contract', 'build'], env);
   }
