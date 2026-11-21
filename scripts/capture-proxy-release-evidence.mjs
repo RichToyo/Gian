@@ -13,7 +13,7 @@ const repository = 'RichToyo/Gian-Proxies';
 export const proxyReleaseNotes = {
   claude: {
     id: 'claude', directory: 'claude',
-    text: 'Retain first-party account quota inspection for the Gian menu bar and cumulative usage identity. Upgrade the managed Claude Code Runtime to official 2.1.322 with pinned binary bytes. Upstream notes include model defaults, MCP OAuth redirect protection and permission checks. Use Proxy Protocol SDK 1.0.4. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
+    text: 'Run each session in one long-lived Claude Code process in streaming-input mode instead of a new process per Turn. Approvals, plan review and questions arrive as native control requests, so the approval MCP server and its MCP SDK and Zod dependencies are removed. Advertise turn.steer, change model, permission mode and effort in place, stop idle processes after ten minutes, and report per-Turn token usage as the change in the running total. Retain the managed Claude Code Runtime 2.1.327. Use Proxy Protocol SDK 1.0.5 and the shared proxy-kit wire server. Exact artifacts pass hosted qualification; real account, Provider and Desktop acceptance are not claimed.',
   },
   codex: {
     id: 'codex', directory: 'codex',
