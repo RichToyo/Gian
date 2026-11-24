@@ -515,8 +515,13 @@ async function prepareDshProfile(tempRoot, binaryPath) {
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@gian/dsh-bridge'] } },
   }, null, 2)}\n`, 'utf8');
   await symlink(bridgePackageDir, join(scopedModules, 'dsh-bridge'), 'dir');
-  for (const name of ['settings.yaml', '.credentials.yaml']) {
-    const source = join(homedir(), '.dsh', name);
+  // DSH 0.2.x reads Provider routes from the home patch and keys from the
+  // credential store; the legacy settings.yaml is imported once and renamed,
+  // so it is not copied. DSH_ACCEPTANCE_SOURCE_HOME selects a prepared home
+  // instead of the account's ~/.dsh.
+  const sourceHome = process.env.DSH_ACCEPTANCE_SOURCE_HOME ?? join(homedir(), '.dsh');
+  for (const name of ['cordis.patch.yml', '.credentials.yaml']) {
+    const source = join(sourceHome, name);
     await access(source).then(
       () => copyFile(source, join(home, name)),
       () => undefined,
@@ -524,6 +529,7 @@ async function prepareDshProfile(tempRoot, binaryPath) {
   }
   return {
     DSH_HOME: home,
+    GIAN_AGENT_HOME: home,
     DSH_TELEMETRY_DISABLED: '1',
     GIAN_DSH_HOST_ENTRY: binaryPath,
     GIAN_DSH_HOST_ARGS: JSON.stringify(['--profile', 'gian']),

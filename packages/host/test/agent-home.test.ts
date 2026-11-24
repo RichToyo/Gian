@@ -10,6 +10,7 @@ import {
   agentLoginArgs,
   providerHomeEnvironment,
   providerRuntimeEnvironment,
+  agentTerminalEnvironment,
 } from '../src/agents/home.js';
 
 test('managed Agent HOMEs are stable, private, and separated by Agent id', async t => {
@@ -124,6 +125,21 @@ test('Provider HOME environment changes state roots without changing process HOM
   assert.deepEqual(providerHomeEnvironment('com.zhipu.zcode', '/tmp/z/.zcode'), {
     GIAN_AGENT_HOME: '/tmp/z/.zcode', HOME: '/tmp/z',
   });
+});
+
+test('an Agent CLI terminal gets each CLI its own native home variable', () => {
+  // The terminal runs the CLI directly, with no Proxy to map GIAN_AGENT_HOME.
+  assert.deepEqual(agentTerminalEnvironment('grok', '/tmp/d'), {
+    GIAN_AGENT_HOME: '/tmp/d', GROK_HOME: '/tmp/d', GROK_DISABLE_AUTOUPDATER: '1',
+  }, '`grok login` must write the Agent home, not ~/.grok');
+  assert.equal(agentTerminalEnvironment('codex', '/tmp/b').CODEX_HOME, '/tmp/b');
+  assert.equal(agentTerminalEnvironment('kimi', '/tmp/c').KIMI_CODE_HOME, '/tmp/c');
+  assert.equal(agentTerminalEnvironment('kimi', '/tmp/c').KIMI_CODE_NO_AUTO_UPDATE, '1');
+  assert.equal(agentTerminalEnvironment('ai.deepseek.harness', '/tmp/e').DSH_HOME, '/tmp/e');
+  assert.equal(agentTerminalEnvironment('com.zhipu.zcode', '/tmp/z/.zcode').HOME, '/tmp/z');
+  assert.equal(agentTerminalEnvironment('claude', '/tmp/a').CLAUDE_CONFIG_DIR, '/tmp/a');
+  // Proxy spawns are unchanged: the Grok Proxy still maps GIAN_AGENT_HOME itself.
+  assert.equal(Object.hasOwn(providerRuntimeEnvironment('grok', '/tmp/d'), 'GROK_HOME'), false);
 });
 
 test('Claude default config scope is preserved when ~/.claude is a symlink', async t => {

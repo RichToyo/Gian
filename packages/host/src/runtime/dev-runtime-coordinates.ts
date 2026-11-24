@@ -11,7 +11,7 @@ export interface DevRuntimeCoordinate {
   asset: { url?: string; sha256: string; size: number };
   build?:
     | { kind: 'dsh-lock'; packageSha256: string; lockSha256: string }
-    | { kind: 'antigravity-pair'; sourceSha256: string };
+    | { kind: 'antigravity-cli'; sourceSha256: string };
   /**
    * Omitted coordinates keep the Runtime executable `--version` probe.
    * `proxy` asks the bound Proxy entry for runtime.probe.

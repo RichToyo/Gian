@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import type { ProxyNotification, Session, UsageSelection } from '@gian/shared';
-import { KimiSessionProjector, type KimiProjectedFrame, type OuterNotification } from '../../proxies/kimi-proxy/src/core/projector.js';
+type OuterNotification = { method: string; params: Record<string, unknown> };
 import { recordLocalUsage, usageSample } from '../src/usage/ingestion.js';
 import { trackingState, UsageRecorder, usageSourceKey } from '../src/usage/recorder.js';
 import { UsageQueryService } from '../src/usage/query.js';
@@ -39,7 +39,11 @@ describe('menubar passive local ingestion', () => {
     const kimi = { ...session, executor: 'kimi', proxy_plugin_id: 'kimi' } as Session;
     assert.equal(usageSample(kimi, message({ mode: 'absolute', totalTokens: 100 }), turn, now), null);
     assert.equal(usageSample(kimi, message({ mode: 'absolute', inputTokens: 20, outputTokens: 5, cachedInputTokens: 10, totalTokens: 35 }), turn, now), null);
-    assert.equal(usageSample(kimi, message({ mode: 'delta', inputTokens: 20, outputTokens: 5, cachedInputTokens: 0, totalTokens: 25 }), turn, now), null);
+    // The Kimi 2.7 Proxy reports one delta per Gian turn; it must be counted.
+    assert.deepEqual(usageSample(kimi, message({ mode: 'delta', inputTokens: 20, outputTokens: 5, cachedInputTokens: 0, totalTokens: 25 }), turn, now)?.totals, {
+      totalTokens: 25, inputTokens: 20, outputTokens: 5, cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null,
+    });
+    assert.equal(usageSample(kimi, message({ mode: 'delta', inputTokens: 20, outputTokens: 5, cachedInputTokens: 0, totalTokens: 24 }), turn, now), null);
   });
   it('uses stable native/HOME identity, not stream or current model alias, and labels observed time', () => {
     const first = usageSample(session, message({ mode: 'absolute', totalTokens: 100 }), turn, now)!;
@@ -84,46 +88,18 @@ const kimiSelections: UsageSelection[] = [
   { mode: 'calendar', period: 'day' }, { mode: 'calendar', period: 'week' }, { mode: 'calendar', period: 'month' },
 ];
 
-function kimiCounts(inputOther: number, output: number, inputCacheRead = 0, inputCacheCreation = 0): KimiProjectedFrame {
-  const total = { inputOther, output, inputCacheRead, inputCacheCreation };
-  return {
-    type: 'agent.status.updated', seq: 0, volatile: true,
-    payload: {
-      agentId: 'main', contextTokens: 42_000,
-      usage: {
-        total,
-        currentTurn: { inputOther: 1, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
-        byModel: { 'kimi-for-coding': total },
-      },
+/** Absolute main-agent snapshots as the pre-2.7 Kimi Proxy (0.4.17) emitted
+ * them: input already includes cache read and creation, total = input + output.
+ * Each snapshot gets its own event id, so a replayed snapshot is a duplicate. */
+let kimiEventSequence = 0;
+function kimiSnapshots(turns: Array<{ gianTurnId: string; promptId: string; totals: Array<[number, number, number]> }>): OuterNotification[] {
+  return turns.flatMap(turn => turn.totals.map(([input, output, cached]) => ({
+    method: 'usage.updated',
+    params: {
+      eventId: `kimi-usage-${kimiEventSequence += 1}`, sourceTurnId: turn.promptId, turnId: turn.gianTurnId,
+      data: { conversation: { mode: 'absolute', inputTokens: input, outputTokens: output, cachedInputTokens: cached, totalTokens: input + output } },
     },
-  };
-}
-
-async function projectKimi(turns: Array<{ gianTurnId: string; promptId: string; frames: KimiProjectedFrame[] }>, finalReads?: { count: number }): Promise<OuterNotification[]> {
-  const events: OuterNotification[] = [];
-  let sequence = 0;
-  const projector = new KimiSessionProjector({
-    gianSessionId: kimiSession.id,
-    nativeSessionId: kimiSession.native_session_id ?? '',
-    nextSequence: () => { sequence += 1; return sequence; },
-    emit: (notification) => events.push(notification),
-    finalUsage: async () => {
-      if (finalReads) finalReads.count += 1;
-      return { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, context_tokens: 0 };
-    },
-    fileDiff: async () => null,
-  });
-  projector.setStreamId('stream-1');
-  let seq = 1;
-  for (const turn of turns) {
-    projector.bindTurn(turn);
-    for (const frame of turn.frames) {
-      projector.handleFrame({ ...frame, seq });
-      seq += 1;
-    }
-  }
-  if (finalReads) await projector.finalizeTurn('completed');
-  return events;
+  })));
 }
 
 function openUsageDb(startedAt: number): Database.Database {
@@ -158,42 +134,18 @@ function assertTotals(db: Database.Database, at: number, earliest: number, total
 }
 
 describe('kimi main-agent cumulative local usage', () => {
-  it('diffs the projected main-agent total across turns without counting cache, context, or replays twice', async () => {
+  it('diffs absolute main-agent totals across turns without counting cache, context, or replays twice', async () => {
     const origin = Date.now() - 20_000;
     const observed = origin + 9_000;
     const db = openUsageDb(origin);
-    const finalReads = { count: 0 };
     try {
       const source = usageSourceKey('kimi', '/isolated/kimi', 'native-kimi');
       new UsageRecorder(db).bindSource(source, true, origin + 100);
       rememberTurn(db, kimiSession.id, 'host-1', 'prompt-1', origin + 1_000);
       rememberTurn(db, kimiSession.id, 'host-2', 'prompt-2', origin + 5_000);
-      const projected = await projectKimi([{
-        gianTurnId: 'host-1', promptId: 'prompt-1', frames: [
-          kimiCounts(60, 20, 30, 10),
-          { type: 'agent.status.updated', seq: 0, volatile: true, payload: { agentId: 'child', usage: { total: { inputOther: 500, output: 500, inputCacheRead: 0, inputCacheCreation: 0 } } } },
-          kimiCounts(60, 20, 30, 10),
-          { type: 'agent.status.updated', seq: 0, volatile: true, payload: { agentId: 'main', usage: { total: { inputOther: 60, output: 20, inputCacheRead: 30 } } } },
-          kimiCounts(80, 40, 30, 20),
-          kimiCounts(0, 0, 0, 0),
-          kimiCounts(100, 50, 30, 20),
-          kimiCounts(90, 50, 30, 20),
-        ],
-      }, {
-        gianTurnId: 'host-2', promptId: 'prompt-2', frames: [
-          kimiCounts(100, 50, 30, 20),
-          kimiCounts(110, 60, 30, 20),
-        ],
-      }], finalReads);
-      const usage = projected.filter((event) => event.method === 'usage.updated');
-      assert.deepEqual(usage.map((event) => (event.params.data as { conversation: unknown }).conversation), [
-        { mode: 'absolute', inputTokens: 100, outputTokens: 20, cachedInputTokens: 30, totalTokens: 120 },
-        { mode: 'absolute', inputTokens: 130, outputTokens: 40, cachedInputTokens: 30, totalTokens: 170 },
-        { mode: 'absolute', inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 },
-        { mode: 'absolute', inputTokens: 150, outputTokens: 50, cachedInputTokens: 30, totalTokens: 200 },
-        { mode: 'absolute', inputTokens: 140, outputTokens: 50, cachedInputTokens: 30, totalTokens: 190 },
-        { mode: 'absolute', inputTokens: 150, outputTokens: 50, cachedInputTokens: 30, totalTokens: 200 },
-        { mode: 'absolute', inputTokens: 160, outputTokens: 60, cachedInputTokens: 30, totalTokens: 220 },
+      const usage = kimiSnapshots([
+        { gianTurnId: 'host-1', promptId: 'prompt-1', totals: [[100, 20, 30], [130, 40, 30], [0, 0, 0], [150, 50, 30], [140, 50, 30]] },
+        { gianTurnId: 'host-2', promptId: 'prompt-2', totals: [[150, 50, 30], [160, 60, 30]] },
       ]);
       const [first, second, zero, grown, older, repeated, later] = usage;
       recordLocalUsage(db, kimiSession, timedUsage(first!, origin + 2_000), undefined, observed);
@@ -216,7 +168,30 @@ describe('kimi main-agent cumulative local usage', () => {
       assert.equal(summary.coverage, 'partial');
       assert.equal(summary.byModel[0]?.id, null);
       assert.deepEqual(db.prepare('SELECT COUNT(*) AS n, MIN(partial) AS partial FROM usage_sources').get(), { n: 1, partial: 1 });
-      assert.equal(finalReads.count, 0);
+    } finally { db.close(); }
+  });
+
+  it('records one Kimi 2.7 delta per Gian turn and never counts its replay again', () => {
+    const origin = Date.now() - 20_000;
+    const observed = origin + 9_000;
+    const db = openUsageDb(origin);
+    try {
+      const source = usageSourceKey('kimi', '/isolated/kimi', 'native-kimi');
+      new UsageRecorder(db).bindSource(source, true, origin + 100);
+      rememberTurn(db, kimiSession.id, 'host-1', 'prompt-1', origin + 1_000);
+      rememberTurn(db, kimiSession.id, 'host-2', 'prompt-2', origin + 3_000);
+      const delta = (promptId: string, turnId: string, eventId: string, input: number, output: number, cached: number) => ({
+        method: 'usage.updated',
+        params: { eventId, sourceTurnId: promptId, turnId,
+          data: { conversation: { mode: 'delta', inputTokens: input, outputTokens: output, cachedInputTokens: cached, totalTokens: input + output } } },
+      }) as OuterNotification;
+      recordLocalUsage(db, kimiSession, timedUsage(delta('prompt-1', 'host-1', 'live-1', 100, 20, 30), origin + 2_000), undefined, observed);
+      assertTotals(db, observed + 1, origin + 2_000, 120);
+      // Replay of the same native turn carries another event id but the same turn key.
+      recordLocalUsage(db, kimiSession, timedUsage(delta('prompt-1', 'host-1', 'replay-1', 100, 20, 30), origin + 2_000), undefined, observed);
+      assertTotals(db, observed + 1, origin + 2_000, 120);
+      recordLocalUsage(db, kimiSession, timedUsage(delta('prompt-2', 'host-2', 'live-2', 50, 10, 0), origin + 4_000), undefined, observed);
+      assertTotals(db, observed + 1, origin + 2_000, 180);
     } finally { db.close(); }
   });
 
@@ -230,10 +205,10 @@ describe('kimi main-agent cumulative local usage', () => {
       rememberTurn(db, kimiSession.id, 'host-1', 'prompt-1', origin + 1_000);
       const other = { ...kimiSession, id: 'kimi-local-2' } as Session;
       rememberTurn(db, other.id, 'host-2', 'prompt-2', origin + 1_000);
-      const projected = (await projectKimi([
-        { gianTurnId: 'host-1', promptId: 'prompt-1', frames: [kimiCounts(800, 200), kimiCounts(900, 250, 50)] },
-        { gianTurnId: 'host-2', promptId: 'prompt-2', frames: [kimiCounts(1_000, 300, 50, 50)] },
-      ])).filter((event) => event.method === 'usage.updated');
+      const projected = kimiSnapshots([
+        { gianTurnId: 'host-1', promptId: 'prompt-1', totals: [[800, 200, 0], [950, 250, 50]] },
+        { gianTurnId: 'host-2', promptId: 'prompt-2', totals: [[1_100, 300, 50]] },
+      ]);
       assert.deepEqual(projected.map((event) => (event.params.data as { conversation: { totalTokens: number } }).conversation.totalTokens), [1000, 1200, 1400]);
       recordLocalUsage(db, kimiSession, timedUsage(projected[0]!, origin + 2_000), undefined, observed);
       assertTotals(db, observed + 1, origin + 2_000, 0);
@@ -252,9 +227,9 @@ describe('kimi main-agent cumulative local usage', () => {
       const source = usageSourceKey('kimi', '/isolated/kimi', 'native-kimi');
       new UsageRecorder(db).bindSource(source, true, origin + 100);
       rememberTurn(db, kimiSession.id, 'host-1', 'prompt-1', origin + 1_000);
-      const projected = (await projectKimi([
-        { gianTurnId: 'host-1', promptId: 'prompt-1', frames: [kimiCounts(0, 0), kimiCounts(80, 20, 10, 10), kimiCounts(100, 30, 10, 10)] },
-      ])).filter((event) => event.method === 'usage.updated');
+      const projected = kimiSnapshots([
+        { gianTurnId: 'host-1', promptId: 'prompt-1', totals: [[0, 0, 0], [100, 20, 10], [120, 30, 10]] },
+      ]);
       assert.deepEqual(projected.map((event) => (event.params.data as { conversation: { totalTokens: number } }).conversation.totalTokens), [0, 120, 150]);
       recordLocalUsage(db, kimiSession, timedUsage(projected[0]!, origin + 2_000), undefined, observed);
       recordLocalUsage(db, kimiSession, timedUsage(projected[1]!, origin + 3_000), undefined, observed);
@@ -273,15 +248,11 @@ describe('kimi main-agent cumulative local usage', () => {
       assert.equal(cleared.generation, 2);
       assertTotals(db, observed + 1, origin + 8_000, 0);
       recordLocalUsage(db, kimiSession, timedUsage(projected[2]!, origin + 4_000), undefined, observed);
-      const late = (await projectKimi([
-        { gianTurnId: 'host-1', promptId: 'prompt-1', frames: [kimiCounts(120, 40, 10, 10)] },
-      ])).find((event) => event.method === 'usage.updated')!;
+      const late = kimiSnapshots([{ gianTurnId: 'host-1', promptId: 'prompt-1', totals: [[140, 40, 10]] }])[0]!;
       recordLocalUsage(db, kimiSession, timedUsage(late, origin + 6_000), undefined, observed);
       assertTotals(db, observed + 1, origin + 8_000, 0);
       rememberTurn(db, kimiSession.id, 'host-2', 'prompt-2', origin + 7_000);
-      const next = (await projectKimi([
-        { gianTurnId: 'host-2', promptId: 'prompt-2', frames: [kimiCounts(140, 50, 10, 10)] },
-      ])).find((event) => event.method === 'usage.updated')!;
+      const next = kimiSnapshots([{ gianTurnId: 'host-2', promptId: 'prompt-2', totals: [[160, 50, 10]] }])[0]!;
       recordLocalUsage(db, kimiSession, timedUsage(next, origin + 8_000), undefined, observed);
       assertTotals(db, observed + 1, origin + 8_000, 30);
       assert.equal(usageSample(kimiSession, {

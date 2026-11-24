@@ -12,23 +12,21 @@ test('capture authors English RichToyo release notes without rewriting historica
   assert.match(source.toString(), /const repository = 'RichToyo\/Gian-Proxies'/);
   assert.match(source.toString(), /assert.equal\(certificate.repository, repository\)/);
   assert.match(proxyReleaseNotes.claude.text, /streaming-input mode/);
-  assert.match(proxyReleaseNotes.claude.text, /Proxy Protocol SDK 1\.0\.5/);
+  assert.match(proxyReleaseNotes.claude.text, /background/);
+  assert.match(proxyReleaseNotes.claude.text, /Claude Code 2\.1\.330/);
   assert.match(proxyReleaseNotes.codex.text, /ChatGPT subscription quota/);
-  for (const provider of ['codex', 'dsh', 'grok', 'antigravity']) {
-    assert.match(proxyReleaseNotes[provider].text, /Proxy Protocol SDK 1\.0\.4/);
-  }
-  for (const provider of ['claude', 'codex', 'dsh', 'kimi', 'grok', 'antigravity']) {
+  assert.match(proxyReleaseNotes.antigravity.text, /agy acp/);
+  for (const provider of ['claude', 'codex', 'dsh', 'kimi', 'grok', 'zcode', 'antigravity']) {
+    assert.match(proxyReleaseNotes[provider].text, /Proxy Protocol SDK 1\.0\.5/);
     assert.match(proxyReleaseNotes[provider].text, /acceptance are not claimed/);
   }
-  assert.match(proxyReleaseNotes.kimi.text, /owned native background work/);
   assert.match(proxyReleaseNotes.zcode.text, /without altering original upstream source or notices/);
-  assert.match(proxyReleaseNotes.codex.text, /0\.167\.0/);
-  assert.match(proxyReleaseNotes.claude.text, /2\.1\.327/);
-  assert.match(proxyReleaseNotes.dsh.text, /0\.2\.2-rc\.1/);
-  assert.match(proxyReleaseNotes.kimi.text, /2\.3\.3/);
-  assert.match(proxyReleaseNotes.grok.text, /1\.0\.77/);
-  assert.match(proxyReleaseNotes.zcode.text, /0\.17\.0/);
-  assert.match(proxyReleaseNotes.antigravity.text, /1\.4\.5/);
+  assert.match(proxyReleaseNotes.codex.text, /0\.169\.1 to official 0\.171\.0/);
+  assert.match(proxyReleaseNotes.dsh.text, /0\.2\.2-rc\.3 to 0\.2\.2-rc\.5/);
+  assert.match(proxyReleaseNotes.kimi.text, /2\.6\.3 to 2\.7\.2/);
+  assert.match(proxyReleaseNotes.grok.text, /1\.0\.89 to 1\.0\.92/);
+  assert.match(proxyReleaseNotes.zcode.text, /CLI 0\.17\.1/);
+  assert.match(proxyReleaseNotes.antigravity.text, /agy 1\.5\.14 to the official Antigravity CLI 1\.5\.16/);
   for (const note of Object.values(proxyReleaseNotes)) {
     assert.equal(typeof note.text, 'string');
     assert.equal(Object.hasOwn(note, 'zh'), false);

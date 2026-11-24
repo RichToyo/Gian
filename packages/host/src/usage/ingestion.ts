@@ -29,7 +29,7 @@ export function usageSample(
   const turn = params.sourceTurnId ?? params.turnId;
   if (typeof turn !== 'string' || !turn || typeof params.eventId !== 'string') return null;
   const totals = session.proxy_plugin_id === 'kimi'
-    ? kimiAbsoluteTotals(conversation)
+    ? kimiTotals(conversation)
     : otherProviderTotals(conversation);
   if (!totals) return null;
   const emitted = typeof params.emittedAt === 'string' ? Date.parse(params.emittedAt) : NaN;
@@ -48,11 +48,13 @@ export function usageSample(
   };
 }
 
-/** Kimi admission is a complete absolute snapshot. Cache is already inside
- * input, so the total must be input plus output. Missing fields stay unknown.
- * Sub-agent usage is not in this snapshot; the source remains partial. */
-function kimiAbsoluteTotals(conversation: UsageConversation): UsageTotals | null {
-  if (conversation.mode !== 'absolute') return null;
+/** Kimi Proxies before the 2.7 port send a complete absolute snapshot; the
+ * 2.7 Proxy sends one delta per Gian turn (the sum of its native turns), keyed
+ * by the native prompt id. Either way cache is already inside input, so the
+ * total must be input plus output. Missing fields stay unknown. Sub-agent
+ * usage is not included; the source remains partial. */
+function kimiTotals(conversation: UsageConversation): UsageTotals | null {
+  if (conversation.mode !== 'absolute' && conversation.mode !== 'delta') return null;
   const input = conversation.inputTokens;
   const output = conversation.outputTokens;
   const total = conversation.totalTokens;

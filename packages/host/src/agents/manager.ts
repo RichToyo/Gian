@@ -102,7 +102,7 @@ import {
   acquireAgentUpdateLock,
   type AgentUpdateLease,
 } from './update-lock.js';
-import { AgentHomeError, AgentHomeManager, agentLoginArgs, providerRuntimeEnvironment } from './home.js';
+import { AgentHomeError, AgentHomeManager, agentLoginArgs, agentTerminalEnvironment } from './home.js';
 
 /** Read-only identity for a config home that may not exist yet. realpath the
  *  path; on ENOENT, realpath the nearest existing parent and append the
@@ -1868,7 +1868,7 @@ export class AgentManager {
         executable: isZcode ? process.execPath : cliPath,
         args: isZcode ? [cliPath, ...(loginArgs ?? [])] : loginArgs ?? [],
         cwd: home.path,
-        env: providerRuntimeEnvironment(agent.pluginId, home.path),
+        env: agentTerminalEnvironment(agent.pluginId, home.path),
         reservation: await lease.reserveProcessGroup(),
         release: () => lease.release(),
       };

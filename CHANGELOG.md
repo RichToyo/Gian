@@ -7,6 +7,13 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.16] - 2026-11-24
+
+### Fixed
+
+- Record Kimi usage again with Kimi Integration 0.5.0 (Kimi Code 2.7), which reports one usage delta per turn; earlier Gian versions dropped it.
+- Sign in to the Agent HOME a session uses when you log in from an Agent CLI terminal: the terminal now sets each CLI's own home variable (`CODEX_HOME`, `KIMI_CODE_HOME`, `DSH_HOME`, `GROK_HOME`), so `grok login` and the other CLIs no longer write to the default home when the Agent HOME differs.
+
 ## [0.6.15] - 2026-11-21
 
 ### Changed

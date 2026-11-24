@@ -7,12 +7,15 @@
  * dist/test/real-app-server-lifecycle.canary.js via node --test.
  *
  * Behavior:
- *  - ZCode 0.16.5 present (default /Applications/ZCode.app path, or
- *    ZCODE_CJS override): session/create + session/read against the
+ *  - ZCODE_CJS names a Gian-built ZCode CLI Runtime entry (App-source
+ *    v3.18.2 at fec9759, CLI 0.17.1: `<runtime>/zcode/agent/zcode.cjs` from
+ *    scripts/build-managed-runtime-candidates.mjs --provider zcode, or an
+ *    installed managed Runtime): session/create + session/read against the
  *    code-generated synthetic config in a throwaway HOME — no session/send,
- *    no provider request, no quota, no user data.
- *  - ZCode binary missing: the canary reports unavailable and SKIPS
- *    (honest not-executed; never a fake PASS).
+ *    no provider request, no quota, no user data, no Keychain access.
+ *  - ZCODE_CJS unset or missing: the canary reports unavailable and SKIPS
+ *    (honest not-executed; never a fake PASS). ZCode.app is not a runtime
+ *    source.
  *
  * Catalog: test/catalog.json specialEntrypoint `zcode-real-app-server-canary`
  * (scope canary; purposes compatibility, regression; sideEffects
@@ -27,8 +30,7 @@ import { fileURLToPath } from 'node:url';
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const packageDir = join(rootDir, 'packages', 'proxies', 'zcode-proxy');
 const canaryPath = join(packageDir, 'dist', 'test', 'real-app-server-lifecycle.canary.js');
-const runtimeBin = process.env.ZCODE_CJS
-  ?? '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+const runtimeBin = process.env.ZCODE_CJS ?? '';
 
 function run(label, command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -53,6 +55,6 @@ if (!existsSync(canaryPath)) {
 
 console.log(
   `[zcode-real-app-server-canary] runtime binary: ${runtimeBin} `
-  + `(${existsSync(runtimeBin) ? 'present' : 'MISSING — the canary will report unavailable and skip'})`,
+  + `(${runtimeBin && existsSync(runtimeBin) ? 'present' : 'MISSING — set ZCODE_CJS; the canary will report unavailable and skip'})`,
 );
 run('canary', process.execPath, ['--test', canaryPath], { cwd: packageDir });

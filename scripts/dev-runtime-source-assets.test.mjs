@@ -69,15 +69,15 @@ function antigravityCoordinate(overrides = {}) {
     runtimeId: 'antigravity-acp',
     version: antigravityRuntimeSource.version,
     format: 'tar.gz',
-    entryRelativePath: 'agy_acp_server.par',
+    entryRelativePath: 'agy',
     probe: { kind: 'proxy' },
-    build: { kind: 'antigravity-pair', sourceSha256: antigravityRuntimeSource.sourceSha256 },
+    build: { kind: 'antigravity-cli', sourceSha256: antigravityRuntimeSource.sourceSha256 },
     asset: { sha256: 'ab'.repeat(32), size: 4 },
     ...overrides,
   };
 }
 
-test('Antigravity source preparation builds the pinned pair and stays fail-closed', async t => {
+test('Antigravity source preparation builds the pinned CLI and stays fail-closed', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agy-source-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const coordinate = antigravityCoordinate();
@@ -85,7 +85,7 @@ test('Antigravity source preparation builds the pinned pair and stays fail-close
   let builds = 0;
   const buildAntigravity = async (output, _work, options) => {
     builds += 1;
-    assert.equal(options.archivePath, '/cache/agy-acp-1.4.5.zip');
+    assert.equal(options.archivePath, '/cache/agy-cli-1.5.16.tar.gz');
     const path = join(output, 'runtime.tar.gz');
     await writeFile(path, bytes);
     return {
@@ -96,7 +96,7 @@ test('Antigravity source preparation builds the pinned pair and stays fail-close
     };
   };
   const options = {
-    root, coordinates: [coordinate], directory: join(root, 'cache'), archivePath: '/cache/agy-acp-1.4.5.zip',
+    root, coordinates: [coordinate], directory: join(root, 'cache'), archivePath: '/cache/agy-cli-1.5.16.tar.gz',
     prepareAssets: async ({ coordinates, download }) => {
       assert.deepEqual(coordinates, [coordinate]);
       assert.deepEqual(await download(coordinate.asset), bytes);
@@ -119,7 +119,7 @@ test('Antigravity source preparation builds the pinned pair and stays fail-close
   await assert.rejects(prepareDevSourceRuntimeAssets({
     ...options,
     coordinates: [antigravityCoordinate({
-      build: { kind: 'antigravity-pair', sourceSha256: 'f'.repeat(64) },
+      build: { kind: 'antigravity-cli', sourceSha256: 'f'.repeat(64) },
     })],
     prepareAssets: async () => { throw new Error('stale Antigravity source must fail before preparation'); },
   }), /pinned Antigravity archive digest/);
@@ -157,12 +157,12 @@ test('the Dev Antigravity coordinate follows the Manifest and publishes no asset
   assert.equal(coordinate.runtimeId, manifest.runtime.id);
   assert.equal(coordinate.version, manifest.runtime.verifiedVersions[0]);
   assert.equal(coordinate.format, 'tar.gz');
-  assert.equal(coordinate.entryRelativePath, 'agy_acp_server.par');
+  assert.equal(coordinate.entryRelativePath, 'agy');
   assert.deepEqual(coordinate.probe, { kind: 'proxy' });
   assert.equal(coordinate.asset.url, undefined);
-  assert.equal(coordinate.build.kind, 'antigravity-pair');
+  assert.equal(coordinate.build.kind, 'antigravity-cli');
   assert.equal(coordinate.build.sourceSha256, antigravityRuntimeSource.sourceSha256);
   assert.equal(Object.hasOwn(coordinate.build, 'sourceUrl'), false);
-  assert.equal(coordinate.asset.sha256, '7c5e7eeac38488aa4a2f635f448a92365424bbc83ce7ab3407d435556b93f034');
-  assert.equal(coordinate.asset.size, 100235809);
+  assert.equal(coordinate.asset.sha256, '42490dbd4ff469c3a651731c37dafb45153c5bb3dcc8f0b8141742d1be322290');
+  assert.equal(coordinate.asset.size, 86463263);
 });

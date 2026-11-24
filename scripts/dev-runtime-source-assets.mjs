@@ -46,7 +46,7 @@ export async function prepareDevSourceRuntimeAssets({
         throw new Error('Dev Runtime source version differs from its Proxy declaration.');
       }
       await acceptBuiltCandidate(directory, coordinate, prepareAssets, (output, work) => build(output, work));
-    } else if (source.kind === 'antigravity-pair') {
+    } else if (source.kind === 'antigravity-cli') {
       if (source.sourceSha256 !== antigravityRuntimeSource.sourceSha256) {
         throw new Error('Dev Runtime source differs from its pinned Antigravity archive digest.');
       }

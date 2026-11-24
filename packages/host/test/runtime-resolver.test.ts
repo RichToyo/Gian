@@ -762,7 +762,7 @@ test('discoverable Proxies project probe facts through the Host fingerprint; man
   for (const [name, version] of [
     ['claude', '2.1.159'],
     ['codex', '0.146.0'],
-    ['kimi', '0.38.0'],
+    ['kimi', '2.7.2'],
     ['grok', '1.0.4'],
     ['dsh', '0.1.1-rc.2'],
   ] as const) {
@@ -771,7 +771,7 @@ test('discoverable Proxies project probe facts through the Host fingerprint; man
   const official = [
     { name: 'claude', discover: discoverClaudeRuntimes, probe: probeClaudeRuntime, verified: '2.1.159', source: 'official-user' },
     { name: 'codex', discover: discoverCodexRuntimes, probe: probeCodexRuntime, verified: '0.146.0', source: 'official-user' },
-    { name: 'kimi', discover: discoverKimiRuntimes, probe: probeKimiRuntime, verified: '0.38.0', source: 'official-user' },
+    { name: 'kimi', discover: discoverKimiRuntimes, probe: probeKimiRuntime, verified: '2.7.2', source: 'official-user' },
     { name: 'grok', discover: discoverGrokRuntimes, probe: probeGrokRuntime, verified: '1.0.4', source: 'official-user' },
     { name: 'dsh', discover: discoverDshRuntimes, probe: probeDshRuntime, verified: '0.1.1-rc.2', source: 'official-user' },
   ];

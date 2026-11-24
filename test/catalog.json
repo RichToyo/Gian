@@ -692,7 +692,7 @@
         "packages/proxies/codex-proxy/test/slash.test.ts",
         "packages/proxies/codex-proxy/test/customization.test.ts",
         "packages/proxies/codex-proxy/test/customization-cli.test.ts",
-        "packages/proxies/codex-proxy/test/task-queue.test.ts"
+        "packages/proxies/codex-proxy/test/notification-gate.test.ts"
       ],
       "module": "codex-proxy",
       "scope": "unit",
@@ -711,7 +711,8 @@
       "id": "codex-proxy-integration",
       "patterns": [
         "packages/proxies/codex-proxy/test/native-history.test.ts",
-        "packages/proxies/codex-proxy/test/proxy-service.test.ts"
+        "packages/proxies/codex-proxy/test/proxy-service.test.ts",
+        "packages/proxies/codex-proxy/test/home.test.ts"
       ],
       "module": "codex-proxy",
       "scope": "integration",
@@ -755,13 +756,10 @@
       "id": "kimi-proxy-unit",
       "patterns": [
         "packages/proxies/kimi-proxy/test/customization.test.ts",
-        "packages/proxies/kimi-proxy/test/adaptive-runtime.test.ts",
         "packages/proxies/kimi-proxy/test/conversation-*.test.ts",
         "packages/proxies/kimi-proxy/test/official-quota.test.ts",
         "packages/proxies/kimi-proxy/test/kimi-errors.test.ts",
-        "packages/proxies/kimi-proxy/test/kimi-server.test.ts",
-        "packages/proxies/kimi-proxy/test/projector.test.ts",
-        "packages/proxies/kimi-proxy/test/task-queue.test.ts"
+        "packages/proxies/kimi-proxy/test/kimi-27.test.ts"
       ],
       "module": "kimi-proxy",
       "scope": "unit",
@@ -869,7 +867,8 @@
         "packages/proxies/grok-proxy/test/customization.test.ts",
         "packages/proxies/grok-proxy/test/fork-capabilities.test.ts",
         "packages/proxies/grok-proxy/test/grok-extensions.test.ts",
-        "packages/proxies/grok-proxy/test/grok-home-mapping.test.ts"
+        "packages/proxies/grok-proxy/test/grok-home-mapping.test.ts",
+        "packages/proxies/grok-proxy/test/runtime-lifecycle.test.ts"
       ],
       "module": "grok-proxy",
       "scope": "unit",
@@ -890,7 +889,8 @@
         "packages/proxies/grok-proxy/test/service.test.ts",
         "packages/proxies/grok-proxy/test/interactions.test.ts",
         "packages/proxies/grok-proxy/test/mcp-isolation.test.ts",
-        "packages/proxies/grok-proxy/test/native-fork.test.ts"
+        "packages/proxies/grok-proxy/test/native-fork.test.ts",
+        "packages/proxies/grok-proxy/test/discover.test.ts"
       ],
       "module": "grok-proxy",
       "scope": "integration",
@@ -981,7 +981,8 @@
         "scripts/delivery-policy.test.mjs",
         "scripts/fixture-atomic-json.test.mjs",
         "scripts/node-entitlements.test.mjs",
-        "scripts/quality-lock.test.mjs"
+        "scripts/quality-lock.test.mjs",
+        "scripts/build-zcode-runtime.test.mjs"
       ],
       "module": "scripts",
       "scope": "integration",
@@ -1125,7 +1126,8 @@
         "packages/proxies/dsh-proxy/test/idempotency-replay.test.ts",
         "packages/proxies/dsh-proxy/test/customization.test.ts",
         "packages/proxies/dsh-proxy/test/capabilities.test.ts",
-        "packages/proxies/dsh-proxy/test/sidechat.test.ts"
+        "packages/proxies/dsh-proxy/test/sidechat.test.ts",
+        "packages/proxies/dsh-proxy/test/errors.test.ts"
       ],
       "module": "dsh-proxy",
       "scope": "unit",
@@ -1144,7 +1146,10 @@
     {
       "id": "dsh-proxy-system",
       "patterns": [
-        "packages/proxies/dsh-proxy/test/protocol-v2-cli.test.ts"
+        "packages/proxies/dsh-proxy/test/protocol-v2-cli.test.ts",
+        "packages/proxies/dsh-proxy/test/bridge-client.test.ts",
+        "packages/proxies/dsh-proxy/test/concurrency.test.ts",
+        "packages/proxies/dsh-proxy/test/launch-env.test.ts"
       ],
       "module": "dsh-proxy",
       "scope": "system",
@@ -1153,6 +1158,7 @@
         "contract"
       ],
       "sideEffects": [
+        "temporary-filesystem",
         "child-process",
         "fake-provider"
       ],
@@ -1171,7 +1177,8 @@
         "packages/proxies/zcode-proxy/test/lifecycle.test.ts",
         "packages/proxies/zcode-proxy/test/runtime-discover.test.ts",
         "packages/proxies/zcode-proxy/test/transport.test.ts",
-        "packages/proxies/zcode-proxy/test/validator.test.ts"
+        "packages/proxies/zcode-proxy/test/validator.test.ts",
+        "packages/proxies/zcode-proxy/test/overhaul.test.ts"
       ],
       "module": "zcode-proxy",
       "scope": "unit",

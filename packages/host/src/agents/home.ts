@@ -80,6 +80,28 @@ export function providerRuntimeEnvironment(
   }
 }
 
+/**
+ * Environment for a terminal that runs the Agent's CLI directly (login or an
+ * Agent CLI shell). No Proxy sits in between to map GIAN_AGENT_HOME, so each
+ * CLI also gets its own native home variable here. Proxy spawns keep using
+ * providerRuntimeEnvironment and map GIAN_AGENT_HOME themselves.
+ */
+export function agentTerminalEnvironment(
+  pluginId: ProxyPluginId,
+  home: string,
+): Readonly<Record<string, string>> {
+  const runtime = providerRuntimeEnvironment(pluginId, home);
+  switch (executorIdForPluginId(pluginId)) {
+    case 'codex': return { ...runtime, CODEX_HOME: home };
+    case 'kimi': return { ...runtime, KIMI_CODE_HOME: home };
+    case 'dsh': return { ...runtime, DSH_HOME: home };
+    // Without this, `grok login` wrote ~/.grok while sessions used the Agent home.
+    case 'grok': return { ...runtime, GROK_HOME: home };
+    // claude (CLAUDE_CONFIG_DIR) and zcode (HOME) are already in the runtime env.
+    default: return runtime;
+  }
+}
+
 /** Only Host-owned, fixed argv may start an Agent login terminal. */
 export function agentLoginArgs(pluginId: ProxyPluginId): string[] | null {
   switch (executorIdForPluginId(pluginId)) {
