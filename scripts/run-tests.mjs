@@ -118,9 +118,20 @@ export function scriptsNeedProxyCatalogContract(paths) {
   return paths.includes('scripts/catalog-release.test.mjs');
 }
 
+// Proxy packages compile against @gian/proxy-kit's built entry. Their own
+// build does not rebuild it: in a parallel multi-package build, one Proxy's
+// clean rebuild of the kit would delete it while another Proxy compiles.
+let proxyKitBuilt = false;
+function ensureProxyKitBuilt(env) {
+  if (proxyKitBuilt) return;
+  runPnpm(['--filter', '@gian/proxy-kit', 'build'], env);
+  proxyKitBuilt = true;
+}
+
 function runBuiltPackageTests(entries, runner, packageName, packageRoot, env, extraArgs = []) {
   const paths = entriesForRunner(entries, runner);
   if (paths.length === 0) return;
+  if (packageRoot.includes(`${join('packages', 'proxies')}`)) ensureProxyKitBuilt(env);
   runPnpm(['--filter', packageName, 'build'], env);
   const plan = builtPackageTestPlan(paths, packageRoot);
   runNodeTests(
@@ -158,7 +169,7 @@ function executeSelected(selected, options, env) {
     runPnpm(['--filter', '@gian/proxy-protocol', 'build'], env);
   }
   // Proxy bundles resolve @gian/proxy-kit from its built entry.
-  if (scriptsNeedProxyProtocol(scriptPaths)) runPnpm(['--filter', '@gian/proxy-kit', 'build'], env);
+  if (scriptsNeedProxyProtocol(scriptPaths)) ensureProxyKitBuilt(env);
   if (scriptsNeedProxyCatalogContract(scriptPaths)) {
     runPnpm(['--filter', '@gian/proxy-catalog-contract', 'build'], env);
   }
@@ -253,7 +264,7 @@ function executeSelected(selected, options, env) {
   // Kit tests are source .mjs files that import the built kit.
   const kitPaths = entriesForRunner(selected, 'proxy-kit-node');
   if (kitPaths.length > 0) {
-    runPnpm(['--filter', '@gian/proxy-kit', 'build'], env);
+    ensureProxyKitBuilt(env);
     runNodeTests(kitPaths, env);
   }
   runBuiltPackageTests(
@@ -350,6 +361,7 @@ function executeSelected(selected, options, env) {
     hostPaths.length > 0
     && !compiledProxyRunners.every(runner => selected.some(entry => entry.runner === runner))
   ) {
+    ensureProxyKitBuilt(env);
     runPnpm(['--filter', './packages/proxies/**', 'build'], env);
   }
   runNodeTests(
